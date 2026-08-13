@@ -1,6 +1,6 @@
 "use client";
 
-// Fee schedule upload — v6
+// Fee schedule upload — v7
 // Changelog:
 //   v1  Office + target schedule dropdowns, CSV drop zone, row count, gated Continue.
 //   v2  Added "Create a new schedule" option with a free-text name field.
@@ -11,9 +11,12 @@
 //       then navigates to /review/<id>.
 //   v6  Sends the target schedule's name alongside its number, so the review
 //       screen can identify it by name rather than by internal ID.
+//   v7  Header link through to /uploads, so past staged files are reachable
+//       without keeping their URL.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import type { DragEvent } from "react";
 import { createClient } from "../lib/supabase/client";
 
@@ -301,18 +304,27 @@ export default function UploadPage() {
             </h1>
           </div>
 
-          {email !== "" && (
-            <div className="hidden text-right sm:block">
-              <p className="text-sm text-[#5C5C57]">{email}</p>
-              <button
-                type="button"
-                onClick={signOut}
-                className="mt-1 rounded text-sm font-medium text-[#0F6E56] underline-offset-2 hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
-              >
-                Sign out
-              </button>
-            </div>
-          )}
+          <div className="flex flex-col items-end gap-1 text-right">
+            <Link
+              href="/uploads"
+              className="rounded text-sm font-medium text-[#0F6E56] underline-offset-2 hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+            >
+              Staged uploads
+            </Link>
+
+            {email !== "" && (
+              <>
+                <p className="hidden text-sm text-[#5C5C57] sm:block">{email}</p>
+                <button
+                  type="button"
+                  onClick={signOut}
+                  className="hidden rounded text-sm font-medium text-[#0F6E56] underline-offset-2 hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none sm:block"
+                >
+                  Sign out
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-[#5C5C57]">

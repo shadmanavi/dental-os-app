@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v4
+// Chairside charting — v5
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -44,6 +44,20 @@
 //       - The date is computed in local time. The rest of this file used
 //         toISOString(), which is UTC, and would have rolled the schedule
 //         over to tomorrow every afternoon in California.
+//
+//   v5  Two things the office asked for after using v4.
+//
+//       - Search takes a date of birth or a patient number, not just a
+//         surname. Today's schedule alone held two Mendozas and two
+//         Chavezes, so a surname is often not enough to be sure. One
+//         box still: digits are read as a patient number, a date as a
+//         birthdate, anything else as a surname. The server decides,
+//         so the rule lives in one place rather than two.
+//
+//       - Providers appear by name. The schedule carried only ProvNum,
+//         so a row could say no more than "GP - YK". od-chart v5 joins
+//         the provider table, and each row now names the dentist, or
+//         the hygienist on a hygiene appointment.
 //
 // Design notes:
 //   - Dark, high-contrast, large targets. The user is standing, gloved,
@@ -153,7 +167,11 @@ type Appointment = {
   operatory_abbr: string;
   operatory_hidden: boolean;
   prov_num: number;
+  prov_abbr: string;
+  prov_name: string;
   prov_hyg: number;
+  hyg_abbr: string;
+  hyg_name: string;
   is_hygiene: boolean;
   procedures: string;
   last_name: string;
@@ -217,6 +235,20 @@ function clockLabel(time: string): string {
   const suffix = hour >= 12 ? "PM" : "AM";
   const h12 = hour % 12 === 0 ? 12 : hour % 12;
   return `${h12}:${minute} ${suffix}`;
+}
+
+// Who the patient is actually seeing. On a hygiene appointment that is
+// the hygienist, otherwise the dentist. Falls back to initials when a
+// provider has no name recorded, and to nothing at all rather than
+// printing an empty separator.
+function whoIsSeeingThem(appt: Appointment): string {
+  if (appt.is_hygiene) {
+    const hygienist = appt.hyg_name || appt.hyg_abbr;
+    if (hygienist !== "") return `${hygienist} · hygiene`;
+    return "hygiene";
+  }
+
+  return appt.prov_name || appt.prov_abbr || "";
 }
 
 // OpenDental's own rejection text arrives in `detail`. Without it the
@@ -463,7 +495,18 @@ export default function ChartPage() {
   // -------------------------------------------------------------------
   async function runSearch() {
     const q = query.trim();
-    if (q.length < 2) {
+
+    // Digits are a patient number and a single one is legitimate, so the
+    // two-letter minimum only applies to names. The server does the real
+    // interpreting; this is just to avoid a pointless round trip.
+    const looksNumeric = /^\d+$/.test(q);
+
+    if (q === "") {
+      setSearchError("Type a surname, a date of birth, or a patient number.");
+      return;
+    }
+
+    if (!looksNumeric && q.length < 2) {
       setSearchError("Type at least two letters of the last name.");
       return;
     }
@@ -475,8 +518,12 @@ export default function ChartPage() {
     try {
       const data = await callChart({ action: "patients", query: q });
       setHits(data.patients ?? []);
+
       if ((data.patients ?? []).length === 0) {
-        setSearchError("No patients matched that name.");
+        // Saying which reading was used makes a wrong guess obvious:
+        // a mistyped date searched as a surname explains itself.
+        const by = String(data.searched_by ?? "that");
+        setSearchError(`No patients matched by ${by}.`);
       }
     } catch (caught) {
       setSearchError(caught instanceof Error ? caught.message : "Search failed.");
@@ -891,7 +938,7 @@ export default function ChartPage() {
                         </span>
                         <span className="block truncate font-mono text-[11.5px] text-[#8AA6AB]">
                           {appt.operatory_abbr || appt.operatory_name || `Op ${appt.operatory_num}`}
-                          {appt.is_hygiene ? " · hygiene" : ""}
+                          {whoIsSeeingThem(appt) !== "" ? ` · ${whoIsSeeingThem(appt)}` : ""}
                           {appt.procedures !== "" ? ` · ${appt.procedures}` : ""}
                         </span>
                       </span>
@@ -935,7 +982,7 @@ export default function ChartPage() {
                   onKeyDown={(e) => {
                     if (e.key === "Enter") runSearch();
                   }}
-                  placeholder="Last name"
+                  placeholder="Last name, date of birth, or patient number"
                   autoComplete="off"
                   className="flex-1 rounded-xl border border-[#2C4E54] bg-[#122326] px-4 py-4 text-lg text-[#EDF3F1] placeholder:text-[#5E7B80] focus:border-[#F0A93B] focus:outline-none"
                 />
@@ -948,6 +995,11 @@ export default function ChartPage() {
                   {searching ? "…" : "Search"}
                 </button>
               </div>
+
+              <p className="mt-2.5 text-[12.5px] text-[#5E7B80]">
+                Digits are read as a patient number, 7/2/1984 or 1984-07-02
+                as a date of birth, anything else as a last name.
+              </p>
 
               {searchError !== "" && (
                 <p className="mt-4 text-sm text-[#E4674F]">{searchError}</p>

@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v3
+// Chairside charting — v4
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -18,6 +18,32 @@
 //       DELETE a row at EO, so those rows cannot be undone from here. The
 //       undo button is hidden on them and the row says so, rather than
 //       offering an action that always fails.
+//   v4  Adds a Today tab to the patient picker. Typing a surname was the
+//       only way in, which is the wrong gesture for someone already
+//       standing at the chair with the patient in front of them. Today
+//       lists the day's appointments and one tap opens the chart.
+//
+//       Nothing downstream changed. A row calls the same openPatient()
+//       the search results already called.
+//
+//       Four things about the data shaped this screen, all settled by
+//       probing the live Downey database rather than assumed:
+//
+//       - The day arrives in one call. od-chart's schedule action reads
+//         appointment joined to patient and operatory in a single
+//         statement. The obvious alternative, one patient lookup per
+//         row, took 6.7 seconds for 31 rows because OpenDental serves
+//         those sequentially however they are fired.
+//       - Broken appointments are greyed and unopenable. That status is
+//         confirmed; the rest of OpenDental's status list is not, so
+//         everything else stays tappable rather than being disabled on a
+//         guess.
+//       - Checked in, in the chair, and dismissed are derived from the
+//         arrival, seating and dismissal timestamps rather than from the
+//         status, which does not carry them.
+//       - The date is computed in local time. The rest of this file used
+//         toISOString(), which is UTC, and would have rolled the schedule
+//         over to tomorrow every afternoon in California.
 //
 // Design notes:
 //   - Dark, high-contrast, large targets. The user is standing, gloved,
@@ -108,6 +134,43 @@ type LedgerEntry = {
 
 type Bucket = "existing" | "diagnosed";
 
+// One row of the day. Shaped by the Edge Function so this file never
+// has to know that AptStatus is an integer or that an unset timestamp
+// arrives as midnight.
+type Appointment = {
+  apt_num: number;
+  pat_num: number;
+  time: string;
+  apt_datetime: string;
+  duration_minutes: number;
+  status: string;
+  status_num: number;
+  status_verified: boolean;
+  openable: boolean;
+  presence: "not_arrived" | "checked_in" | "in_chair" | "dismissed";
+  operatory_num: number;
+  operatory_name: string;
+  operatory_abbr: string;
+  operatory_hidden: boolean;
+  prov_num: number;
+  prov_hyg: number;
+  is_hygiene: boolean;
+  procedures: string;
+  last_name: string;
+  first_name: string;
+  preferred_name: string;
+  display_name: string;
+};
+
+type OperatoryChip = {
+  num: number;
+  name: string;
+  abbr: string;
+  count: number;
+};
+
+type PickerTab = "today" | "search";
+
 // ---------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------
@@ -116,6 +179,45 @@ const LOWER = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17];
 const SURFACES = ["M", "O", "D", "B", "L"];
 
 const EXISTING_STATUSES = new Set(["C", "EC", "EO", "Cn"]);
+
+// AptStatus 5. The one status confirmed against live data as a row that
+// must not be opened.
+const BROKEN = 5;
+
+// Local time, not UTC. toISOString() would roll the schedule to tomorrow
+// from mid-afternoon onwards in California.
+function localISODate(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function shiftISODate(iso: string, days: number): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, d ?? 1);
+  date.setDate(date.getDate() + days);
+  return localISODate(date);
+}
+
+function humanDate(iso: string): string {
+  const [y, m, d] = iso.split("-").map(Number);
+  const date = new Date(y, (m ?? 1) - 1, d ?? 1);
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+}
+
+function clockLabel(time: string): string {
+  const [hRaw, minute] = time.split(":");
+  const hour = Number(hRaw);
+  if (!Number.isFinite(hour)) return time;
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const h12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${h12}:${minute} ${suffix}`;
+}
 
 // OpenDental's own rejection text arrives in `detail`. Without it the
 // user is told only that something failed, which is what v1 did.
@@ -140,6 +242,43 @@ function describeFailure(payload: unknown): string {
   return parts.length > 0 ? parts.join(" — ") : "That didn't work.";
 }
 
+// The pill on the right of a schedule row. Broken wins over presence,
+// because a broken appointment nobody arrived for is still broken.
+function statusPill(appt: Appointment): { label: string; className: string } {
+  if (appt.status_num === BROKEN) {
+    return {
+      label: "Broken",
+      className: "border-[#E4674F]/45 bg-[#E4674F]/12 text-[#E4674F]",
+    };
+  }
+
+  if (appt.presence === "in_chair") {
+    return {
+      label: "In chair",
+      className: "border-[#F0A93B] bg-[#F0A93B] text-[#0B1719]",
+    };
+  }
+
+  if (appt.presence === "checked_in") {
+    return {
+      label: "Checked in",
+      className: "border-[#79B4C4]/50 bg-[#79B4C4]/15 text-[#79B4C4]",
+    };
+  }
+
+  if (appt.presence === "dismissed") {
+    return {
+      label: "Dismissed",
+      className: "border-[#2C4E54] bg-transparent text-[#5E7B80]",
+    };
+  }
+
+  return {
+    label: appt.status,
+    className: "border-[#2C4E54] bg-transparent text-[#8AA6AB]",
+  };
+}
+
 // ---------------------------------------------------------------------
 export default function ChartPage() {
   const router = useRouter();
@@ -147,6 +286,15 @@ export default function ChartPage() {
   const [offices, setOffices] = useState<Office[]>([]);
   const [officeSlug, setOfficeSlug] = useState("");
   const [booting, setBooting] = useState(true);
+
+  const [pickerTab, setPickerTab] = useState<PickerTab>("today");
+
+  const [scheduleDate, setScheduleDate] = useState(() => localISODate(new Date()));
+  const [appointments, setAppointments] = useState<Appointment[]>([]);
+  const [operatories, setOperatories] = useState<OperatoryChip[]>([]);
+  const [opFilter, setOpFilter] = useState<number | null>(null);
+  const [scheduleLoading, setScheduleLoading] = useState(false);
+  const [scheduleError, setScheduleError] = useState("");
 
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<PatientHit[]>([]);
@@ -255,6 +403,62 @@ export default function ChartPage() {
   );
 
   // -------------------------------------------------------------------
+  // Today's schedule
+  //
+  // One call returns the whole day already shaped. The date is always
+  // sent explicitly so the server never has to guess the timezone.
+  // -------------------------------------------------------------------
+  const loadSchedule = useCallback(
+    async (date: string) => {
+      if (officeSlug === "") return;
+
+      setScheduleLoading(true);
+      setScheduleError("");
+
+      try {
+        const data = await callChart({ action: "schedule", date });
+        setAppointments(data.appointments ?? []);
+        setOperatories(data.operatories ?? []);
+      } catch (caught) {
+        setAppointments([]);
+        setOperatories([]);
+        setScheduleError(
+          caught instanceof Error ? caught.message : "Couldn't load the schedule.",
+        );
+      } finally {
+        setScheduleLoading(false);
+      }
+    },
+    [callChart, officeSlug],
+  );
+
+  // Reload whenever the office or the day changes, but only while the
+  // picker is actually on screen.
+  useEffect(() => {
+    if (patient !== null) return;
+    if (pickerTab !== "today") return;
+    if (officeSlug === "") return;
+
+    setOpFilter(null);
+    loadSchedule(scheduleDate);
+  }, [officeSlug, scheduleDate, pickerTab, patient, loadSchedule]);
+
+  const visibleAppointments = useMemo(
+    () =>
+      opFilter === null
+        ? appointments
+        : appointments.filter((a) => a.operatory_num === opFilter),
+    [appointments, opFilter],
+  );
+
+  const brokenCount = useMemo(
+    () => visibleAppointments.filter((a) => a.status_num === BROKEN).length,
+    [visibleAppointments],
+  );
+
+  const isToday = scheduleDate === localISODate(new Date());
+
+  // -------------------------------------------------------------------
   // Patient search
   // -------------------------------------------------------------------
   async function runSearch() {
@@ -316,7 +520,9 @@ export default function ChartPage() {
     setLedger([]);
     setTooth("");
     resetNav();
-    setTimeout(() => searchRef.current?.focus(), 50);
+    if (pickerTab === "search") {
+      setTimeout(() => searchRef.current?.focus(), 50);
+    }
   }
 
   function resetNav() {
@@ -491,18 +697,38 @@ export default function ChartPage() {
     );
   }
 
-  // ---------- patient search ----------
+  // ---------- patient picker ----------
   if (patient === null) {
     return (
       <main className="min-h-screen bg-[#0B1719] px-6 py-10 text-[#EDF3F1]">
-        <div className="mx-auto w-full max-w-2xl">
+        <div className="mx-auto w-full max-w-3xl">
           <p className="font-mono text-xs tracking-[0.18em] text-[#F0A93B] uppercase">
             Chairside · Charting
           </p>
-          <h1 className="mt-3 text-3xl font-semibold tracking-tight">Find a patient</h1>
+          <h1 className="mt-3 text-3xl font-semibold tracking-tight">
+            {pickerTab === "today" ? "Today's schedule" : "Find a patient"}
+          </h1>
 
+          {/* Tabs + office */}
           <div className="mt-6 flex flex-wrap items-center gap-3">
-            <label htmlFor="office" className="text-sm text-[#8AA6AB]">
+            <div className="flex overflow-hidden rounded-xl border border-[#2C4E54]">
+              {(["today", "search"] as PickerTab[]).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setPickerTab(tab)}
+                  className={`px-5 py-2.5 text-sm font-semibold transition-colors ${
+                    pickerTab === tab
+                      ? "bg-[#EDF3F1] text-[#0B1719]"
+                      : "bg-[#122326] text-[#8AA6AB] hover:text-[#EDF3F1]"
+                  }`}
+                >
+                  {tab === "today" ? "Today" : "Search"}
+                </button>
+              ))}
+            </div>
+
+            <label htmlFor="office" className="ml-auto text-sm text-[#8AA6AB]">
               Office
             </label>
             <select
@@ -519,55 +745,235 @@ export default function ChartPage() {
             </select>
           </div>
 
-          <div className="mt-4 flex gap-3">
-            <input
-              ref={searchRef}
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") runSearch();
-              }}
-              placeholder="Last name"
-              autoComplete="off"
-              className="flex-1 rounded-xl border border-[#2C4E54] bg-[#122326] px-4 py-4 text-lg text-[#EDF3F1] placeholder:text-[#5E7B80] focus:border-[#F0A93B] focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={runSearch}
-              disabled={searching}
-              className="rounded-xl bg-[#EDF3F1] px-7 py-4 text-lg font-semibold text-[#0B1719] disabled:opacity-40"
-            >
-              {searching ? "…" : "Search"}
-            </button>
-          </div>
-
-          {searchError !== "" && (
-            <p className="mt-4 text-sm text-[#E4674F]">{searchError}</p>
-          )}
           {loadError !== "" && (
             <p className="mt-4 text-sm text-[#E4674F]">{loadError}</p>
           )}
 
-          <div className="mt-6 space-y-2">
-            {hits.map((h) => (
-              <button
-                key={h.PatNum}
-                type="button"
-                onClick={() => openPatient(h.PatNum)}
-                disabled={loadingPatient}
-                className="flex w-full items-center gap-4 rounded-xl border border-[#2C4E54] bg-[#122326] px-5 py-4 text-left hover:bg-[#193034] disabled:opacity-50"
-              >
-                <span className="text-[17px] font-semibold">
-                  {h.LName}, {h.Preferred || h.FName}
+          {/* ---------------- Today ---------------- */}
+          {pickerTab === "today" ? (
+            <>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setScheduleDate(shiftISODate(scheduleDate, -1))}
+                  className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-2 text-sm text-[#8AA6AB] hover:text-[#EDF3F1]"
+                  aria-label="Previous day"
+                >
+                  ‹
+                </button>
+
+                <span className="min-w-[9rem] text-center text-[15px] font-semibold">
+                  {isToday ? "Today" : humanDate(scheduleDate)}
                 </span>
-                <span className="ml-auto font-mono text-sm text-[#8AA6AB]">
-                  {h.Birthdate || "—"}
-                </span>
-                <span className="font-mono text-xs text-[#5E7B80]">#{h.ChartNumber}</span>
-              </button>
-            ))}
-          </div>
+
+                <button
+                  type="button"
+                  onClick={() => setScheduleDate(shiftISODate(scheduleDate, 1))}
+                  className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-2 text-sm text-[#8AA6AB] hover:text-[#EDF3F1]"
+                  aria-label="Next day"
+                >
+                  ›
+                </button>
+
+                {!isToday && (
+                  <button
+                    type="button"
+                    onClick={() => setScheduleDate(localISODate(new Date()))}
+                    className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-2 text-xs text-[#8AA6AB] hover:text-[#EDF3F1]"
+                  >
+                    Jump to today
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => loadSchedule(scheduleDate)}
+                  disabled={scheduleLoading}
+                  className="ml-auto rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-2 text-sm text-[#8AA6AB] hover:text-[#EDF3F1] disabled:opacity-40"
+                  aria-label="Refresh"
+                >
+                  {scheduleLoading ? "…" : "⟳"}
+                </button>
+              </div>
+
+              {/* Operatory chips — only the ones carrying appointments */}
+              {operatories.length > 1 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOpFilter(null)}
+                    className={`rounded-full border px-3.5 py-1.5 text-xs font-semibold ${
+                      opFilter === null
+                        ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                        : "border-[#2C4E54] bg-[#122326] text-[#8AA6AB] hover:text-[#EDF3F1]"
+                    }`}
+                  >
+                    All · {appointments.length}
+                  </button>
+
+                  {operatories.map((op) => (
+                    <button
+                      key={op.num}
+                      type="button"
+                      onClick={() => setOpFilter(opFilter === op.num ? null : op.num)}
+                      title={op.name}
+                      className={`rounded-full border px-3.5 py-1.5 text-xs font-semibold ${
+                        opFilter === op.num
+                          ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                          : "border-[#2C4E54] bg-[#122326] text-[#8AA6AB] hover:text-[#EDF3F1]"
+                      }`}
+                    >
+                      {op.abbr || op.name || `Op ${op.num}`} · {op.count}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {scheduleError !== "" && (
+                <p className="mt-4 text-sm text-[#E4674F]">{scheduleError}</p>
+              )}
+
+              <div className="mt-4 space-y-2">
+                {scheduleLoading && appointments.length === 0 && (
+                  <p className="py-8 text-center text-sm text-[#8AA6AB]">
+                    Loading the day…
+                  </p>
+                )}
+
+                {!scheduleLoading &&
+                  scheduleError === "" &&
+                  visibleAppointments.length === 0 && (
+                    <div className="flex flex-col items-center gap-2 rounded-2xl border border-[#2C4E54] bg-[#122326] p-10 text-center">
+                      <strong className="text-[15px] font-medium">
+                        Nothing on the schedule
+                      </strong>
+                      <span className="max-w-[32ch] text-[13px] text-[#8AA6AB]">
+                        No appointments for this day. Try another date, or search
+                        by name.
+                      </span>
+                    </div>
+                  )}
+
+                {visibleAppointments.map((appt) => {
+                  const pill = statusPill(appt);
+                  const name = appt.preferred_name !== ""
+                    ? `${appt.last_name}, ${appt.preferred_name}`
+                    : appt.display_name;
+
+                  return (
+                    <button
+                      key={appt.apt_num}
+                      type="button"
+                      disabled={!appt.openable || loadingPatient}
+                      onClick={() => openPatient(appt.pat_num)}
+                      className={`flex w-full items-center gap-4 rounded-xl border px-5 py-3.5 text-left transition-colors ${
+                        appt.openable
+                          ? "border-[#2C4E54] bg-[#122326] hover:bg-[#193034]"
+                          : "cursor-not-allowed border-[#2C4E54]/60 bg-[#0F1D20] opacity-55"
+                      } ${
+                        appt.presence === "in_chair" && appt.status_num !== BROKEN
+                          ? "border-[#F0A93B]/60"
+                          : ""
+                      } disabled:opacity-55`}
+                    >
+                      <span className="w-[5.5rem] flex-none">
+                        <span className="block font-mono text-[15px] font-semibold">
+                          {clockLabel(appt.time)}
+                        </span>
+                        <span className="block font-mono text-[11px] text-[#5E7B80]">
+                          {appt.duration_minutes} min
+                        </span>
+                      </span>
+
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[17px] font-semibold">
+                          {name}
+                        </span>
+                        <span className="block truncate font-mono text-[11.5px] text-[#8AA6AB]">
+                          {appt.operatory_abbr || appt.operatory_name || `Op ${appt.operatory_num}`}
+                          {appt.is_hygiene ? " · hygiene" : ""}
+                          {appt.procedures !== "" ? ` · ${appt.procedures}` : ""}
+                        </span>
+                      </span>
+
+                      <span
+                        className={`flex-none rounded-full border px-3 py-1 text-[11px] font-semibold ${pill.className}`}
+                      >
+                        {pill.label}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {visibleAppointments.length > 0 && (
+                <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-[#5E7B80]">
+                  <span className="font-mono">
+                    {visibleAppointments.length}{" "}
+                    {visibleAppointments.length === 1 ? "appointment" : "appointments"}
+                    {brokenCount > 0 ? ` · ${brokenCount} broken` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setPickerTab("search")}
+                    className="ml-auto text-[#8AA6AB] underline underline-offset-4 hover:text-[#EDF3F1]"
+                  >
+                    Search by name instead
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            /* ---------------- Search ---------------- */
+            <>
+              <div className="mt-4 flex gap-3">
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") runSearch();
+                  }}
+                  placeholder="Last name"
+                  autoComplete="off"
+                  className="flex-1 rounded-xl border border-[#2C4E54] bg-[#122326] px-4 py-4 text-lg text-[#EDF3F1] placeholder:text-[#5E7B80] focus:border-[#F0A93B] focus:outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={runSearch}
+                  disabled={searching}
+                  className="rounded-xl bg-[#EDF3F1] px-7 py-4 text-lg font-semibold text-[#0B1719] disabled:opacity-40"
+                >
+                  {searching ? "…" : "Search"}
+                </button>
+              </div>
+
+              {searchError !== "" && (
+                <p className="mt-4 text-sm text-[#E4674F]">{searchError}</p>
+              )}
+
+              <div className="mt-6 space-y-2">
+                {hits.map((h) => (
+                  <button
+                    key={h.PatNum}
+                    type="button"
+                    onClick={() => openPatient(h.PatNum)}
+                    disabled={loadingPatient}
+                    className="flex w-full items-center gap-4 rounded-xl border border-[#2C4E54] bg-[#122326] px-5 py-4 text-left hover:bg-[#193034] disabled:opacity-50"
+                  >
+                    <span className="text-[17px] font-semibold">
+                      {h.LName}, {h.Preferred || h.FName}
+                    </span>
+                    <span className="ml-auto font-mono text-sm text-[#8AA6AB]">
+                      {h.Birthdate || "—"}
+                    </span>
+                    <span className="font-mono text-xs text-[#5E7B80]">#{h.ChartNumber}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </main>
     );

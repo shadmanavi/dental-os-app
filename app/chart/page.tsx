@@ -218,14 +218,36 @@ function shiftISODate(iso: string, days: number): string {
   return localISODate(date);
 }
 
+// The office reads and writes MM/DD/YYYY, which is what OpenDental
+// shows in its own Select Patient window, so that is what this screen
+// shows too. Values arrive from OpenDental as ISO and sometimes carry a
+// time; only the date part is wanted.
+function usDate(value: string): string {
+  const raw = String(value ?? "").trim();
+  if (raw === "") return "";
+
+  const datePart = raw.includes("T") ? raw.split("T")[0] : raw.split(" ")[0];
+  const iso = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+
+  // Anything that is not the ISO form is passed through untouched
+  // rather than mangled — an unrecognised date is better shown as it
+  // came than silently rewritten.
+  if (!iso) return raw;
+
+  const [, y, m, d] = iso;
+
+  // OpenDental writes 0001-01-01 for "no date". Showing that as
+  // 01/01/0001 would look like real data.
+  if (y === "0001") return "";
+
+  return `${m}/${d}/${y}`;
+}
+
 function humanDate(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(y, (m ?? 1) - 1, d ?? 1);
-  return date.toLocaleDateString(undefined, {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-  });
+  const weekday = date.toLocaleDateString(undefined, { weekday: "short" });
+  return `${weekday} ${usDate(iso)}`;
 }
 
 function clockLabel(time: string): string {
@@ -997,8 +1019,8 @@ export default function ChartPage() {
               </div>
 
               <p className="mt-2.5 text-[12.5px] text-[#5E7B80]">
-                Digits are read as a patient number, 7/2/1984 or 1984-07-02
-                as a date of birth, anything else as a last name.
+                Digits are read as a patient number, 08/08/1982 as a date of
+                birth, anything else as a last name. Dashes work too.
               </p>
 
               {searchError !== "" && (
@@ -1018,7 +1040,7 @@ export default function ChartPage() {
                       {h.LName}, {h.Preferred || h.FName}
                     </span>
                     <span className="ml-auto font-mono text-sm text-[#8AA6AB]">
-                      {h.Birthdate || "—"}
+                      {usDate(h.Birthdate) || "—"}
                     </span>
                     <span className="font-mono text-xs text-[#5E7B80]">#{h.ChartNumber}</span>
                   </button>
@@ -1044,7 +1066,7 @@ export default function ChartPage() {
               {patient.LName}, {patient.Preferred || patient.FName}
             </h1>
             <p className="font-mono text-xs text-[#8AA6AB]">
-              #{patient.ChartNumber} · {patient.Birthdate}
+              #{patient.ChartNumber} · {usDate(patient.Birthdate)}
             </p>
           </div>
 

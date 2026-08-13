@@ -36,6 +36,7 @@
 //     used occasionally and correctness matters more than flourish.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
@@ -1484,7 +1485,7 @@ function TileEditor(props: {
 // =====================================================================
 // Small pieces
 // =====================================================================
-function Field(props: { label: string; hint: string; children: unknown }) {
+function Field(props: { label: string; hint: string; children: ReactNode }) {
   return (
     <div>
       <span className="block text-[12px] font-semibold tracking-[0.04em] text-[#EDF3F1] uppercase">

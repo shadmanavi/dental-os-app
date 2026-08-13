@@ -1,6 +1,6 @@
 "use client";
 
-// Home — v2
+// Home — v3
 // The landing page. One tile per tool. Tools that aren't built yet render
 // greyed and unclickable rather than being hidden, so the shape of the
 // product is visible from the front door.
@@ -13,6 +13,7 @@
 //   v2  Dropped the Staged uploads tile. Staged uploads is part of the fee
 //       schedule upload tool, not a tool of its own, and it is already one
 //       click away in the section sub-nav.
+//   v3  Charting is built; its tile is live rather than 'coming soon'.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -41,8 +42,8 @@ const TOOLS: Tool[] = [
     eyebrow: "Chairside",
     title: "Charting",
     blurb:
-      "Tap through categories to record existing conditions and diagnosed treatment from the operatory.",
-    ready: false,
+      "Tap through categories to record existing conditions and diagnosed treatment from the operatory. Writes straight to OpenDental.",
+    ready: true,
   },
 ];
 

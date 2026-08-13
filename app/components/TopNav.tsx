@@ -1,6 +1,6 @@
 "use client";
 
-// Top navigation — v1
+// Top navigation — v2
 // The one navigation bar for Dental OS. Rendered once in the root layout, so
 // every page gets it without owning a header of its own.
 //
@@ -16,6 +16,7 @@
 //
 // Changelog:
 //   v1  Sections, sub-nav, session email, sign out.
+//   v2  Charting is built, so its section is live rather than greyed.
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
@@ -48,8 +49,7 @@ const SECTIONS: Section[] = [
   {
     href: "/chart",
     label: "Charting",
-    ready: false,
-    note: "Coming soon",
+    ready: true,
   },
 ];
 

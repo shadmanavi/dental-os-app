@@ -1,6 +1,6 @@
 "use client";
 
-// Fee schedule review — v3
+// Fee schedule review — v4
 // Reads one staged fee_schedules record and its fee_schedule_items, and
 // shows what would change. Row checkboxes toggle include_in_push.
 // The push itself is not built yet, so the approve button is inert.
@@ -13,11 +13,13 @@
 //       OpenDental takes one HTTP call per fee and a large schedule cannot
 //       finish in a single invocation. Shows running progress, then a
 //       summary of how many fees were added versus updated.
+//   v4  Moved to /fee-schedules/review/[id]. Back links point at
+//       /fee-schedules. Shared TopNav sits above this page.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { createClient } from "../../../lib/supabase/client";
+import { createClient } from "@/lib/supabase/client";
 
 type ScheduleRow = {
   id: string;
@@ -358,7 +360,7 @@ export default function ReviewPage() {
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-[#F7F6F3] px-6 py-14 text-[#1C1C1A]">
+      <main className="min-h-screen bg-[#F7F6F3] px-6 py-10 text-[#1C1C1A]">
         <div className="mx-auto w-full max-w-5xl">
           <p className="text-[15px] text-[#5C5C57]">Loading the staged rows…</p>
         </div>
@@ -368,11 +370,11 @@ export default function ReviewPage() {
 
   if (loadError !== "" && schedule === null) {
     return (
-      <main className="min-h-screen bg-[#F7F6F3] px-6 py-14 text-[#1C1C1A]">
+      <main className="min-h-screen bg-[#F7F6F3] px-6 py-10 text-[#1C1C1A]">
         <div className="mx-auto w-full max-w-5xl">
           <p className="text-[15px] text-[#A4361F]">{loadError}</p>
           <Link
-            href="/"
+            href="/fee-schedules"
             className="mt-4 inline-block rounded text-sm font-medium text-[#0F6E56] underline underline-offset-2"
           >
             Back to upload
@@ -390,7 +392,7 @@ export default function ReviewPage() {
   ];
 
   return (
-    <main className="min-h-screen bg-[#F7F6F3] px-6 py-14 text-[#1C1C1A]">
+    <main className="min-h-screen bg-[#F7F6F3] px-6 py-10 text-[#1C1C1A]">
       <div className="mx-auto w-full max-w-5xl">
         <p className="font-mono text-xs tracking-[0.18em] text-[#0F6E56] uppercase">
           Fee schedule · Review
@@ -618,7 +620,7 @@ export default function ReviewPage() {
         {/* Footer */}
         <div className="mt-8 flex flex-col-reverse items-start gap-4 sm:flex-row sm:items-center sm:justify-between">
           <Link
-            href="/"
+            href="/fee-schedules"
             className="rounded text-sm font-medium text-[#0F6E56] underline underline-offset-2 focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
           >
             Upload a different file

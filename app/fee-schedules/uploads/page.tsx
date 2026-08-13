@@ -1,6 +1,6 @@
 "use client";
 
-// Uploads list — v3
+// Uploads list — v4
 // Every fee schedule that has been staged, newest first, with a link into
 // its review screen. Before this page existed a staged upload was only
 // reachable if its URL had been kept.
@@ -15,11 +15,14 @@
 //       a fixed, non-wrapping column, the table scrolls sideways if the
 //       window is narrow, and the filename column is capped so it cannot
 //       push the actions off the edge.
+//   v4  Moved to /fee-schedules/uploads. Email and sign out moved into the
+//       shared TopNav. Links now point at /fee-schedules and
+//       /fee-schedules/review/<id>.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { createClient } from "../../lib/supabase/client";
+import { createClient } from "@/lib/supabase/client";
 
 type Office = {
   id: string;
@@ -82,7 +85,6 @@ export default function UploadsPage() {
   const [offices, setOffices] = useState<Office[]>([]);
   const [officeFilter, setOfficeFilter] = useState(ALL_OFFICES);
   const [showArchived, setShowArchived] = useState(false);
-  const [email, setEmail] = useState("");
   const [userId, setUserId] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
@@ -101,7 +103,6 @@ export default function UploadsPage() {
         router.replace("/login");
         return;
       }
-      setEmail(sessionData.session.user.email ?? "");
       setUserId(sessionData.session.user.id);
 
       const { data: officeData, error: officeErr } = await supabase
@@ -159,12 +160,6 @@ export default function UploadsPage() {
       return true;
     });
   }, [uploads, officeFilter, showArchived]);
-
-  async function signOut() {
-    const supabase = createClient();
-    await supabase.auth.signOut();
-    router.replace("/login");
-  }
 
   // Drafts are removed outright. fee_schedule_items cascades on delete, so a
   // single call clears the rows too.
@@ -266,31 +261,14 @@ export default function UploadsPage() {
   }
 
   return (
-    <main className="min-h-screen bg-[#F7F6F3] px-6 py-14 text-[#1C1C1A]">
+    <main className="min-h-screen bg-[#F7F6F3] px-6 py-10 text-[#1C1C1A]">
       <div className="mx-auto w-full max-w-5xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p className="font-mono text-xs tracking-[0.18em] text-[#0F6E56] uppercase">
-              Fee schedule · Uploads
-            </p>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
-              Staged uploads
-            </h1>
-          </div>
-
-          {email !== "" && (
-            <div className="hidden text-right sm:block">
-              <p className="text-sm text-[#5C5C57]">{email}</p>
-              <button
-                type="button"
-                onClick={signOut}
-                className="mt-1 rounded text-sm font-medium text-[#0F6E56] underline-offset-2 hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
-              >
-                Sign out
-              </button>
-            </div>
-          )}
-        </div>
+        <p className="font-mono text-xs tracking-[0.18em] text-[#0F6E56] uppercase">
+          Fee schedule · Uploads
+        </p>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
+          Staged uploads
+        </h1>
 
         <p className="mt-3 max-w-xl text-[15px] leading-relaxed text-[#5C5C57]">
           Every payer file that has been matched against OpenDental. Open one to
@@ -341,7 +319,7 @@ export default function UploadsPage() {
           </button>
 
           <Link
-            href="/"
+            href="/fee-schedules"
             className="ml-auto rounded-lg bg-[#0F6E56] px-5 py-2 text-sm font-medium text-white hover:bg-[#0C5A46] focus:ring-2 focus:ring-[#0F6E56]/30 focus:outline-none"
           >
             Upload a file
@@ -400,7 +378,7 @@ export default function UploadsPage() {
             <div className="px-6 py-16 text-center">
               <p className="text-[15px] text-[#1C1C1A]">Nothing staged yet.</p>
               <Link
-                href="/"
+                href="/fee-schedules"
                 className="mt-3 inline-block rounded text-sm font-medium text-[#0F6E56] underline underline-offset-2 focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
               >
                 Upload a payer CSV
@@ -482,7 +460,7 @@ export default function UploadsPage() {
                       <td className="w-px px-4 py-4 whitespace-nowrap">
                         <div className="flex items-center justify-end gap-4">
                           <Link
-                            href={`/review/${upload.id}`}
+                            href={`/fee-schedules/review/${upload.id}`}
                             className="rounded text-sm font-medium text-[#0F6E56] underline-offset-2 hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
                           >
                             Open

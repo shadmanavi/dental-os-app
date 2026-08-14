@@ -6,7 +6,7 @@
 // from real volume instead of from a guess about dentistry in general.
 //
 // Deploy path: supabase/functions/od-survey/index.ts
-// Version: 4
+// Version: 5
 // Changelog:
 //   v1  procedure_mix action. One joined SELECT over procedurelog and
 //       procedurecode, grouped by code, ordered by count.
@@ -117,6 +117,9 @@
 //     Optional: "months": 6        (1-36, default 6)
 //     Optional: "min_count": 1     (drop codes below this, default 1)
 //     Optional: "limit": 400       (default 400, max 1000)
+//
+//   { "office":"downey", "action":"acceptance" }
+//     Optional: "months": 6 (1-36, default 6)
 //
 //   { "office":"downey", "action":"fee_lookup" }
 //     Optional: "pat_nums": [5969, 34173]
@@ -297,7 +300,7 @@ Deno.serve(async (req: Request) => {
   const officeSlug = (body.office ?? "").toLowerCase().trim();
   const action = (body.action ?? "procedure_mix").toLowerCase().trim();
 
-  const ACTIONS = ["procedure_mix", "fee_lookup"];
+  const ACTIONS = ["procedure_mix", "fee_lookup", "acceptance"];
   if (!ACTIONS.includes(action)) {
     return json({
       ok: false,
@@ -355,6 +358,142 @@ Deno.serve(async (req: Request) => {
 
   const auth = `ODFHIR ${developerKey}/${customerKey}`;
   const calls: OdCall[] = [];
+
+  // ===================================================================
+  // acceptance — does the priority convention hold in the data?
+  //
+  // Read-only. Shad's office says priority 1 to 8 means accepted, 9
+  // means not accepted, and there is no zero. That is a rule people
+  // follow by hand, so it is worth seeing what they actually typed.
+  // ===================================================================
+  if (action === "acceptance") {
+    const window = Math.min(
+      Math.max(Math.trunc(num(body.months) || 6), 1),
+      36,
+    );
+
+    const end = new Date();
+    const start = new Date(end.getTime());
+    start.setMonth(start.getMonth() - window);
+
+    const from = start.toISOString().slice(0, 10);
+    const to = end.toISOString().slice(0, 10);
+
+    // ProcStatus 1 is treatment planned. Only planned work can be
+    // accepted or declined; a completed procedure is past the question.
+    const prioritySql =
+      `SELECT pl.Priority, d.ItemName, d.ItemOrder, ` +
+      `COUNT(*) AS Cnt, SUM(pl.ProcFee) AS Total ` +
+      `FROM procedurelog pl ` +
+      `LEFT JOIN definition d ON d.DefNum = pl.Priority ` +
+      `WHERE pl.ProcStatus = 1 ` +
+      `AND pl.ProcDate >= '${from}' AND pl.ProcDate <= '${to}' ` +
+      `GROUP BY pl.Priority, d.ItemName, d.ItemOrder ` +
+      `ORDER BY Cnt DESC`;
+
+    const priorityRes = await shortQueryAll(auth, prioritySql, calls, 4);
+
+    if (!priorityRes.ok) {
+      return json({
+        ok: false,
+        error: "OpenDental could not count the treatment priorities.",
+        detail: priorityRes.failure?.body ?? null,
+        sql: prioritySql,
+      }, 502);
+    }
+
+    const priorities = priorityRes.rows.map((r) => {
+      const defNum = Math.trunc(num(r.Priority));
+      return {
+        priority_defnum: defNum,
+        name: text(r.ItemName),
+        item_order: Math.trunc(num(r.ItemOrder)),
+        procedures: Math.trunc(num(r.Cnt)),
+        value: Math.round(num(r.Total) * 100) / 100,
+        // Nothing is asserted about which numbers mean what. The rule
+        // is Greenwood's, and this only shows whether the data fits it.
+        has_priority: defNum > 0,
+      };
+    });
+
+    // The whole vocabulary, not only the values in use. A priority that
+    // exists but is never chosen is worth knowing about, and so is one
+    // that has been hidden since the rule was agreed.
+    const usedDefNum = priorities.find((p) => p.priority_defnum > 0);
+    let vocabularySql = "";
+    const vocabulary: Record<string, unknown>[] = [];
+
+    if (usedDefNum) {
+      vocabularySql =
+        `SELECT d.DefNum, d.ItemName, d.ItemOrder, d.ItemValue, d.IsHidden ` +
+        `FROM definition d ` +
+        `WHERE d.Category = ( ` +
+        `SELECT Category FROM definition WHERE DefNum = ${usedDefNum.priority_defnum} ` +
+        `) ORDER BY d.ItemOrder`;
+
+      const vocabRes = await shortQueryAll(auth, vocabularySql, calls, 2);
+      if (vocabRes.ok) vocabulary.push(...vocabRes.rows);
+    }
+
+    const withPriority = priorities
+      .filter((p) => p.has_priority)
+      .reduce((sum, p) => sum + p.procedures, 0);
+
+    const withoutPriority = priorities
+      .filter((p) => !p.has_priority)
+      .reduce((sum, p) => sum + p.procedures, 0);
+
+    const total = withPriority + withoutPriority;
+
+    return json({
+      ok: true,
+      office: officeRow.name,
+      office_slug: officeRow.slug,
+      action,
+      window: { months: window, since: from, until: to },
+
+      answers: {
+        treatment_planned_procedures: total,
+        carrying_a_priority: withPriority,
+        carrying_no_priority: withoutPriority,
+        // If most planned work has no priority at all, the convention
+        // is not being followed and no report built on it would be
+        // trustworthy. This is the number that decides that.
+        share_with_a_priority_pct: total === 0
+          ? 0
+          : Math.round((withPriority / total) * 1000) / 10,
+        distinct_priorities_used: priorities.filter((p) => p.has_priority).length,
+        priority_names_in_use: priorities
+          .filter((p) => p.has_priority)
+          .map((p) => p.name)
+          .filter((n) => n !== ""),
+        vocabulary_size: vocabulary.length,
+      },
+
+      priorities,
+
+      priority_vocabulary: vocabulary.map((r) => ({
+        defnum: Math.trunc(num(r.DefNum)),
+        name: text(r.ItemName),
+        item_order: Math.trunc(num(r.ItemOrder)),
+        item_value: text(r.ItemValue),
+        is_hidden: Math.trunc(num(r.IsHidden)) === 1,
+      })),
+
+      sql: { priorities: prioritySql, vocabulary: vocabularySql },
+
+      calls: calls.map((c) => ({
+        method: c.method,
+        url: c.url,
+        http_status: c.http_status,
+        elapsed_ms: c.elapsed_ms,
+        body: c.http_status >= 300 ? c.body : "(omitted — succeeded)",
+      })),
+
+      run_by: userData.user.email,
+      run_at: new Date().toISOString(),
+    });
+  }
 
   // ===================================================================
   // fee_lookup — prove the insurance-then-patient fee schedule chain

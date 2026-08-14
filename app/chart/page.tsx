@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v7
+// Chairside charting — v8
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -99,6 +99,10 @@
 //       belongs to a procedure rather than to a tile. Editing it there
 //       also drops the rule that a crown's two halves stay equal —
 //       once both lines exist they are two ordinary procedures.
+//   v8  The search box takes a first name. Two words are read as last
+//       name then first, which matters because surnames repeat: one
+//       day's schedule held two Mendozas and two Chavezes. The server
+//       does the interpreting, so the rule lives in one place.
 //
 // Design notes:
 //   - Dark, high-contrast, large targets. The user is standing, gloved,
@@ -1208,7 +1212,7 @@ export default function ChartPage() {
                   onKeyDown={(e) => {
                     if (e.key === "Enter") runSearch();
                   }}
-                  placeholder="Last name, date of birth, or patient number"
+                  placeholder="Last name, last and first, date of birth, or patient number"
                   autoComplete="off"
                   className="flex-1 rounded-xl border border-[#2C4E54] bg-[#122326] px-4 py-4 text-lg text-[#EDF3F1] placeholder:text-[#5E7B80] focus:border-[#F0A93B] focus:outline-none"
                 />
@@ -1223,8 +1227,9 @@ export default function ChartPage() {
               </div>
 
               <p className="mt-2.5 text-[12.5px] text-[#5E7B80]">
-                Digits are read as a patient number, 08/08/1982 as a date of
-                birth, anything else as a last name. Dashes work too.
+                Two words are read as last name then first, so
+                &ldquo;Mendoza Juanita&rdquo; narrows to one person. Digits are a
+                patient number and 08/08/1982 a date of birth; dashes work too.
               </p>
 
               {searchError !== "" && (

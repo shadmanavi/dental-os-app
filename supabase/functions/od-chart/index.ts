@@ -6,7 +6,7 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 7
+// Version: 8
 // Changelog:
 //   v1  patients / open / commit / undo, built on what od-chart-probe
 //       established against the live Downey database.
@@ -170,6 +170,17 @@
 //       afterwards rather than trusting the response — OpenDental has
 //       already been seen ignoring what it was sent, and a fee that
 //       silently did not stick would be worse than one that refused.
+//   v8  The search box takes a first name too.
+//
+//       Surnames repeat: today's schedule alone held two Mendozas and
+//       two Chavezes. Typing "Mendoza Juanita" now narrows to one
+//       person. A comma is optional, so "Mendoza, Juanita" works the
+//       same way, because that is how the name is written everywhere
+//       else on the screen.
+//
+//       One word is still a surname. Nothing here tries to guess that a
+//       lone word might be a first name — there is no way to tell, and
+//       guessing wrong would quietly return the wrong list.
 //
 // What the probe settled, and why this file looks the way it does:
 //
@@ -207,7 +218,8 @@
 //     Optional: "birthdate":"1984-07-02"
 //     Optional: "pat_num":5969
 //     A bare query is read as a patient number if it is all digits, a
-//     birthdate if it parses as one, and a surname otherwise.
+//     birthdate if it parses as one, a surname and first name if it has
+//     two parts, and a surname otherwise.
 //   { "office":"downey", "action":"open", "pat_num":17 }
 //   { "office":"downey", "action":"commit", "pat_num":17,
 //     "tile_id":"<uuid>", "tooth_num":"30", "surfaces":["M","O"],
@@ -1024,20 +1036,33 @@ Deno.serve(async (req: Request) => {
       ? body.pat_num
       : null;
 
-    // One box, three kinds of answer. The office types whatever they
+    // One box, four kinds of answer. The office types whatever they
     // have in front of them rather than choosing a field first.
     let lastName = rawQuery;
+    let firstName = "";
     let birthdate = givenBirthdate;
     let patNumLookup = givenPatNum;
 
     if (givenPatNum === null && /^\d{1,9}$/.test(rawQuery)) {
       patNumLookup = Number(rawQuery);
       lastName = "";
-    } else if (givenBirthdate === "" && rawQuery !== "") {
-      const iso = toIsoBirthdate(rawQuery);
-      if (iso !== null) {
-        birthdate = iso;
-        lastName = "";
+    } else if (givenBirthdate === "" && toIsoBirthdate(rawQuery) !== null) {
+      birthdate = toIsoBirthdate(rawQuery) ?? "";
+      lastName = "";
+    } else if (rawQuery !== "") {
+      // Surname first, then first name. A comma is optional because the
+      // name is written "Mendoza, Juanita" everywhere else on screen,
+      // and someone will type it that way.
+      const parts = rawQuery
+        .replace(/,/g, " ")
+        .split(/\s+/)
+        .filter((part) => part !== "");
+
+      if (parts.length >= 2) {
+        lastName = parts[0];
+        // Anything after the second word is ignored rather than joined:
+        // a middle name would only narrow the search to nothing.
+        firstName = parts[1];
       }
     }
 
@@ -1100,6 +1125,7 @@ Deno.serve(async (req: Request) => {
     // Patient Select logic and is slow on a database this size.
     const params: string[] = ["hideInactive=true"];
     if (lastName !== "") params.push(`LName=${encodeURIComponent(lastName)}`);
+    if (firstName !== "") params.push(`FName=${encodeURIComponent(firstName)}`);
     if (birthdate !== "") params.push(`Birthdate=${encodeURIComponent(birthdate)}`);
 
     const call = await odFetch(
@@ -1120,11 +1146,16 @@ Deno.serve(async (req: Request) => {
       ? (call.body as Record<string, unknown>[])
       : [];
 
-    const searchedBy = lastName !== "" && birthdate !== ""
-      ? "surname and date of birth"
-      : birthdate !== ""
-        ? "date of birth"
-        : "surname";
+    // Naming what was actually searched makes a wrong reading obvious:
+    // a mistyped date searched as a surname explains itself.
+    const searchedByParts: string[] = [];
+    if (lastName !== "") searchedByParts.push("surname");
+    if (firstName !== "") searchedByParts.push("first name");
+    if (birthdate !== "") searchedByParts.push("date of birth");
+
+    const searchedBy = searchedByParts.length === 0
+      ? "that"
+      : searchedByParts.join(" and ");
 
     return json({
       ok: true,

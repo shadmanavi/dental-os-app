@@ -1,0 +1,685 @@
+{
+  "ok": true,
+  "office": "Greenwood Dental — Downey",
+  "office_slug": "downey",
+  "action": "acceptance",
+  "window": {
+    "months": 6,
+    "since": "2026-02-14",
+    "until": "2026-08-14"
+  },
+  "answers": {
+    "treatment_planned_procedures": 16598,
+    "carrying_a_priority": 7438,
+    "carrying_no_priority": 9160,
+    "share_with_a_priority_pct": 44.8,
+    "distinct_priorities_used": 14,
+    "priority_names_in_use": [
+      "2",
+      "Authorization Approved",
+      "3",
+      "1",
+      "Authorization Denied",
+      "Not Accepted",
+      "4",
+      "Pre- Authorization Needed",
+      "5",
+      "Optional Treatment",
+      "6",
+      "7",
+      "8",
+      "Covered Benefit"
+    ],
+    "vocabulary_size": 72
+  },
+  "priorities": [
+    {
+      "priority_defnum": 0,
+      "name": "",
+      "item_order": 0,
+      "procedures": 9160,
+      "value": 511814.16,
+      "has_priority": false
+    },
+    {
+      "priority_defnum": 147,
+      "name": "2",
+      "item_order": 1,
+      "procedures": 1029,
+      "value": 273707.01,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 256,
+      "name": "Authorization Approved",
+      "item_order": 10,
+      "procedures": 866,
+      "value": 241015,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 153,
+      "name": "3",
+      "item_order": 2,
+      "procedures": 817,
+      "value": 236137.5,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 146,
+      "name": "1",
+      "item_order": 0,
+      "procedures": 771,
+      "value": 163168.51,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 159,
+      "name": "Authorization Denied",
+      "item_order": 11,
+      "procedures": 724,
+      "value": 168020.4,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 148,
+      "name": "Not Accepted",
+      "item_order": 8,
+      "procedures": 700,
+      "value": 306938.17,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 154,
+      "name": "4",
+      "item_order": 3,
+      "procedures": 634,
+      "value": 262187.3,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 613,
+      "name": "Pre- Authorization Needed",
+      "item_order": 9,
+      "procedures": 620,
+      "value": 163947.58,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 151,
+      "name": "5",
+      "item_order": 4,
+      "procedures": 467,
+      "value": 216065.62,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 274,
+      "name": "Optional Treatment",
+      "item_order": 12,
+      "procedures": 335,
+      "value": 171295.25,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 156,
+      "name": "6",
+      "item_order": 5,
+      "procedures": 280,
+      "value": 119521.05,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 157,
+      "name": "7",
+      "item_order": 6,
+      "procedures": 187,
+      "value": 75249.71,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 158,
+      "name": "8",
+      "item_order": 7,
+      "procedures": 5,
+      "value": 901,
+      "has_priority": true
+    },
+    {
+      "priority_defnum": 150,
+      "name": "Covered Benefit",
+      "item_order": 13,
+      "procedures": 3,
+      "value": 142.4,
+      "has_priority": true
+    }
+  ],
+  "priority_vocabulary": [
+    {
+      "defnum": 146,
+      "name": "1",
+      "item_order": 0,
+      "item_value": "0",
+      "is_hidden": false
+    },
+    {
+      "defnum": 147,
+      "name": "2",
+      "item_order": 1,
+      "item_value": "1",
+      "is_hidden": false
+    },
+    {
+      "defnum": 153,
+      "name": "3",
+      "item_order": 2,
+      "item_value": "2",
+      "is_hidden": false
+    },
+    {
+      "defnum": 154,
+      "name": "4",
+      "item_order": 3,
+      "item_value": "3",
+      "is_hidden": false
+    },
+    {
+      "defnum": 151,
+      "name": "5",
+      "item_order": 4,
+      "item_value": "4",
+      "is_hidden": false
+    },
+    {
+      "defnum": 156,
+      "name": "6",
+      "item_order": 5,
+      "item_value": "5",
+      "is_hidden": false
+    },
+    {
+      "defnum": 157,
+      "name": "7",
+      "item_order": 6,
+      "item_value": "6",
+      "is_hidden": false
+    },
+    {
+      "defnum": 158,
+      "name": "8",
+      "item_order": 7,
+      "item_value": "15",
+      "is_hidden": false
+    },
+    {
+      "defnum": 148,
+      "name": "Not Accepted",
+      "item_order": 8,
+      "item_value": "8",
+      "is_hidden": false
+    },
+    {
+      "defnum": 613,
+      "name": "Pre- Authorization Needed",
+      "item_order": 9,
+      "item_value": "2",
+      "is_hidden": false
+    },
+    {
+      "defnum": 256,
+      "name": "Authorization Approved",
+      "item_order": 10,
+      "item_value": "10",
+      "is_hidden": false
+    },
+    {
+      "defnum": 159,
+      "name": "Authorization Denied",
+      "item_order": 11,
+      "item_value": "11",
+      "is_hidden": false
+    },
+    {
+      "defnum": 274,
+      "name": "Optional Treatment",
+      "item_order": 12,
+      "item_value": "11",
+      "is_hidden": false
+    },
+    {
+      "defnum": 150,
+      "name": "Covered Benefit",
+      "item_order": 13,
+      "item_value": "12",
+      "is_hidden": false
+    },
+    {
+      "defnum": 149,
+      "name": "Pre-Appointed",
+      "item_order": 14,
+      "item_value": "13",
+      "is_hidden": false
+    },
+    {
+      "defnum": 155,
+      "name": "9",
+      "item_order": 15,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 152,
+      "name": "10",
+      "item_order": 16,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 288,
+      "name": "PA",
+      "item_order": 17,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 289,
+      "name": "2/14/08",
+      "item_order": 18,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 296,
+      "name": "2/18/08",
+      "item_order": 19,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 297,
+      "name": "2/19/08",
+      "item_order": 20,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 298,
+      "name": "2/19/08",
+      "item_order": 21,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 299,
+      "name": "2/19/08",
+      "item_order": 22,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 300,
+      "name": "2/19/08",
+      "item_order": 23,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 301,
+      "name": "2/19/08",
+      "item_order": 24,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 302,
+      "name": "2/19/08",
+      "item_order": 25,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 303,
+      "name": "2/19/08",
+      "item_order": 26,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 304,
+      "name": "2/19/08",
+      "item_order": 27,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 305,
+      "name": "2/19/08",
+      "item_order": 28,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 306,
+      "name": "2/19/08",
+      "item_order": 29,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 307,
+      "name": "2/20/08",
+      "item_order": 30,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 308,
+      "name": "2/21/08",
+      "item_order": 31,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 309,
+      "name": "2/22/08",
+      "item_order": 32,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 310,
+      "name": "2/23/08",
+      "item_order": 33,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 311,
+      "name": "2/24/08",
+      "item_order": 34,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 312,
+      "name": "2/25/08",
+      "item_order": 35,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 314,
+      "name": "2/26/08",
+      "item_order": 36,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 316,
+      "name": "2/27/08",
+      "item_order": 37,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 320,
+      "name": "2/28/08",
+      "item_order": 38,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 325,
+      "name": "2/29/08",
+      "item_order": 39,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 326,
+      "name": "3/1/08",
+      "item_order": 40,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 327,
+      "name": "3/2/08",
+      "item_order": 41,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 328,
+      "name": "3/3/08",
+      "item_order": 42,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 330,
+      "name": "3/4/08",
+      "item_order": 43,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 331,
+      "name": "3/5/08",
+      "item_order": 44,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 335,
+      "name": "3/6/08",
+      "item_order": 45,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 336,
+      "name": "3/7/08",
+      "item_order": 46,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 337,
+      "name": "3/8/08",
+      "item_order": 47,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 338,
+      "name": "3/9/08",
+      "item_order": 48,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 339,
+      "name": "3/10/08",
+      "item_order": 49,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 343,
+      "name": "3/11/08",
+      "item_order": 50,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 344,
+      "name": "3/12/08",
+      "item_order": 51,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 345,
+      "name": "3/13/08",
+      "item_order": 52,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 346,
+      "name": "3/14/08",
+      "item_order": 53,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 347,
+      "name": "3/15/08",
+      "item_order": 54,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 348,
+      "name": "3/16/08",
+      "item_order": 55,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 349,
+      "name": "3/17/08",
+      "item_order": 56,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 355,
+      "name": "3/18/08",
+      "item_order": 57,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 356,
+      "name": "3/19/08",
+      "item_order": 58,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 357,
+      "name": "3/20/08",
+      "item_order": 59,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 358,
+      "name": "3/21/08",
+      "item_order": 60,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 359,
+      "name": "3/22/08",
+      "item_order": 61,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 360,
+      "name": "3/23/08",
+      "item_order": 62,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 361,
+      "name": "3/24/08",
+      "item_order": 63,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 362,
+      "name": "3/25/08",
+      "item_order": 64,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 363,
+      "name": "3/26/08",
+      "item_order": 65,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 364,
+      "name": "3/27/08",
+      "item_order": 66,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 365,
+      "name": "3/28/08",
+      "item_order": 67,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 366,
+      "name": "3/29/08",
+      "item_order": 68,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 367,
+      "name": "3/30/08",
+      "item_order": 69,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 368,
+      "name": "4/2/08",
+      "item_order": 70,
+      "item_value": "",
+      "is_hidden": true
+    },
+    {
+      "defnum": 659,
+      "name": "Accepted",
+      "item_order": 71,
+      "item_value": "71",
+      "is_hidden": false
+    }
+  ],
+  "sql": {
+    "priorities": "SELECT pl.Priority, d.ItemName, d.ItemOrder, COUNT(*) AS Cnt, SUM(pl.ProcFee) AS Total FROM procedurelog pl LEFT JOIN definition d ON d.DefNum = pl.Priority WHERE pl.ProcStatus = 1 AND pl.ProcDate >= '2026-02-14' AND pl.ProcDate <= '2026-08-14' GROUP BY pl.Priority, d.ItemName, d.ItemOrder ORDER BY Cnt DESC",
+    "vocabulary": "SELECT d.DefNum, d.ItemName, d.ItemOrder, d.ItemValue, d.IsHidden FROM definition d WHERE d.Category = ( SELECT Category FROM definition WHERE DefNum = 147 ) ORDER BY d.ItemOrder"
+  },
+  "calls": [
+    {
+      "method": "PUT",
+      "url": "https://api.opendental.com/api/v1/queries/ShortQuery",
+      "http_status": 200,
+      "elapsed_ms": 704,
+      "body": "(omitted — succeeded)"
+    },
+    {
+      "method": "PUT",
+      "url": "https://api.opendental.com/api/v1/queries/ShortQuery",
+      "http_status": 200,
+      "elapsed_ms": 291,
+      "body": "(omitted — succeeded)"
+    }
+  ],
+  "run_by": "shadmanavi@gmail.com",
+  "run_at": "2026-08-14T00:33:30.694Z"
+}

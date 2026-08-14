@@ -6,7 +6,7 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 5
+// Version: 7
 // Changelog:
 //   v1  patients / open / commit / undo, built on what od-chart-probe
 //       established against the live Downey database.
@@ -117,6 +117,59 @@
 //         for both the dentist and the hygienist, and the patient load
 //         already carried full names. Initials are still returned
 //         alongside, because that is what the office uses on paper.
+//   v6  Unparks the fee split, and lets a fee be overridden at the chair.
+//
+//       The split was parked because no safe way to read a price had
+//       been found. od-survey v4 found it. Reading fee schedules 409 and
+//       410 returned D2751 at $476 under Denti-Cal and $1,366 under the
+//       Dental Masters Membership, with every delivery code at zero.
+//       That is exactly the shape Shad described: OpenDental holds the
+//       whole fee on the prep and nothing on the seat, and the app is
+//       to divide it.
+//
+//       So a paired tile now posts half on each line. The halving is
+//       done in whole cents, remainder to the base, so the two lines
+//       always add back to the fee OpenDental gave. This is still not
+//       pricing: no number is originated here, only divided.
+//
+//       Two things the live data forced:
+//
+//       - A missing fee row is not a zero. D2740d has no row at all in
+//         either schedule, while D2750 is a genuine zero under
+//         Denti-Cal. A paired tile whose base code has no row refuses
+//         to commit and names the code, rather than posting something
+//         unpredictable.
+//       - The schedule has to be resolved per patient, not per office.
+//         Insurance first, then the patient record, never the provider.
+//
+//       The override is per procedure, for one patient, on one visit.
+//       It does not touch a fee schedule. On a paired tile it applies
+//       to the total and is then split; on a single tile it applies to
+//       that line. Omitted, nothing changes: OpenDental prices its own
+//       work exactly as before.
+//
+//       open now also returns the resolved schedule and the price of
+//       every code the menu can write, so the screen can show a number
+//       before anyone taps.
+//   v7  Adds "set_fee", so a fee can be corrected on the line itself
+//       after it has been written.
+//
+//       v6 asked for the fee before committing, which turned out to be
+//       the wrong moment. The number that needs changing is usually the
+//       one already on screen, and by then it belongs to a specific
+//       procedure rather than to a tile. Editing it where it is shown
+//       also drops the constraint that the two halves of a crown must
+//       stay equal: once both lines exist they are just two procedures,
+//       and the office can put whatever it likes on each.
+//
+//       The split still happens at commit. It is a sensible starting
+//       point, not a rule to be enforced afterwards.
+//
+//       This action writes a fee and nothing else. It cannot change a
+//       code, a tooth, a status or a patient, and it reads the row back
+//       afterwards rather than trusting the response — OpenDental has
+//       already been seen ignoring what it was sent, and a fee that
+//       silently did not stick would be worse than one that refused.
 //
 // What the probe settled, and why this file looks the way it does:
 //
@@ -158,7 +211,10 @@
 //   { "office":"downey", "action":"open", "pat_num":17 }
 //   { "office":"downey", "action":"commit", "pat_num":17,
 //     "tile_id":"<uuid>", "tooth_num":"30", "surfaces":["M","O"],
-//     "addon_ids":["<uuid>"], "prov_num":2118, "dry_run":true }
+//     "addon_ids":["<uuid>"], "prov_num":2118, "fee_override":900,
+//     "dry_run":true }
+//   { "office":"downey", "action":"set_fee", "od_id":1081426,
+//     "fee":683 }
 //   { "office":"downey", "action":"undo", "entry_kind":"procedure",
 //     "od_id":1081426 }
 //
@@ -347,6 +403,196 @@ async function odFetch(
 
 // GET /providers caps a page at 100 and the pages overlap, so key on
 // ProvNum and stop when a page contributes nothing new.
+// ---------------------------------------------------------------------
+// Pricing
+//
+// Dental OS still does not decide what anything costs. It reads the
+// number OpenDental already holds and, for a two-visit procedure,
+// divides it between the two lines. That division is the only
+// arithmetic performed on a fee anywhere in this system.
+//
+// Which schedule to read was settled against live data:
+//
+//   - The insurance plan's fee schedule, if the patient has a usable
+//     plan. Pending, medical and terminated plans do not count.
+//   - Otherwise the fee schedule on the patient record. A membership
+//     such as Dental Masters lands here — OpenDental's Discount Plans
+//     screen sets patient.FeeSched and nothing else, so there is no
+//     third table to walk.
+//   - Never the provider's. Shad was explicit.
+//
+// The fee table's schedule column is FeeSched, confirmed by running
+// the query rather than by reading the docs, which disagree with
+// themselves. information_schema cannot be consulted at all:
+// OpenDental rejects any query containing the word SCHEMA.
+// ---------------------------------------------------------------------
+type FeeSchedule = {
+  source: "insurance plan" | "patient record" | "nothing set";
+  fee_sched: number;
+  fee_sched_name: string;
+};
+
+async function resolveFeeSchedule(
+  auth: string,
+  patNum: number,
+): Promise<FeeSchedule> {
+  const today = new Date().toISOString().slice(0, 10);
+
+  const sql =
+    `SELECT p.FeeSched AS PatientFeeSched, ` +
+    `pfs.Description AS PatientFeeSchedName, ` +
+    `ip.FeeSched AS PlanFeeSched, ifs.Description AS PlanFeeSchedName, ` +
+    `pp.Ordinal, pp.IsPending, isub.DateTerm, ip.IsMedical ` +
+    `FROM patient p ` +
+    `LEFT JOIN feesched pfs ON pfs.FeeSchedNum = p.FeeSched ` +
+    `LEFT JOIN patplan pp ON pp.PatNum = p.PatNum ` +
+    `LEFT JOIN inssub isub ON isub.InsSubNum = pp.InsSubNum ` +
+    `LEFT JOIN insplan ip ON ip.PlanNum = isub.PlanNum ` +
+    `LEFT JOIN feesched ifs ON ifs.FeeSchedNum = ip.FeeSched ` +
+    `WHERE p.PatNum = ${patNum} ` +
+    `ORDER BY pp.Ordinal`;
+
+  const call = await odFetch(auth, "PUT", "/queries/ShortQuery", {
+    SqlCommand: sql,
+  });
+
+  const rows = Array.isArray(call.body)
+    ? (call.body as Record<string, unknown>[])
+    : [];
+
+  if (rows.length === 0) {
+    return { source: "nothing set", fee_sched: 0, fee_sched_name: "" };
+  }
+
+  // Rows are ordered by Ordinal, so the primary plan comes first.
+  for (const row of rows) {
+    const planSched = Number(row.PlanFeeSched ?? 0);
+    if (planSched <= 0) continue;
+    if (Number(row.IsPending ?? 0) === 1) continue;
+    if (Number(row.IsMedical ?? 0) === 1) continue;
+
+    // OpenDental writes 0001-01-01 for "not terminated".
+    const term = String(row.DateTerm ?? "").slice(0, 10);
+    const active = term === "" || term.startsWith("0001") || term >= today;
+    if (!active) continue;
+
+    return {
+      source: "insurance plan",
+      fee_sched: planSched,
+      fee_sched_name: String(row.PlanFeeSchedName ?? ""),
+    };
+  }
+
+  const patientSched = Number(rows[0].PatientFeeSched ?? 0);
+  if (patientSched > 0) {
+    return {
+      source: "patient record",
+      fee_sched: patientSched,
+      fee_sched_name: String(rows[0].PatientFeeSchedName ?? ""),
+    };
+  }
+
+  return { source: "nothing set", fee_sched: 0, fee_sched_name: "" };
+}
+
+// Amounts for a set of codes in one schedule, in one call.
+//
+// A code with no row is left out of the map rather than recorded as
+// zero. The two are not the same thing: D2740d has no row in either of
+// Greenwood's schedules, while D2750 is a real zero under Denti-Cal.
+const SAFE_PROC_CODE = /^[A-Za-z0-9._-]{1,20}$/;
+
+async function lookupFees(
+  auth: string,
+  feeSched: number,
+  codes: string[],
+): Promise<Map<string, number>> {
+  const found = new Map<string, number>();
+
+  const safe = codes
+    .map((c) => c.trim())
+    .filter((c) => SAFE_PROC_CODE.test(c));
+
+  if (feeSched <= 0 || safe.length === 0) return found;
+
+  // Deduplicated, because a menu repeats codes across buckets.
+  const unique = [...new Set(safe)];
+
+  const sql =
+    `SELECT pc.ProcCode, f.Amount ` +
+    `FROM fee f ` +
+    `INNER JOIN procedurecode pc ON pc.CodeNum = f.CodeNum ` +
+    `WHERE f.FeeSched = ${feeSched} ` +
+    `AND pc.ProcCode IN (${unique.map((c) => `'${c}'`).join(",")})`;
+
+  // ShortQuery caps a page at 100 rows and Offset was confirmed to
+  // advance, so a menu with more than 100 codes still resolves.
+  for (let page = 0; page < 20; page++) {
+    const offset = page * 100;
+    const call = await odFetch(
+      auth,
+      "PUT",
+      offset === 0
+        ? "/queries/ShortQuery"
+        : `/queries/ShortQuery?Offset=${offset}`,
+      { SqlCommand: sql },
+    );
+
+    if (call.http_status < 200 || call.http_status >= 300) break;
+    if (!Array.isArray(call.body)) break;
+
+    const rows = call.body as Record<string, unknown>[];
+    for (const row of rows) {
+      const code = String(row.ProcCode ?? "").trim();
+      if (code === "") continue;
+      found.set(code, Number(row.Amount ?? 0));
+    }
+
+    if (rows.length < 100) break;
+  }
+
+  return found;
+}
+
+// Halving money. Done in whole cents so a fee ending in an odd cent
+// cannot vanish or be invented: the remainder goes to the base line,
+// and the two halves always add back to the original.
+function splitFee(total: number): { base: number; delivery: number } {
+  const cents = Math.round(total * 100);
+  const deliveryCents = Math.floor(cents / 2);
+  const baseCents = cents - deliveryCents;
+  return { base: baseCents / 100, delivery: deliveryCents / 100 };
+}
+
+// Every procedure code a tile might write, so the screen can show a
+// price before anyone taps anything.
+function codesInRule(rule: unknown): string[] {
+  if (rule === null || typeof rule !== "object") return [];
+
+  const r = rule as Record<string, unknown>;
+  const out: string[] = [];
+
+  const push = (value: unknown) => {
+    if (typeof value === "string" && value.trim() !== "") out.push(value.trim());
+  };
+
+  push(r.code);
+  push(r.bicuspid);
+  push(r.molar);
+
+  for (const key of ["all", "anterior", "posterior"]) {
+    const value = r[key];
+    if (Array.isArray(value)) {
+      for (const entry of value) push(entry);
+    } else {
+      push(value);
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------
 async function fetchAllProviders(
   auth: string,
 ): Promise<Record<string, unknown>[]> {
@@ -525,6 +771,8 @@ Deno.serve(async (req: Request) => {
     surfaces?: unknown;
     addon_ids?: unknown;
     prov_num?: number;
+    fee_override?: number;
+    fee?: number;
     entry_kind?: string;
     od_id?: number;
     date?: string;
@@ -541,7 +789,14 @@ Deno.serve(async (req: Request) => {
   const officeSlug = (body.office ?? "").toLowerCase().trim();
   const action = (body.action ?? "").toLowerCase().trim();
 
-  const ACTIONS = ["schedule", "patients", "open", "commit", "undo"];
+  const ACTIONS = [
+    "schedule",
+    "patients",
+    "open",
+    "commit",
+    "set_fee",
+    "undo",
+  ];
   if (!ACTIONS.includes(action)) {
     return json({
       ok: false,
@@ -1051,6 +1306,10 @@ Deno.serve(async (req: Request) => {
           // Present means this tile writes two lines, not one.
           delivery_code: t.delivery_code ?? null,
           is_paired: String(t.delivery_code ?? "") !== "",
+          // Kept only long enough to gather the codes a tile can write,
+          // then stripped before the menu is sent. The browser has no
+          // use for the rule itself and resolving it is the server's job.
+          code_rule_raw: t.code_rule ?? null,
           // Add-ons arrive with the tile, already in their default
           // state. The clinician removes rather than adds.
           addons: ((t.chart_tile_addons ?? []) as Record<string, unknown>[])
@@ -1067,6 +1326,23 @@ Deno.serve(async (req: Request) => {
         })),
     }));
 
+    // Prices for everything this menu can write, in one call. The
+    // schedule is per patient, so this cannot be cached per office.
+    const feeSchedule = await resolveFeeSchedule(auth, patNum);
+
+    const menuCodes: string[] = [];
+    for (const c of menu) {
+      for (const t of c.tiles) {
+        menuCodes.push(...codesInRule(t.code_rule_raw));
+        if (typeof t.delivery_code === "string") menuCodes.push(t.delivery_code);
+        for (const a of t.addons) {
+          if (typeof a.proc_code === "string") menuCodes.push(a.proc_code);
+        }
+      }
+    }
+
+    const feeMap = await lookupFees(auth, feeSchedule.fee_sched, menuCodes);
+
     return json({
       ok: true,
       office: officeRow.name,
@@ -1081,12 +1357,25 @@ Deno.serve(async (req: Request) => {
         PriProv: p.PriProv ?? null,
         priProvAbbr: p.priProvAbbr ?? "",
       },
+      // Read-only. Changing what a code costs is a fee schedule
+      // decision and belongs in OpenDental, not at the chair.
+      fee_schedule: feeSchedule,
+      // Only codes that actually have a row. A code absent from this
+      // map has no price in this schedule, which is different from
+      // having a price of zero.
+      fees: Object.fromEntries(feeMap),
       resolved_provider: resolvedProvider,
       providers: visibleProviders,
       procedures,
       missing_teeth: missingTeeth,
       hidden_teeth: hiddenTeeth,
-      menu,
+      menu: menu.map((c) => ({
+        ...c,
+        tiles: c.tiles.map((t) => {
+          const { code_rule_raw: _unused, ...rest } = t;
+          return rest;
+        }),
+      })),
     });
   }
 
@@ -1286,10 +1575,78 @@ Deno.serve(async (req: Request) => {
 
     const planned: PlannedLine[] = [];
 
+    // -----------------------------------------------------------------
+    // Pricing, and only for a paired tile
+    //
+    // A single procedure is still priced entirely by OpenDental: no
+    // ProcFee is sent and nothing here decides what it costs. A paired
+    // tile is the exception, because OpenDental holds the whole fee on
+    // the prep and zero on the seat, and Greenwood wants it halved.
+    //
+    // An override replaces the fee OpenDental holds, for this patient
+    // on this visit only. It changes no fee schedule.
+    // -----------------------------------------------------------------
+    const deliveryCode = String(tile.delivery_code ?? "").trim();
+    const isPaired = deliveryCode !== "";
+
+    const override = typeof body.fee_override === "number" &&
+        Number.isFinite(body.fee_override) && body.fee_override >= 0
+      ? body.fee_override
+      : null;
+
+    let feeSchedule: FeeSchedule | null = null;
+    let baseFee: number | null = null;
+    let split: { base: number; delivery: number } | null = null;
+    let feeSource = "OpenDental";
+
+    if (isPaired || override !== null) {
+      feeSchedule = await resolveFeeSchedule(auth, patNum);
+
+      if (override !== null) {
+        baseFee = override;
+        feeSource = "overridden at the chair";
+      } else {
+        const fees = await lookupFees(auth, feeSchedule.fee_sched, [
+          resolved.procCode,
+        ]);
+
+        const found = fees.get(resolved.procCode);
+
+        // Absent is not zero. A code with no row in this schedule would
+        // be priced by OpenDental in some way this function cannot
+        // predict, and half of an unknown number is not a number.
+        if (found === undefined) {
+          return json({
+            ok: false,
+            error: isPaired
+              ? `${resolved.procCode} has no fee in ${
+                feeSchedule.fee_sched_name || "this patient's fee schedule"
+              }, so it cannot be split between the two visits. Set the fee in OpenDental, or enter one here.`
+              : `${resolved.procCode} has no fee in this patient's fee schedule.`,
+            resolved_code: resolved.procCode,
+            fee_schedule: feeSchedule,
+          }, 400);
+        }
+
+        baseFee = found;
+        feeSource = `${feeSchedule.fee_sched_name || "fee schedule"} (${feeSchedule.source})`;
+      }
+
+      if (isPaired) split = splitFee(baseFee);
+    }
+
     // Base. Surfaces belong to this line only — a delivery code or an
     // add-on is not a surface restoration.
     const base = basePayload(resolved.procCode);
     if (surfaces.length > 0) base.Surf = surfaces.join("");
+
+    // A fee is stated only when this function worked one out. Left off,
+    // OpenDental prices the line itself, which is the normal case.
+    if (split !== null) {
+      base.ProcFee = split.base;
+    } else if (override !== null) {
+      base.ProcFee = override;
+    }
 
     planned.push({
       role: "base",
@@ -1300,18 +1657,11 @@ Deno.serve(async (req: Request) => {
     });
 
     // Delivery. The second visit of a two-visit procedure, created now
-    // so the treatment plan shows the whole job.
-    const deliveryCode = String(tile.delivery_code ?? "").trim();
-    const deliveryAtZero = tile.delivery_posts_at_zero !== false;
-
-    if (deliveryCode !== "") {
+    // so the treatment plan shows the whole job, carrying the other
+    // half of the fee.
+    if (isPaired) {
       const delivery = basePayload(deliveryCode);
-
-      // Zero is sent explicitly. This is the one place this function
-      // states a fee, and it states zero rather than a price — the fee
-      // split is parked, not implemented. Whether OpenDental honours it
-      // is read back below rather than assumed.
-      if (deliveryAtZero) delivery.ProcFee = 0;
+      delivery.ProcFee = split === null ? 0 : split.delivery;
 
       planned.push({
         role: "delivery",
@@ -1355,9 +1705,15 @@ Deno.serve(async (req: Request) => {
         })),
         // Kept so a caller written against v3 still sees what it expects.
         would_post: planned[0].payload,
-        note: deliveryCode !== ""
-          ? "Base and add-on fees are omitted on purpose; OpenDental prices them. Only the delivery line carries a fee, and it is zero."
-          : "ProcFee is omitted on purpose. OpenDental prices it.",
+        fee_schedule: feeSchedule,
+        fee_source: feeSource,
+        fee_total: baseFee,
+        fee_split: split,
+        note: isPaired
+          ? "The fee is halved between the two visits, remainder to the prep. Add-ons are priced by OpenDental."
+          : override !== null
+            ? "The fee was overridden for this procedure only. No fee schedule changed."
+            : "ProcFee is omitted on purpose. OpenDental prices it.",
       });
     }
 
@@ -1402,13 +1758,15 @@ Deno.serve(async (req: Request) => {
       const cb = (created.body ?? {}) as Record<string, unknown>;
       const procNum = typeof cb.ProcNum === "number" ? cb.ProcNum : null;
 
-      // For the delivery line, the fee that came back is checked against
-      // the zero that was sent. OpenDental prices procedures on its own
-      // and may well overwrite it; if so, that shows up here instead of
+      // OpenDental prices procedures on its own and may overwrite what
+      // was sent. Where a fee was stated, the value that came back is
+      // compared with it, so an override shows up here rather than
       // being discovered later in a report.
       let feeHonoured: boolean | null = null;
-      if (line.role === "delivery" && deliveryAtZero) {
-        feeHonoured = Number(cb.ProcFee ?? -1) === 0;
+      const stated = line.payload.ProcFee;
+      if (typeof stated === "number") {
+        feeHonoured = Math.round(Number(cb.ProcFee ?? -1) * 100) ===
+          Math.round(stated * 100);
       }
 
       written.push({
@@ -1450,6 +1808,13 @@ Deno.serve(async (req: Request) => {
       bucket: category.bucket,
       resolved_because: resolved.why,
 
+      // Where the money came from, so a surprising number on a
+      // statement can be traced back to a schedule rather than guessed at.
+      fee_schedule: feeSchedule,
+      fee_source: feeSource,
+      fee_total: baseFee,
+      fee_split: split,
+
       // Every line that reached OpenDental.
       line_count: written.length,
       lines: written,
@@ -1478,6 +1843,124 @@ Deno.serve(async (req: Request) => {
 
       committed_by: userData.user.email,
       committed_at: new Date().toISOString(),
+    });
+  }
+
+  // ===================================================================
+  // set_fee — correct the fee on a procedure already written
+  //
+  // Deliberately narrow. It sends ProcFee and nothing else, so this
+  // cannot be used to change a code, a tooth, a status or a patient by
+  // accident. The row is read back afterwards because OpenDental has
+  // been observed ignoring values it was sent, and a fee that quietly
+  // failed to save would be worse than one that refused outright.
+  //
+  // No halving here. The split belongs to the moment a paired tile is
+  // committed; once both lines exist they are two ordinary procedures
+  // and the office can put whatever it likes on each.
+  // ===================================================================
+  if (action === "set_fee") {
+    const procNum = body.od_id;
+
+    if (typeof procNum !== "number" || procNum <= 0) {
+      return json({ ok: false, error: "od_id is required." }, 400);
+    }
+
+    const fee = body.fee;
+
+    if (typeof fee !== "number" || !Number.isFinite(fee) || fee < 0) {
+      return json({
+        ok: false,
+        error: "fee must be a number of zero or more.",
+      }, 400);
+    }
+
+    // Whole cents. A fee carrying a third decimal would be rounded by
+    // the database anyway, and rounding here means the value read back
+    // can be compared with what was sent.
+    const amount = Math.round(fee * 100) / 100;
+
+    // What it was, so the response can say what changed rather than
+    // only what it is now.
+    const before = await odFetch(auth, "GET", `/procedurelogs/${procNum}`);
+
+    if (before.http_status === 404) {
+      return json({
+        ok: false,
+        error: "That procedure is no longer in OpenDental.",
+      }, 404);
+    }
+
+    if (before.http_status < 200 || before.http_status >= 300) {
+      return json({
+        ok: false,
+        error: "OpenDental could not read that procedure.",
+        detail: before.body,
+      }, 502);
+    }
+
+    const beforeBody = (before.body ?? {}) as Record<string, unknown>;
+    const previousFee = beforeBody.ProcFee ?? null;
+
+    // The patient is checked rather than assumed. An od_id from a stale
+    // screen could otherwise reprice someone else's procedure.
+    if (typeof patNum === "number" && patNum > 0) {
+      if (Number(beforeBody.PatNum ?? 0) !== patNum) {
+        return json({
+          ok: false,
+          error: "That procedure belongs to a different patient.",
+        }, 403);
+      }
+    }
+
+    if (body.dry_run === true) {
+      return json({
+        ok: true,
+        dry_run: true,
+        od_id: procNum,
+        proc_code: beforeBody.procCode ?? "",
+        previous_fee: previousFee,
+        would_set_fee: amount,
+        would_put_to: `${OD_BASE_URL}/procedurelogs/${procNum}`,
+      });
+    }
+
+    const put = await odFetch(auth, "PUT", `/procedurelogs/${procNum}`, {
+      ProcFee: amount,
+    });
+
+    if (put.http_status < 200 || put.http_status >= 300) {
+      return json({
+        ok: false,
+        error: "OpenDental would not change that fee.",
+        detail: put.body,
+      }, 502);
+    }
+
+    // The PUT response is not proof. The stored row is.
+    const after = await odFetch(auth, "GET", `/procedurelogs/${procNum}`);
+    const afterBody = (after.body ?? {}) as Record<string, unknown>;
+    const storedFee = afterBody.ProcFee ?? null;
+
+    const stuck = Math.round(Number(storedFee ?? -1) * 100) ===
+      Math.round(amount * 100);
+
+    return json({
+      ok: stuck,
+      od_id: procNum,
+      proc_code: afterBody.procCode ?? beforeBody.procCode ?? "",
+      tooth_num: String(afterBody.ToothNum ?? ""),
+      previous_fee: previousFee,
+      requested_fee: amount,
+      stored_fee: storedFee,
+      // False means OpenDental accepted the call and then kept its own
+      // number. The screen should show what is actually stored.
+      fee_honoured: stuck,
+      error: stuck
+        ? undefined
+        : "OpenDental accepted the change but kept its own fee.",
+      changed_by: userData.user.email,
+      changed_at: new Date().toISOString(),
     });
   }
 

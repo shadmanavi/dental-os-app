@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v5
+// Chairside charting — v7
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -59,6 +59,47 @@
 //         the provider table, and each row now names the dentist, or
 //         the hygienist on a hygiene appointment.
 //
+//   v6  Shows what things cost, and lets a fee be changed for one
+//       procedure on one visit.
+//
+//       od-chart v6 resolves the patient's fee schedule — insurance
+//       first, then the patient record, which is where a membership
+//       lands — so the screen can name which schedule is pricing this
+//       visit rather than leaving it a mystery.
+//
+//       A crown is billed across two visits, and od-chart halves the
+//       fee between them. The ledger therefore shows both lines, and a
+//       committed crown reads as two rows rather than one.
+//
+//       The override sets the fee for this procedure, this patient,
+//       this visit. It does not touch a fee schedule; changing what a
+//       code costs for everyone stays in OpenDental. It is offered on
+//       paired tiles, where the app is already stating a fee, and left
+//       off everything else, where OpenDental prices the line and this
+//       screen has no business interfering.
+//
+//       Not done here: a price on each tile before it is tapped. The
+//       menu deliberately does not carry the code rule — resolving a
+//       code is the server's job — so the browser cannot look a price
+//       up. Showing one needs od-chart to send it per tile.
+//   v7  Sized for the tablet it actually runs on, and the fee moved to
+//       where it is read.
+//
+//       On a nine-inch tablet the two panels were stacking instead of
+//       sitting side by side, so Existing filled the screen and
+//       Diagnosed and the ledger were below the fold. The cause was the
+//       breakpoint: the panels split at lg, which is 1024px, and the
+//       tablet reports about 960. Everything now splits at md, and the
+//       whole screen is denser — shorter teeth, smaller tiles, tighter
+//       padding — with the roomier sizes kept for a desktop.
+//
+//       The fee is now edited by tapping it in the ledger. Asking for
+//       it before committing was the wrong moment: the number that
+//       needs changing is the one already on screen, and by then it
+//       belongs to a procedure rather than to a tile. Editing it there
+//       also drops the rule that a crown's two halves stay equal —
+//       once both lines exist they are two ordinary procedures.
+//
 // Design notes:
 //   - Dark, high-contrast, large targets. The user is standing, gloved,
 //     and not going to type.
@@ -113,6 +154,23 @@ type Tile = {
   entry_kind: "procedure" | "tooth_initial";
   initial_type: string | null;
   needs_surfaces: boolean;
+  treat_area: number | null;
+  delivery_code: string | null;
+  is_paired: boolean;
+  addons: TileAddon[];
+};
+
+type TileAddon = {
+  id: string;
+  label: string;
+  proc_code: string;
+  default_on: boolean;
+};
+
+type FeeSchedule = {
+  source: "insurance plan" | "patient record" | "nothing set";
+  fee_sched: number;
+  fee_sched_name: string;
 };
 
 type Category = {
@@ -147,6 +205,12 @@ type LedgerEntry = {
 };
 
 type Bucket = "existing" | "diagnosed";
+
+type NavState = {
+  category: Category | null;
+  pending: Tile | null;
+  surfaces: string[];
+};
 
 // One row of the day. Shaped by the Edge Function so this file never
 // has to know that AptStatus is an integer or that an unset timestamp
@@ -273,6 +337,15 @@ function whoIsSeeingThem(appt: Appointment): string {
   return appt.prov_name || appt.prov_abbr || "";
 }
 
+// Whole dollars where the cents are zero, because a fee schedule is
+// mostly round numbers and "$1,366" reads faster than "$1,366.00".
+function money(amount: number): string {
+  const rounded = Math.round(amount * 100) / 100;
+  return rounded % 1 === 0
+    ? `$${rounded.toLocaleString()}`
+    : `$${rounded.toFixed(2)}`;
+}
+
 // OpenDental's own rejection text arrives in `detail`. Without it the
 // user is told only that something failed, which is what v1 did.
 function describeFailure(payload: unknown): string {
@@ -365,17 +438,25 @@ export default function ChartPage() {
   const [menu, setMenu] = useState<Category[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [resolvedProv, setResolvedProv] = useState<ResolvedProvider | null>(null);
+  const [feeSchedule, setFeeSchedule] = useState<FeeSchedule | null>(null);
   const [provOverride, setProvOverride] = useState<number | null>(null);
 
   const [tooth, setTooth] = useState<string>("");
   const [nav, setNav] = useState<
-    Record<Bucket, { category: Category | null; pending: Tile | null; surfaces: string[] }>
+    Record<Bucket, NavState>
   >({
     existing: { category: null, pending: null, surfaces: [] },
     diagnosed: { category: null, pending: null, surfaces: [] },
   });
 
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
+
+  // Which ledger row has its fee open for editing, and what has been
+  // typed so far. Kept as text so a half-entered number does not keep
+  // collapsing while the clinician is still typing.
+  const [editingFee, setEditingFee] = useState("");
+  const [feeDraft, setFeeDraft] = useState("");
+  const [savingFee, setSavingFee] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState("");
 
@@ -568,6 +649,7 @@ export default function ChartPage() {
       setMenu(data.menu ?? []);
       setProviders(data.providers ?? []);
       setResolvedProv(data.resolved_provider ?? null);
+      setFeeSchedule(data.fee_schedule ?? null);
       setProvOverride(null);
       setLedger([]);
       setTooth("");
@@ -586,6 +668,7 @@ export default function ChartPage() {
     setProcedures([]);
     setMissingTeeth([]);
     setMenu([]);
+    setFeeSchedule(null);
     setLedger([]);
     setTooth("");
     resetNav();
@@ -626,6 +709,17 @@ export default function ChartPage() {
 
   const missingSet = useMemo(() => new Set(missingTeeth), [missingTeeth]);
 
+  // What this visit has added up to so far. Only what OpenDental
+  // actually returned, so it cannot drift from the account.
+  const ledgerTotal = useMemo(
+    () =>
+      ledger.reduce((sum, e) => {
+        const value = e.fee === null ? 0 : Number(e.fee);
+        return Number.isFinite(value) ? sum + value : sum;
+      }, 0),
+    [ledger],
+  );
+
   const toothProcedures = useMemo(
     () => (tooth === "" ? [] : procedures.filter((p) => p.ToothNum === tooth)),
     [procedures, tooth],
@@ -634,10 +728,7 @@ export default function ChartPage() {
   // -------------------------------------------------------------------
   // Panel navigation
   // -------------------------------------------------------------------
-  function setBucketNav(
-    bucket: Bucket,
-    patch: Partial<{ category: Category | null; pending: Tile | null; surfaces: string[] }>,
-  ) {
+  function setBucketNav(bucket: Bucket, patch: Partial<NavState>) {
     setNav((prev) => ({ ...prev, [bucket]: { ...prev[bucket], ...patch } }));
   }
 
@@ -662,7 +753,10 @@ export default function ChartPage() {
   function chooseTile(bucket: Bucket, tile: Tile) {
     setCommitError("");
 
-    if (tile.needs_surfaces) {
+    // Surfaces have to be picked, and a paired tile is worth pausing on
+    // because it writes two lines and states a fee. Everything else
+    // still commits on one tap.
+    if (tile.needs_surfaces || tile.is_paired) {
       setBucketNav(bucket, { pending: tile, surfaces: [] });
       return;
     }
@@ -692,27 +786,61 @@ export default function ChartPage() {
         ...(provOverride !== null ? { prov_num: provOverride } : {}),
       });
 
-      const entry: LedgerEntry = {
-        key: `${data.entry_kind}-${data.od_id}-${Date.now()}`,
+      // A crown writes two lines and an add-on writes another, so one
+      // tap can produce several ledger rows. The flat fields are still
+      // there for the single-line case.
+      const returned = Array.isArray(data.lines) && data.lines.length > 0
+        ? (data.lines as Record<string, unknown>[])
+        : [{
+          role: "base",
+          label: tile.label,
+          proc_code: data.proc_code ?? "",
+          od_id: data.od_id ?? null,
+          descript: data.descript ?? "",
+          tooth_num: data.tooth_num ?? tooth,
+          surf: data.surf ?? "",
+          fee: data.fee ?? null,
+          prov_abbr: data.prov_abbr ?? "",
+          undoable: data.undoable !== false,
+        }];
+
+      const stamp = Date.now();
+
+      const entries: LedgerEntry[] = returned.map((line, index) => ({
+        key: `${data.entry_kind}-${line.od_id ?? "none"}-${stamp}-${index}`,
         bucket,
         entry_kind: data.entry_kind,
-        od_id: data.od_id ?? null,
-        label: tile.label,
-        code: data.proc_code ?? "",
-        descript: data.descript ?? "",
-        tooth: data.tooth_num ?? tooth,
-        surf: data.surf ?? "",
-        fee: data.fee ?? null,
-        provAbbr: data.prov_abbr ?? "",
+        od_id: typeof line.od_id === "number" ? line.od_id : null,
+        label: String(line.label ?? tile.label),
+        code: String(line.proc_code ?? ""),
+        descript: String(line.descript ?? ""),
+        tooth: String(line.tooth_num ?? tooth),
+        surf: String(line.surf ?? ""),
+        fee: line.fee === null || line.fee === undefined
+          ? null
+          : String(line.fee),
+        provAbbr: String(line.prov_abbr ?? ""),
         removing: false,
-        undoable: data.undoable !== false,
-      };
+        undoable: line.undoable !== false,
+      }));
 
-      setLedger((prev) => [entry, ...prev]);
+      // Newest first, and the lines of one commit stay in the order
+      // they were written so a crown reads prep then delivery.
+      setLedger((prev) => [...entries, ...prev]);
 
       if (data.entry_kind === "tooth_initial") {
+        const marked = entries[0]?.tooth ?? tooth;
         setMissingTeeth((prev) =>
-          prev.includes(entry.tooth) ? prev : [...prev, entry.tooth]
+          prev.includes(marked) ? prev : [...prev, marked]
+        );
+      }
+
+      // A line landed and a later one was refused. Nothing is rolled
+      // back, so say what is missing rather than looking successful.
+      if (data.partial === true) {
+        const failed = data.partial_failure as Record<string, unknown> | null;
+        setCommitError(
+          `${String(failed?.label ?? "A line")} was refused, so it is not in OpenDental. The rest went through.`,
         );
       }
 
@@ -721,6 +849,82 @@ export default function ChartPage() {
       setCommitError(caught instanceof Error ? caught.message : "Couldn't save that.");
     } finally {
       setCommitting(false);
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Fee — changes what is already in OpenDental
+  //
+  // No halving. A crown's two lines start equal because that is a
+  // sensible default, not a rule; once they exist each is an ordinary
+  // procedure and can carry whatever the office decides.
+  // -------------------------------------------------------------------
+  function startEditingFee(entry: LedgerEntry) {
+    if (entry.od_id === null) return;
+    setEditingFee(entry.key);
+    setFeeDraft(entry.fee === null ? "" : String(entry.fee));
+    setCommitError("");
+  }
+
+  function cancelEditingFee() {
+    setEditingFee("");
+    setFeeDraft("");
+  }
+
+  async function saveFee(entry: LedgerEntry) {
+    if (entry.od_id === null) return;
+
+    const typed = feeDraft.trim().replace(/^\$/, "").replace(/,/g, "");
+
+    // Closing the box without changing anything is not an edit.
+    if (typed === "" || typed === String(entry.fee)) {
+      cancelEditingFee();
+      return;
+    }
+
+    const value = Number(typed);
+
+    if (!Number.isFinite(value) || value < 0) {
+      setCommitError("That fee is not a number.");
+      return;
+    }
+
+    setSavingFee(true);
+    setCommitError("");
+
+    try {
+      const data = await callChart({
+        action: "set_fee",
+        pat_num: patient?.PatNum,
+        od_id: entry.od_id,
+        fee: value,
+      });
+
+      // What OpenDental stored, not what was asked for. It has been
+      // seen accepting a value and keeping its own.
+      const stored = data.stored_fee ?? null;
+
+      setLedger((prev) =>
+        prev.map((e) =>
+          e.key === entry.key
+            ? { ...e, fee: stored === null ? null : String(stored) }
+            : e
+        )
+      );
+
+      if (data.fee_honoured === false) {
+        setCommitError(
+          "OpenDental accepted the change but kept its own fee. The number shown is what is stored.",
+        );
+      }
+
+      cancelEditingFee();
+    } catch (caught) {
+      setCommitError(
+        caught instanceof Error ? caught.message : "Couldn't change that fee.",
+      );
+    } finally {
+      setSavingFee(false);
     }
   }
 
@@ -1057,7 +1261,7 @@ export default function ChartPage() {
   const buckets: Bucket[] = ["existing", "diagnosed"];
 
   return (
-    <main className="min-h-screen bg-[#0B1719] px-4 py-5 text-[#EDF3F1]">
+    <main className="min-h-screen bg-[#0B1719] px-3 py-3 text-[#EDF3F1] md:px-4 md:py-5">
       <div className="mx-auto w-full max-w-[1400px]">
         {/* Patient bar */}
         <div className="flex flex-wrap items-center gap-4 border-b border-[#2C4E54] pb-3">
@@ -1067,6 +1271,16 @@ export default function ChartPage() {
             </h1>
             <p className="font-mono text-xs text-[#8AA6AB]">
               #{patient.ChartNumber} · {usDate(patient.Birthdate)}
+              {feeSchedule !== null && feeSchedule.fee_sched > 0 && (
+                <>
+                  {" · "}
+                  <span
+                    title={`Fees come from this schedule, via the ${feeSchedule.source}. Change it in OpenDental.`}
+                  >
+                    {feeSchedule.fee_sched_name}
+                  </span>
+                </>
+              )}
             </p>
           </div>
 
@@ -1104,11 +1318,11 @@ export default function ChartPage() {
         </div>
 
         {/* Tooth chart */}
-        <section className="mt-4 rounded-2xl border border-[#2C4E54] bg-[#122326] p-3">
+        <section className="mt-3 rounded-2xl border border-[#2C4E54] bg-[#122326] p-2 md:p-3">
           {[UPPER, LOWER].map((arch, archIndex) => (
             <div
               key={archIndex}
-              className={`grid grid-cols-[repeat(16,minmax(0,1fr))] gap-1.5 ${archIndex === 1 ? "mt-2" : ""}`}
+              className={`grid grid-cols-[repeat(16,minmax(0,1fr))] gap-1 md:gap-1.5 ${archIndex === 1 ? "mt-1.5 md:mt-2" : ""}`}
             >
               {arch.map((n) => {
                 const key = String(n);
@@ -1125,7 +1339,7 @@ export default function ChartPage() {
                       resetNav();
                       setCommitError("");
                     }}
-                    className={`flex h-16 flex-col items-center justify-center gap-1 rounded-lg border font-mono text-[13px] font-semibold transition-transform active:scale-95 ${
+                    className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg border font-mono text-[11.5px] font-semibold transition-transform active:scale-95 md:h-14 md:gap-1 md:text-[13px] ${
                       selected
                         ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
                         : isMissing
@@ -1170,7 +1384,7 @@ export default function ChartPage() {
         )}
 
         {/* Panels */}
-        <div className="mt-4 grid gap-4 lg:grid-cols-2">
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
           {buckets.map((bucket) => {
             const state = nav[bucket];
             const cats = menu.filter((m) => m.bucket === bucket);
@@ -1180,7 +1394,7 @@ export default function ChartPage() {
             return (
               <section
                 key={bucket}
-                className="flex min-h-[430px] flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]"
+                className="flex min-h-[260px] flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326] md:min-h-[380px]"
               >
                 <div className="flex items-center gap-2.5 border-b border-[#2C4E54] px-4 py-3">
                   <i
@@ -1218,32 +1432,47 @@ export default function ChartPage() {
                     </span>
                   </div>
                 ) : state.pending !== null ? (
-                  // ---------- surface picker ----------
+                  // ---------- confirm: surfaces, and the fee ----------
                   <>
-                    <div className="grid grid-cols-5 gap-2 p-3 pb-0">
-                      {SURFACES.map((s) => {
-                        const on = state.surfaces.includes(s);
-                        return (
-                          <button
-                            key={s}
-                            type="button"
-                            onClick={() => toggleSurface(bucket, s)}
-                            className={`h-[74px] rounded-xl border text-[22px] font-bold transition-transform active:scale-95 ${
-                              on
-                                ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
-                                : "border-[#2C4E54] bg-[#193034] text-[#EDF3F1]"
-                            }`}
-                          >
-                            {s}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {state.pending.needs_surfaces && (
+                      <div className="grid grid-cols-5 gap-2 p-3 pb-0">
+                        {SURFACES.map((s) => {
+                          const on = state.surfaces.includes(s);
+                          return (
+                            <button
+                              key={s}
+                              type="button"
+                              onClick={() => toggleSurface(bucket, s)}
+                              className={`h-[56px] rounded-xl border text-[19px] font-bold transition-transform active:scale-95 md:h-[74px] md:text-[22px] ${
+                                on
+                                  ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                                  : "border-[#2C4E54] bg-[#193034] text-[#EDF3F1]"
+                              }`}
+                            >
+                              {s}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {state.pending.is_paired && (
+                      <p className="m-3 mb-0 rounded-xl border border-[#2C4E54] bg-[#0F1D20] p-3 text-[12.5px] leading-snug text-[#8AA6AB]">
+                        Two visits: the prep now and{" "}
+                        <span className="font-mono text-[#EDF3F1]">
+                          {state.pending.delivery_code}
+                        </span>{" "}
+                        at the seat. The fee is split evenly, and either
+                        line can be changed below once it is written.
+                      </p>
+                    )}
 
                     <button
                       type="button"
-                      onClick={() => commit(bucket, state.pending!, state.surfaces)}
-                      disabled={state.surfaces.length === 0 || committing}
+                      onClick={() =>
+                        commit(bucket, state.pending!, state.surfaces)}
+                      disabled={(state.pending.needs_surfaces &&
+                        state.surfaces.length === 0) || committing}
                       className="m-3 rounded-xl bg-[#EDF3F1] p-4 text-[15px] font-semibold text-[#0B1719] disabled:opacity-35"
                     >
                       {committing
@@ -1255,7 +1484,7 @@ export default function ChartPage() {
                   </>
                 ) : (
                   // ---------- categories or tiles ----------
-                  <div className="grid flex-1 grid-cols-2 content-start gap-2.5 p-3">
+                  <div className="grid flex-1 grid-cols-2 content-start gap-2 p-2.5 md:gap-2.5 md:p-3">
                     {(state.category ? state.category.tiles : cats).map((item) => {
                       const isCategory = state.category === null;
                       const label = item.label;
@@ -1276,9 +1505,9 @@ export default function ChartPage() {
                               chooseTile(bucket, item as Tile);
                             }
                           }}
-                          className="flex min-h-[104px] flex-col justify-between rounded-xl border border-[#2C4E54] bg-[#193034] p-3 text-left transition-transform hover:bg-[#204045] active:scale-[0.97] disabled:opacity-50"
+                          className="flex min-h-[68px] flex-col justify-between gap-1 rounded-xl border border-[#2C4E54] bg-[#193034] p-2.5 text-left transition-transform hover:bg-[#204045] active:scale-[0.97] disabled:opacity-50 md:min-h-[92px] md:p-3"
                         >
-                          <span className="text-[15px] leading-tight font-semibold">
+                          <span className="text-[13px] leading-tight font-semibold md:text-[15px]">
                             {label}
                           </span>
                           {isCategory ? (
@@ -1291,7 +1520,9 @@ export default function ChartPage() {
                                 ? "mark tooth"
                                 : (item as Tile).needs_surfaces
                                   ? "pick surfaces"
-                                  : "one tap"}
+                                  : (item as Tile).is_paired
+                                    ? "two visits"
+                                    : "one tap"}
                             </span>
                           )}
                         </button>
@@ -1305,7 +1536,7 @@ export default function ChartPage() {
         </div>
 
         {/* Ledger */}
-        <section className="mt-4 overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+        <section className="mt-3 overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
           <div className="flex items-center gap-3 border-b border-[#2C4E54] px-4 py-3">
             <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase">
               This visit
@@ -1313,6 +1544,11 @@ export default function ChartPage() {
             <span className="font-mono text-xs text-[#8AA6AB]">
               {ledger.length} {ledger.length === 1 ? "entry" : "entries"}
             </span>
+            {ledgerTotal > 0 && (
+              <span className="font-mono text-xs text-[#8AA6AB]">
+                {money(ledgerTotal)}
+              </span>
+            )}
             <span className="ml-auto font-mono text-xs text-[#5E7B80]">
               written to OpenDental
             </span>
@@ -1352,9 +1588,37 @@ export default function ChartPage() {
                       {e.surf}
                     </span>
                   )}
-                  <span className="w-16 flex-none text-right font-mono text-[13px] text-[#8AA6AB]">
-                    {e.fee !== null ? `$${e.fee}` : "—"}
-                  </span>
+                  {/* The fee is edited where it is read. A dash means
+                      OpenDental has not priced it, which is not the
+                      same as a fee of zero. */}
+                  {editingFee === e.key ? (
+                    <input
+                      type="text"
+                      inputMode="decimal"
+                      autoFocus
+                      value={feeDraft}
+                      onChange={(ev) => setFeeDraft(ev.target.value)}
+                      onKeyDown={(ev) => {
+                        if (ev.key === "Enter") saveFee(e);
+                        if (ev.key === "Escape") cancelEditingFee();
+                      }}
+                      onBlur={() => saveFee(e)}
+                      disabled={savingFee}
+                      className="w-20 flex-none rounded border border-[#F0A93B] bg-[#0F1D20] px-1.5 py-1 text-right font-mono text-[13px] text-[#EDF3F1] focus:outline-none disabled:opacity-50"
+                    />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => startEditingFee(e)}
+                      disabled={e.od_id === null || savingFee}
+                      title={e.od_id === null
+                        ? "Nothing to change"
+                        : "Tap to change this fee in OpenDental"}
+                      className="w-16 flex-none rounded px-1 py-1 text-right font-mono text-[13px] text-[#8AA6AB] hover:bg-[#193034] hover:text-[#EDF3F1] disabled:hover:bg-transparent disabled:hover:text-[#8AA6AB]"
+                    >
+                      {e.fee !== null ? `$${e.fee}` : "—"}
+                    </button>
+                  )}
                   <span className="w-16 flex-none text-right font-mono text-xs text-[#5E7B80]">
                     {e.provAbbr}
                   </span>

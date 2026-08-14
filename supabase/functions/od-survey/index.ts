@@ -6,7 +6,7 @@
 // from real volume instead of from a guess about dentistry in general.
 //
 // Deploy path: supabase/functions/od-survey/index.ts
-// Version: 2
+// Version: 4
 // Changelog:
 //   v1  procedure_mix action. One joined SELECT over procedurelog and
 //       procedurecode, grouped by code, ordered by count.
@@ -41,6 +41,52 @@
 //       - Whether a fee row exists at all. A schedule with no row for a
 //         code is not a zero fee; it is a gap, and the two must not be
 //         confused.
+//   v3  v2's fee query failed. It selected fee.FeeSchedNum, and the
+//       column is called FeeSched, so the whole thing came back 400 and
+//       no amounts were read at all. That was the second column name
+//       guessed wrong in this project, so this version stops guessing:
+//       it reads information_schema first and reports the real columns
+//       of every table it is about to touch. The report is part of the
+//       answer, not a debugging aid.
+//
+//       It also corrects the chain. v2 assumed insurance, then the
+//       patient record. Shad found the real second link: a patient with
+//       no insurance is priced from a discount plan — Greenwood's is
+//       "Dental Masters Membership" — which carries its own fee
+//       schedule. The patient record is the third link, not the second.
+//       That also explains the ADC-365 membership code and the "Dental
+//       Max" and "Dental Pro" categories the procedure survey turned up
+//       and could not place.
+//
+//       Provider fee schedules are deliberately not consulted. Shad was
+//       explicit: never use them.
+//
+//       The discount plan tables are queried defensively. Their column
+//       names are not in OpenDental's published API documentation, so
+//       the query is built from what information_schema actually
+//       reports and skipped, with a plain explanation, if the columns
+//       are not there.
+//   v4  v3 could not read the schema at all. OpenDental refuses any
+//       query containing the word SCHEMA, so the information_schema
+//       call came back 401 with "Query cannot contain \"SCHEMA\"." and
+//       everything that depended on it reported a false negative: the
+//       fee column looked missing and the discount plan tables looked
+//       absent, when neither had actually been checked.
+//
+//       So this version stops trying to look the answer up and simply
+//       tries both. It runs the fee query with f.FeeSched, and if that
+//       is rejected, runs it again with f.FeeSchedNum. Whichever
+//       succeeded is reported. Two calls in the worst case, no guessing
+//       in any case.
+//
+//       The discount plan step is gone. v3 was built on the theory that
+//       a membership lives in its own table and forms a middle link in
+//       the chain. It does not: PatNum 17, who holds the Dental Masters
+//       Membership, resolved to fee schedule 410 straight off the
+//       patient record. OpenDental's Discount Plans screen sets
+//       patient.FeeSched and nothing else, so the chain is the two
+//       links Shad described in the first place — insurance, then the
+//       patient record — and provider fee schedules are never used.
 //
 // Why SQL rather than the REST endpoints:
 //   GET /procedurelogs filters by PatNum. Pulling six months across the
@@ -460,6 +506,22 @@ Deno.serve(async (req: Request) => {
       usable.sort((a, b) => a.ordinal - b.ordinal);
       const chosen = usable.length > 0 ? usable[0] : null;
 
+      // The chain, in Shad's order: insurance, then the patient record.
+      // A membership such as Dental Masters sets patient.FeeSched, so it
+      // arrives through the second link rather than needing a third.
+      // Provider fee schedules are never consulted.
+      const resolvedSource = chosen !== null
+        ? "insurance plan"
+        : patientFeeSched > 0
+          ? "patient record"
+          : "nothing set";
+
+      const resolvedSched = chosen !== null ? chosen.fee_sched : patientFeeSched;
+
+      const resolvedSchedName = chosen !== null
+        ? chosen.fee_sched_name
+        : text(r.FeeSchedName);
+
       return {
         pat_num: patNum,
         patient_fee_sched: patientFeeSched,
@@ -468,11 +530,9 @@ Deno.serve(async (req: Request) => {
         plan_count: plans.length,
         usable_plan_count: usable.length,
         plans,
-        resolved_source: chosen !== null ? "insurance plan" : "patient record",
-        resolved_fee_sched: chosen !== null ? chosen.fee_sched : patientFeeSched,
-        resolved_fee_sched_name: chosen !== null
-          ? chosen.fee_sched_name
-          : text(r.FeeSchedName),
+        resolved_source: resolvedSource,
+        resolved_fee_sched: resolvedSched,
+        resolved_fee_sched_name: resolvedSchedName,
         // Set on any plan means "read insplan.FeeSched" is too simple.
         pricing_complications: plans
           .filter((pl) => pl.copay_fee_sched > 0 || pl.plan_type !== "")
@@ -496,19 +556,42 @@ Deno.serve(async (req: Request) => {
     const feeRows: Record<string, unknown>[] = [];
     let feeSql = "";
 
-    if (schedNums.size > 0) {
-      feeSql =
-        `SELECT f.FeeSchedNum, f.CodeNum, f.Amount, f.ClinicNum, f.ProvNum, ` +
-        `pc.ProcCode, pc.Descript, fs.Description AS FeeSchedName ` +
-        `FROM fee f ` +
-        `INNER JOIN procedurecode pc ON pc.CodeNum = f.CodeNum ` +
-        `LEFT JOIN feesched fs ON fs.FeeSchedNum = f.FeeSchedNum ` +
-        `WHERE f.FeeSchedNum IN (${[...schedNums].join(",")}) ` +
-        `AND pc.ProcCode IN (${codeList}) ` +
-        `ORDER BY f.FeeSchedNum, pc.ProcCode`;
+    // The fee table's schedule column has now cost three runs. The docs
+    // call it FeeSched in one place and FeeSchedNum in another, and
+    // information_schema cannot be read because OpenDental rejects any
+    // query containing the word SCHEMA. So rather than look it up or
+    // guess again, both are tried and whichever answers is reported.
+    let feeSchedColumn = "";
+    let feeColumnError: unknown = null;
 
-      const feeRes = await shortQueryAll(auth, feeSql, calls, 6);
-      if (feeRes.ok) feeRows.push(...feeRes.rows);
+    if (schedNums.size > 0) {
+      const schedList = [...schedNums].join(",");
+
+      function buildFeeSql(column: string): string {
+        return `SELECT f.${column} AS FeeSchedNum, f.CodeNum, f.Amount, ` +
+          `f.ClinicNum, f.ProvNum, ` +
+          `pc.ProcCode, pc.Descript, fs.Description AS FeeSchedName ` +
+          `FROM fee f ` +
+          `INNER JOIN procedurecode pc ON pc.CodeNum = f.CodeNum ` +
+          `LEFT JOIN feesched fs ON fs.FeeSchedNum = f.${column} ` +
+          `WHERE f.${column} IN (${schedList}) ` +
+          `AND pc.ProcCode IN (${codeList}) ` +
+          `ORDER BY f.${column}, pc.ProcCode`;
+      }
+
+      for (const candidate of ["FeeSched", "FeeSchedNum"]) {
+        const attempt = buildFeeSql(candidate);
+        const res = await shortQueryAll(auth, attempt, calls, 6);
+
+        if (res.ok) {
+          feeSchedColumn = candidate;
+          feeSql = attempt;
+          feeRows.push(...res.rows);
+          break;
+        }
+
+        feeColumnError = res.failure?.body ?? null;
+      }
     }
 
     const fees = feeRows.map((r) => ({
@@ -566,6 +649,13 @@ Deno.serve(async (req: Request) => {
         patients_examined: patients.length,
         patients_auto_selected: patientsAutoSelected,
         codes_examined: codes,
+        // Read rather than assumed. v2 guessed this column and the whole
+        // fee query failed silently as a result.
+        // Discovered by trying, not by assuming.
+        fee_schedule_column: feeSchedColumn === ""
+          ? "neither FeeSched nor FeeSchedNum worked"
+          : feeSchedColumn,
+        fee_column_error: feeSchedColumn === "" ? feeColumnError : null,
         plans_query_ok: plansRes.ok,
         plans_query_error: plansRes.ok ? null : plansRes.failure?.body ?? null,
         fee_rows_found: fees.length,

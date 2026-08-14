@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v8
+// Chairside charting — v10
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -103,6 +103,24 @@
 //       name then first, which matters because surnames repeat: one
 //       day's schedule held two Mendozas and two Chavezes. The server
 //       does the interpreting, so the rule lives in one place.
+//   v9  Sized properly for the tablet this time.
+//
+//       v7 split the panels at md and moved the roomier sizes there
+//       too, which was the wrong way round: the tablet reports about
+//       960px, comfortably above md's 768, so it took the desktop
+//       sizing and the tiles stayed large. Every size bump now happens
+//       at xl instead, so the tablet keeps the compact set and only a
+//       real monitor gets the generous one.
+//
+//       The tile grid also stretched to fill its panel, which made four
+//       buttons occupy the height of eight. It packs to the top now,
+//       and the panels size to their contents rather than to a floor.
+//
+//   v10 Category cards are shorter than tile cards. On the nine-inch
+//       tablet they were sized like procedure tiles but carry only a
+//       label and a count, so most of each card was empty and the list
+//       ran longer than it needed to. 52px still clears the 44px a
+//       gloved fingertip needs.
 //
 // Design notes:
 //   - Dark, high-contrast, large targets. The user is standing, gloved,
@@ -1266,7 +1284,7 @@ export default function ChartPage() {
   const buckets: Bucket[] = ["existing", "diagnosed"];
 
   return (
-    <main className="min-h-screen bg-[#0B1719] px-3 py-3 text-[#EDF3F1] md:px-4 md:py-5">
+    <main className="min-h-screen bg-[#0B1719] px-3 py-3 text-[#EDF3F1] xl:px-4 xl:py-5">
       <div className="mx-auto w-full max-w-[1400px]">
         {/* Patient bar */}
         <div className="flex flex-wrap items-center gap-4 border-b border-[#2C4E54] pb-3">
@@ -1323,11 +1341,11 @@ export default function ChartPage() {
         </div>
 
         {/* Tooth chart */}
-        <section className="mt-3 rounded-2xl border border-[#2C4E54] bg-[#122326] p-2 md:p-3">
+        <section className="mt-3 rounded-2xl border border-[#2C4E54] bg-[#122326] p-2 xl:p-3">
           {[UPPER, LOWER].map((arch, archIndex) => (
             <div
               key={archIndex}
-              className={`grid grid-cols-[repeat(16,minmax(0,1fr))] gap-1 md:gap-1.5 ${archIndex === 1 ? "mt-1.5 md:mt-2" : ""}`}
+              className={`grid grid-cols-[repeat(16,minmax(0,1fr))] gap-1 xl:gap-1.5 ${archIndex === 1 ? "mt-1.5 xl:mt-2" : ""}`}
             >
               {arch.map((n) => {
                 const key = String(n);
@@ -1344,7 +1362,7 @@ export default function ChartPage() {
                       resetNav();
                       setCommitError("");
                     }}
-                    className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg border font-mono text-[11.5px] font-semibold transition-transform active:scale-95 md:h-14 md:gap-1 md:text-[13px] ${
+                    className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg border font-mono text-[11.5px] font-semibold transition-transform active:scale-95 xl:h-14 xl:gap-1 xl:text-[13px] ${
                       selected
                         ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
                         : isMissing
@@ -1399,7 +1417,7 @@ export default function ChartPage() {
             return (
               <section
                 key={bucket}
-                className="flex min-h-[260px] flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326] md:min-h-[380px]"
+                className="flex min-h-[200px] flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326] xl:min-h-[340px]"
               >
                 <div className="flex items-center gap-2.5 border-b border-[#2C4E54] px-4 py-3">
                   <i
@@ -1448,7 +1466,7 @@ export default function ChartPage() {
                               key={s}
                               type="button"
                               onClick={() => toggleSurface(bucket, s)}
-                              className={`h-[56px] rounded-xl border text-[19px] font-bold transition-transform active:scale-95 md:h-[74px] md:text-[22px] ${
+                              className={`h-[56px] rounded-xl border text-[19px] font-bold transition-transform active:scale-95 xl:h-[74px] xl:text-[22px] ${
                                 on
                                   ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
                                   : "border-[#2C4E54] bg-[#193034] text-[#EDF3F1]"
@@ -1489,7 +1507,7 @@ export default function ChartPage() {
                   </>
                 ) : (
                   // ---------- categories or tiles ----------
-                  <div className="grid flex-1 grid-cols-2 content-start gap-2 p-2.5 md:gap-2.5 md:p-3">
+                  <div className="grid grid-cols-2 content-start gap-2 p-2.5 xl:gap-2.5 xl:p-3">
                     {(state.category ? state.category.tiles : cats).map((item) => {
                       const isCategory = state.category === null;
                       const label = item.label;
@@ -1510,14 +1528,25 @@ export default function ChartPage() {
                               chooseTile(bucket, item as Tile);
                             }
                           }}
-                          className="flex min-h-[68px] flex-col justify-between gap-1 rounded-xl border border-[#2C4E54] bg-[#193034] p-2.5 text-left transition-transform hover:bg-[#204045] active:scale-[0.97] disabled:opacity-50 md:min-h-[92px] md:p-3"
+                          className={`flex flex-col justify-between gap-1 rounded-xl border border-[#2C4E54] bg-[#193034] p-2.5 text-left transition-transform hover:bg-[#204045] active:scale-[0.97] disabled:opacity-50 xl:p-3 ${
+                            // A category card carries a label and a count,
+                            // so it does not need a procedure tile's height.
+                            // Still comfortably above the 44px that a gloved
+                            // fingertip needs.
+                            isCategory
+                              ? "min-h-[52px] xl:min-h-[64px]"
+                              : "min-h-[68px] xl:min-h-[92px]"
+                          }`}
                         >
-                          <span className="text-[13px] leading-tight font-semibold md:text-[15px]">
+                          <span className="text-[13px] leading-tight font-semibold xl:text-[15px]">
                             {label}
                           </span>
                           {isCategory ? (
                             <span className="font-mono text-xs text-[#8AA6AB]">
-                              {(item as Category).tiles.length} options ›
+                              {(item as Category).tiles.length}{" "}
+                              {(item as Category).tiles.length === 1
+                                ? "option"
+                                : "options"} ›
                             </span>
                           ) : (
                             <span className="font-mono text-xs text-[#8AA6AB]">

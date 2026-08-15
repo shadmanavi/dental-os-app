@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v15
+// Chairside charting — v16
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -223,6 +223,120 @@
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
 //
+//   v16 The action bar moves into the title row, the plan gets signed,
+//       and every write leaves through one door.
+//
+//       The bulk controls used to appear only once something was
+//       ticked, which meant the coordinator had to discover them by
+//       accident. They now sit in the title row above the columns they
+//       act on, greyed until a row is selected, so the screen says what
+//       it can do before being asked. The master checkbox replaces the
+//       Clear button — it is the same gesture in one control, and it
+//       shows an indeterminate state when only some rows are ticked.
+//
+//       Bulk diagnosis is new. v15 could set a diagnosis one row at a
+//       time but not several, which is the wrong way round: a quadrant
+//       of caries is one finding entered once, not four.
+//
+//       Pre-Auth is new and is a toggle. Whether a procedure needs a
+//       preauthorization is the one fact about it OpenDental holds
+//       nowhere — no field on the code, the fee schedule, the plan, the
+//       carrier or the benefit, and no preauth table. It is written as
+//       a fixed token in the procedure note, and od-plan v6 both writes
+//       and removes it. A one-way mark would be worse than none: a
+//       procedure flagged by accident would sit on the biller's
+//       worklist forever.
+//
+//       Presented by moved to the Procedures tab, beside the provider.
+//       It belongs where the rest of "who is in the room" already is,
+//       and the Plan tab is what the patient reads.
+//
+//       Signing files the plan. The button flips every Diag row to its
+//       Acc twin, then builds the PDF and files it into OpenDental's
+//       Imaging module under Treatment Plans. Both steps are named
+//       before they run. There is no signature capture yet, so the plan
+//       files unsigned and says so on the page — v17 adds the canvas.
+//
+//       Patient accepted has gone from the Plan tab. Two buttons that
+//       both flipped Diag to Acc, only one of which filed anything, was
+//       an invitation to accept a plan and file nothing.
+//
+//       After filing, the Plan tab stops showing Diag work and shows
+//       what was signed: the accepted rows, the document it was filed
+//       as, and anything left at Diag named as declined and staying on
+//       the plan. That last part matters — declined work is not deleted
+//       here, it is re-presented next visit, and the screen should say
+//       so rather than appear to have lost it.
+//
+//       The plan is what is ticked. It used to be every row at a Diag
+//       priority, chosen for the coordinator, which read well until the
+//       patient who accepted a crown in 2023 and never came back walked
+//       in again: that crown is at Acc, still undone, and nothing on
+//       this screen could put it in front of them a second time.
+//       Ticking a row is now the whole rule — Diag, Acc or unprioritised
+//       — so re-presenting unfinished work is the same gesture as
+//       presenting new work.
+//
+//       Rows arrive unticked. Everything else in this app arrives
+//       checked and is removed by subtraction, and this deliberately
+//       does not: the same checkbox drives Delete, and seventeen rows
+//       pre-ticked beside a delete button is a bad trade for one saved
+//       tap. The master checkbox is one tap when the answer really is
+//       everything.
+//
+//       Only Acc rows dim now. The rule used to dim anything not at
+//       Diag, written when Acc barely existed; it meant accepted work
+//       — the most settled thing on the chart — looked like the least.
+//       Unprioritised rows are no longer dimmed either: nothing has
+//       been decided about them, which is not the same as being done
+//       with them.
+//
+//       Signing only flips what needs flipping. A ticked Acc row is
+//       already accepted and is left alone; a ticked row with no
+//       priority stays as it is, because this screen does not get to
+//       invent a sequence number nobody chose. Only Diag rows move, and
+//       only a Diag row without an Acc twin is an error worth stopping
+//       for.
+//
+//       Pending is now Diagnosed or Incomplete, which is what the list
+//       has always held: OpenDental is asked for ProcStatus 1 and
+//       nothing else, so completed work has never appeared here.
+//
+//       The presenter is remembered per office. There is one treatment
+//       coordinator per office most days, and re-choosing the same name
+//       after every patient is a tax on the common case. It survives a
+//       patient change and a tablet sleeping. It is a name from
+//       OpenDental's user list, not patient data, so nothing here
+//       breaks the rule about what may be stored on the tablet.
+//
+//       Tapping Search now puts the cursor in the box and raises the
+//       keyboard. It never did: the handler only switched tabs, and the
+//       one focus() in the file sat behind a 50ms timer, which is why
+//       focus worked after closing a patient and not after tapping the
+//       tab. iOS opens the keyboard only when focus() runs
+//       synchronously inside the tap gesture, so a timer was never
+//       going to work on the iPad however long it waited.
+//
+//       That means the input has to exist at the moment of the tap, so
+//       both panels are mounted at all times and the inactive one is
+//       moved off screen rather than switched off. display:none was not
+//       an option: an element that is not displayed cannot take focus,
+//       which would have left the fix in exactly the same place.
+//
+//       aria-hidden is deliberately not set on the hidden panel. It
+//       would be the honest thing to say about a panel nobody can see,
+//       but marking a container hidden while it holds the element about
+//       to be focused is worse than saying nothing.
+//
+//       Every OpenDental write now goes through one function. It is the
+//       same synchronous call it was, and nothing about the behaviour
+//       changed. It exists so the write queue can be slotted in behind
+//       it later without touching thirty call sites. The funnel returns
+//       OpenDental's own honoured / stored / present values untouched:
+//       this API has accepted a write and ignored it four separate
+//       times, and a funnel that reported only success or failure would
+//       hide exactly the case worth catching.
+//
 //   v15 Diagnosis, bulk actions, and the Diag/Acc scheme.
 //
 //       The priority list stopped being a mixture. Both offices now
@@ -279,6 +393,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
+import { buildTreatmentPlanPdf } from "@/lib/treatmentPlanPdf";
 
 // ---------------------------------------------------------------------
 // Types
@@ -399,6 +514,10 @@ type PlanRow = {
   covered: boolean;
   no_bill_ins: boolean;
   estimated: boolean;
+  // Marked as needing a preauthorization. Not an OpenDental field —
+  // there isn't one — but a fixed token in the procedure note, written
+  // and removed by od-plan.
+  preauth: boolean;
 };
 
 // A definition list belonging to one office. Never hardcoded: the two
@@ -414,12 +533,41 @@ type DefOption = {
 // Nothing is written until it is confirmed.
 type PendingAction =
   | { kind: "priority"; def_num: number; label: string }
+  | { kind: "dx"; def_num: number; label: string }
+  // Add or remove, decided from what is selected: a set that is
+  // already entirely marked is asking to be unmarked.
+  | { kind: "preauth"; mode: "add" | "remove" }
   | { kind: "delete" };
+
+// What a write into OpenDental came back with. Passed through from the
+// Edge Function untouched — honoured is false when OpenDental took the
+// call and kept its own value, which it has done on four separate
+// fields, and anything that swallowed it would hide the one failure
+// worth knowing about.
+type OdWriteResult = {
+  ok: boolean;
+  honoured?: boolean;
+  present?: boolean;
+  stored?: unknown;
+  [key: string]: unknown;
+};
 
 // An OpenDental user, for naming who presented the plan.
 type Presenter = {
   user_num: number;
   name: string;
+};
+
+// A plan filed into OpenDental during this session. Held in memory
+// only: OpenDental is the record, and reopening the patient tomorrow
+// should read the plan back from there rather than from anything this
+// screen remembered.
+type FiledPlan = {
+  doc_num: number | null;
+  filed_at: string;
+  presenter: string;
+  od_ids: number[];
+  signed: boolean;
 };
 
 type PlanTotals = {
@@ -726,8 +874,15 @@ export default function ChartPage() {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  // Flipping Diag to Acc after the patient accepts.
-  const [accepting, setAccepting] = useState(false);
+  // Signing: flip Diag to Acc, then file the PDF. One button, both
+  // steps, named before it runs.
+  const [signing, setSigning] = useState(false);
+  const [signStep, setSignStep] = useState("");
+  const [filed, setFiled] = useState<FiledPlan | null>(null);
+
+  // The master checkbox needs a ref: indeterminate is a property, not
+  // an attribute, so React cannot set it from JSX.
+  const masterRef = useRef<HTMLInputElement>(null);
 
   // Options for the dropdowns, from this office's own definitions.
   const [priorities, setPriorities] = useState<DefOption[]>([]);
@@ -901,6 +1056,57 @@ export default function ChartPage() {
     [officeSlug],
   );
 
+  // Filing the signed plan is its own function, because it takes a
+  // document rather than a procedure and has nothing to say about
+  // treatment.
+  const callDoc = useCallback(
+    async (payload: Record<string, unknown>) => {
+      const supabase = createClient();
+      const { data, error } = await supabase.functions.invoke("od-tp-doc", {
+        body: { office: officeSlug, ...payload },
+      });
+
+      if (error) {
+        const ctx = (error as { context?: Response }).context;
+        if (ctx && typeof ctx.json === "function") {
+          try {
+            const parsed = await ctx.json();
+            throw new Error(describeFailure(parsed));
+          } catch (inner) {
+            if (inner instanceof Error && inner.message !== "") throw inner;
+          }
+        }
+        throw new Error("The server didn't respond as expected.");
+      }
+
+      if (!data?.ok) throw new Error(describeFailure(data));
+      return data;
+    },
+    [officeSlug],
+  );
+
+  // -------------------------------------------------------------------
+  // One door for every write into OpenDental
+  //
+  // Reads still call callPlan directly. Writes do not: they come
+  // through here, all of them, so there is one place to change when the
+  // write queue arrives rather than one place per control.
+  //
+  // It is deliberately thin. It does not retry, does not reorder, does
+  // not batch — OpenDental has no batch endpoint and serialises
+  // concurrent calls anyway — and it does not interpret the result. The
+  // Edge Function's honoured / stored / present come back untouched,
+  // because a write this API accepted and ignored looks exactly like a
+  // write that worked unless somebody checks.
+  // -------------------------------------------------------------------
+  const odWrite = useCallback(
+    async (payload: Record<string, unknown>): Promise<OdWriteResult> => {
+      const data = await callPlan(payload);
+      return data as OdWriteResult;
+    },
+    [callPlan],
+  );
+
   // -------------------------------------------------------------------
   // Pending work
   //
@@ -966,7 +1172,7 @@ export default function ChartPage() {
     setPlanError("");
 
     try {
-      await callPlan({
+      await odWrite({
         action: "remove",
         pat_num: patient.PatNum,
         od_id: row.od_id,
@@ -991,7 +1197,7 @@ export default function ChartPage() {
     setPlanError("");
 
     try {
-      await callPlan({
+      await odWrite({
         action: "set_priority",
         pat_num: patient.PatNum,
         od_id: row.od_id,
@@ -1025,7 +1231,7 @@ export default function ChartPage() {
     setPlanError("");
 
     try {
-      await callPlan({
+      await odWrite({
         action: "set_fee",
         pat_num: patient.PatNum,
         od_id: row.od_id,
@@ -1050,7 +1256,7 @@ export default function ChartPage() {
     setPlanError("");
 
     try {
-      await callPlan({
+      await odWrite({
         action: "set_dx",
         pat_num: patient.PatNum,
         od_id: row.od_id,
@@ -1075,6 +1281,14 @@ export default function ChartPage() {
     });
   }
 
+  // The master checkbox. Anything ticked means the gesture is "clear",
+  // which is the button it replaced; nothing ticked means "select all".
+  function toggleAll() {
+    setSelected((previous) =>
+      previous.size > 0 ? new Set() : new Set(planRows.map((r) => r.od_id))
+    );
+  }
+
   // One OpenDental call per procedure: there is no batch endpoint, and
   // a failure partway through leaves the rows before it changed. Rather
   // than pretend otherwise, the failures are named and the list is
@@ -1096,13 +1310,28 @@ export default function ChartPage() {
     for (const row of rows) {
       try {
         if (pendingAction.kind === "delete") {
-          await callPlan({
+          await odWrite({
             action: "remove",
             pat_num: patient.PatNum,
             od_id: row.od_id,
           });
+        } else if (pendingAction.kind === "dx") {
+          await odWrite({
+            action: "set_dx",
+            pat_num: patient.PatNum,
+            od_id: row.od_id,
+            dx: pendingAction.def_num,
+          });
+        } else if (pendingAction.kind === "preauth") {
+          await odWrite({
+            action: "set_note",
+            pat_num: patient.PatNum,
+            od_id: row.od_id,
+            note: "preauth",
+            mode: pendingAction.mode,
+          });
         } else {
-          await callPlan({
+          await odWrite({
             action: "set_priority",
             pat_num: patient.PatNum,
             od_id: row.od_id,
@@ -1129,13 +1358,32 @@ export default function ChartPage() {
     await loadPlan(patient.PatNum, true);
   }
 
-  // Acceptance. Every Diag row moves to its Acc twin, keeping its
-  // number, so the sequence the treatment was planned in survives.
-  // This is what the signature will call once the Sign tab is wired.
-  async function acceptPlan() {
-    if (patient === null || chosenRows.length === 0) return;
+  // Signing. Two writes in order: every Diag row moves to its Acc twin,
+  // keeping its number so the sequence the treatment was planned in
+  // survives the patient saying yes; then the plan is built as a PDF and
+  // filed into OpenDental's Imaging module.
+  //
+  // The flip goes first on purpose. If the upload fails the acceptance
+  // still stands in OpenDental, which is the record that matters, and
+  // the document can be filed again. The reverse order would leave a
+  // filed plan claiming an acceptance that never got written.
+  //
+  // The PDF is built from the rows as they were before the flip, with
+  // the Acc label substituted. Reading them back first would mean
+  // waiting on a reload for figures that a priority change cannot
+  // alter.
+  async function signAndFile() {
+    if (patient === null || chosenRows.length === 0 || signing) return;
 
-    const unpaired = chosenRows.filter(
+    const rows = chosenRows;
+
+    // Only a Diag row moves. A ticked Acc row is already accepted and
+    // is being re-presented, not re-accepted; a ticked row with no
+    // priority stays unprioritised, because a sequence number nobody
+    // chose is not this screen's to invent.
+    const toFlip = rows.filter((r) => DIAG_RE.test(r.priority_label.trim()));
+
+    const unpaired = toFlip.filter(
       (r) => accForLabel(r.priority_label) === null,
     );
 
@@ -1149,17 +1397,22 @@ export default function ChartPage() {
       return;
     }
 
-    setAccepting(true);
+    setSigning(true);
     setPlanError("");
+    setSignStep(
+      toFlip.length === 0
+        ? "Building the plan…"
+        : "Accepting in OpenDental…",
+    );
 
     const failed: string[] = [];
 
-    for (const row of chosenRows) {
+    for (const row of toFlip) {
       const target = accForLabel(row.priority_label);
       if (target === null) continue;
 
       try {
-        await callPlan({
+        await odWrite({
           action: "set_priority",
           pat_num: patient.PatNum,
           od_id: row.od_id,
@@ -1172,12 +1425,91 @@ export default function ChartPage() {
       }
     }
 
-    setAccepting(false);
-
+    // A plan that is only partly accepted is not a plan to file. The
+    // rows that did go through stay accepted — they are written and
+    // this screen does not undo clinical writes — but the document
+    // would misstate what OpenDental holds.
     if (failed.length > 0) {
+      setSigning(false);
+      setSignStep("");
       setPlanError(
-        `OpenDental would not accept ${failed.join(", ")}. Everything else went through.`,
+        `OpenDental would not accept ${failed.join(", ")}, so nothing was filed. ` +
+          `Everything else is accepted. Refresh and try again.`,
       );
+      await loadPlan(patient.PatNum, true);
+      return;
+    }
+
+    setSignStep("Building the plan…");
+
+    const presenterName =
+      presenters.find((p) => p.user_num === presenterNum)?.name ?? "";
+
+    try {
+      const { base64 } = buildTreatmentPlanPdf({
+        officeName: officeLabel,
+        officePhone: "",
+        heading: "Treatment Plan",
+        patientName: `${patient.LName}, ${patient.Preferred || patient.FName}`,
+        patientDob: usDate(patient.Birthdate),
+        patientNumber: patient.PatNum,
+        providerName: shownProviderName,
+        presenterName,
+        planDate: usDate(localISODate(new Date())),
+        rows: rows.map((r) => ({
+          priority: accLabelFor(r.priority_label) ?? r.priority_label,
+          tooth: r.tooth,
+          surf: r.surf,
+          code: r.proc_code,
+          description: r.descript,
+          fee: r.fee,
+          allowed: r.allowed,
+          priIns: r.pri_ins,
+          secIns: r.sec_ins,
+          pat: r.pat,
+        })),
+        totals: {
+          fee: chosenTotals.fee,
+          allowed: chosenTotals.allowed,
+          priIns: chosenTotals.pri_ins,
+          secIns: chosenTotals.sec_ins,
+          pat: chosenTotals.pat,
+        },
+        disclaimer:
+          "Insurance figures are OpenDental's own estimates and depend on " +
+          "the plan's deductible and annual maximum. They are an estimate, " +
+          "not a guarantee.",
+        // No canvas yet. The plan files unsigned rather than pretending
+        // otherwise, and the page says so.
+        signatureDataUrl: null,
+      });
+
+      setSignStep("Filing into OpenDental…");
+
+      const result = await callDoc({
+        action: "upload",
+        patNum: patient.PatNum,
+        base64,
+        description: `Treatment Plan ${usDate(localISODate(new Date()))}`,
+      });
+
+      setFiled({
+        doc_num:
+          typeof result.docNum === "number" ? result.docNum : null,
+        filed_at: new Date().toISOString(),
+        presenter: presenterName,
+        od_ids: rows.map((r) => r.od_id),
+        signed: false,
+      });
+    } catch (caught) {
+      setPlanError(
+        caught instanceof Error
+          ? `Accepted in OpenDental, but the plan was not filed: ${caught.message}`
+          : "Accepted in OpenDental, but the plan was not filed.",
+      );
+    } finally {
+      setSigning(false);
+      setSignStep("");
     }
 
     await loadPlan(patient.PatNum, true);
@@ -1331,10 +1663,16 @@ export default function ChartPage() {
     setDiagnoses([]);
     setSessionIds(new Set());
     setSessionMarks({});
-    setPresenterNum(null);
+    // The presenter is deliberately not cleared. It is the same person
+    // for the next patient nearly always, and it is re-read from
+    // storage anyway.
     setEditingPlanFee(null);
+    setFiled(null);
+    setSignStep("");
+    // The same call the tab makes, with no timer. The input is mounted
+    // whichever tab is showing, so there is nothing to wait for.
     if (pickerTab === "search") {
-      setTimeout(() => searchRef.current?.focus(), 50);
+      searchRef.current?.focus();
     }
   }
 
@@ -1542,15 +1880,112 @@ export default function ChartPage() {
   // What the patient is shown: everything still at a Diag priority.
   // Work declined at an earlier visit is still Diag, so it comes back
   // rather than disappearing — re-presenting it is the point.
+  // The plan is what the coordinator ticked. Not what is at Diag:
+  // accepted work that never got done is exactly what needs
+  // re-presenting, and it is at Acc.
   const chosenRows = useMemo(
-    () => planRows.filter((r) => DIAG_RE.test(r.priority_label.trim())),
-    [planRows],
+    () => planRows.filter((r) => selected.has(r.od_id)),
+    [planRows, selected],
   );
 
   const selectedRows = useMemo(
     () => planRows.filter((r) => selected.has(r.od_id)),
     [planRows, selected],
   );
+
+  // How many ticked rows are still awaiting a decision. Everything
+  // else ticked is being re-presented rather than accepted for the
+  // first time, and the Sign tab should not claim otherwise.
+  const diagTicked = useMemo(
+    () =>
+      planRows.filter(
+        (r) => selected.has(r.od_id) && DIAG_RE.test(r.priority_label.trim()),
+      ).length,
+    [planRows, selected],
+  );
+
+  // What the Pre-Auth button will do. A selection that is entirely
+  // marked is asking to be unmarked; anything else is asking to be
+  // marked, so a mixed selection ends up consistent rather than flipped
+  // row by row.
+  const preauthMode: "add" | "remove" = useMemo(
+    () =>
+      selectedRows.length > 0 && selectedRows.every((r) => r.preauth)
+        ? "remove"
+        : "add",
+    [selectedRows],
+  );
+
+  // The rows the filed plan covers, read back from OpenDental rather
+  // than from what was sent, and whatever is still at Diag after it.
+  const acceptedRows = useMemo(
+    () =>
+      filed === null
+        ? []
+        : planRows.filter((r) => filed.od_ids.includes(r.od_id)),
+    [planRows, filed],
+  );
+
+  const declinedRows = useMemo(
+    () =>
+      filed === null
+        ? []
+        : planRows.filter(
+            (r) =>
+              !filed.od_ids.includes(r.od_id) &&
+              DIAG_RE.test(r.priority_label.trim()),
+          ),
+    [planRows, filed],
+  );
+
+  // The presenter, remembered per office. Most days there is one
+  // treatment coordinator at each, and choosing the same name after
+  // every patient is a tax on the ordinary case. Kept per office
+  // because the two have separate user tables and separate staff.
+  //
+  // A name from OpenDental's user list is not patient data, so this is
+  // the one thing on this screen that may outlive the session on the
+  // tablet.
+  useEffect(() => {
+    if (officeSlug === "" || presenters.length === 0) return;
+
+    try {
+      const saved = window.localStorage.getItem(
+        `dental-os-presenter-${officeSlug}`,
+      );
+      if (saved === null) return;
+
+      const num = Number(saved);
+      // Only if that user still exists at this office. Staff leave, and
+      // a stale number would name nobody on a printed plan.
+      if (presenters.some((p) => p.user_num === num)) setPresenterNum(num);
+    } catch {
+      // A tablet with storage disabled just does not remember. Not
+      // worth interrupting anyone over.
+    }
+  }, [officeSlug, presenters]);
+
+  useEffect(() => {
+    if (officeSlug === "" || presenterNum === null) return;
+
+    try {
+      window.localStorage.setItem(
+        `dental-os-presenter-${officeSlug}`,
+        String(presenterNum),
+      );
+    } catch {
+      // As above.
+    }
+  }, [officeSlug, presenterNum]);
+
+  // Indeterminate is a DOM property, not an attribute, so it cannot be
+  // set from JSX and has to be written to the node.
+  useEffect(() => {
+    const node = masterRef.current;
+    if (node === null) return;
+    node.indeterminate =
+      selected.size > 0 && selected.size < planRows.length;
+  }, [selected, planRows]);
 
   // Acc entries by their number, so Diag 2 can find Acc 2 without this
   // file ever knowing a DefNum.
@@ -1571,6 +2006,44 @@ export default function ChartPage() {
     },
     [accByNumber],
   );
+
+  // The Acc label a Diag row becomes, for printing on the plan. Read
+  // from the office's own list rather than assembled, so a office that
+  // spells it differently still prints what OpenDental will hold.
+  const accLabelFor = useCallback(
+    (label: string): string | null => {
+      const defNum = accForLabel(label);
+      if (defNum === null) return null;
+      return priorities.find((p) => p.def_num === defNum)?.label ?? null;
+    },
+    [accForLabel, priorities],
+  );
+
+  // The office as it is named, for the plan's letterhead.
+  const officeLabel = useMemo(
+    () => offices.find((o) => o.slug === officeSlug)?.name ?? "",
+    [offices, officeSlug],
+  );
+
+  // The provider the coordinator is looking at in the header — the
+  // override if one is set, otherwise whoever od-chart resolved. The
+  // plan prints this one, so the paper and the screen agree.
+  //
+  // Printed as a name rather than as the abbreviation the dropdown
+  // shows: the patient is reading this. The parts are OpenDental's own
+  // fields joined in order and nothing is rewritten — the credential
+  // comes from the Suffix field, so whatever the office typed there is
+  // what appears.
+  const shownProviderName = useMemo(() => {
+    const provNum = provOverride ?? resolvedProv?.ProvNum ?? null;
+    const match = providers.find((p) => p.ProvNum === provNum);
+    if (match === undefined) return resolvedProv?.provAbbr ?? "";
+
+    const name = [match.LName, match.FName].filter((s) => s !== "").join(", ");
+    const full = [name, match.Suffix].filter((s) => s !== "").join(" ").trim();
+
+    return full === "" ? match.Abbr : full;
+  }, [providers, provOverride, resolvedProv]);
 
   const chosenTotals = useMemo(() => {
     const sum = chosenRows.reduce(
@@ -1596,6 +2069,43 @@ export default function ChartPage() {
       pat: round(sum.pat),
     } as PlanTotals;
   }, [chosenRows]);
+
+  // What the Plan tab is looking at. Before signing that is every Diag
+  // row, which is what the patient is being asked about. After signing
+  // it is what was filed — by then nothing is at Diag, and a tab that
+  // kept filtering on Diag would empty itself at the moment of
+  // acceptance and read as though the plan had been lost.
+  const planTabRows = useMemo(
+    () => (filed === null ? chosenRows : acceptedRows),
+    [filed, chosenRows, acceptedRows],
+  );
+
+  const planTabTotals = useMemo(() => {
+    if (filed === null) return chosenTotals;
+
+    const sum = acceptedRows.reduce(
+      (acc, r) => ({
+        fee: acc.fee + r.fee,
+        allowed: acc.allowed + (r.allowed ?? 0),
+        pri_ins: acc.pri_ins + r.pri_ins,
+        sec_ins: acc.sec_ins + r.sec_ins,
+        write_off: acc.write_off + r.write_off,
+        pat: acc.pat + r.pat,
+      }),
+      { fee: 0, allowed: 0, pri_ins: 0, sec_ins: 0, write_off: 0, pat: 0 },
+    );
+
+    const round = (n: number) => Math.round(n * 100) / 100;
+
+    return {
+      fee: round(sum.fee),
+      allowed: round(sum.allowed),
+      pri_ins: round(sum.pri_ins),
+      sec_ins: round(sum.sec_ins),
+      write_off: round(sum.write_off),
+      pat: round(sum.pat),
+    } as PlanTotals;
+  }, [filed, chosenTotals, acceptedRows]);
 
   // -------------------------------------------------------------------
   // Render
@@ -1627,7 +2137,14 @@ export default function ChartPage() {
                 <button
                   key={tab}
                   type="button"
-                  onClick={() => setPickerTab(tab)}
+                  // Synchronous, inside the gesture. A setTimeout or a
+                  // requestAnimationFrame here breaks the chain iOS
+                  // requires and the keyboard stays down, even though
+                  // the cursor lands correctly on a PC.
+                  onClick={() => {
+                    setPickerTab(tab);
+                    if (tab === "search") searchRef.current?.focus();
+                  }}
                   className={`px-5 py-2.5 text-sm font-semibold transition-colors ${
                     pickerTab === tab
                       ? "bg-[#EDF3F1] text-[#0B1719]"
@@ -1660,9 +2177,21 @@ export default function ChartPage() {
             <p className="mt-4 text-sm text-[#E4674F]">{loadError}</p>
           )}
 
+          {/* Both panels stay mounted and the inactive one is moved off
+              screen. The search input has to exist before it is tapped,
+              because focus() cannot reach an element that is not in the
+              document — and it cannot reach a display:none one either,
+              which is why this hides by position rather than by
+              display. */}
+
           {/* ---------------- Today ---------------- */}
-          {pickerTab === "today" ? (
-            <>
+          <div
+            className={
+              pickerTab === "today"
+                ? ""
+                : "pointer-events-none absolute -left-[9999px] top-0 h-0 overflow-hidden"
+            }
+          >
               <div className="mt-4 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -1826,17 +2355,26 @@ export default function ChartPage() {
                   </span>
                   <button
                     type="button"
-                    onClick={() => setPickerTab("search")}
+                    onClick={() => {
+                      setPickerTab("search");
+                      searchRef.current?.focus();
+                    }}
                     className="ml-auto text-[#8AA6AB] underline underline-offset-4 hover:text-[#EDF3F1]"
                   >
                     Search by name instead
                   </button>
                 </div>
               )}
-            </>
-          ) : (
-            /* ---------------- Search ---------------- */
-            <>
+          </div>
+
+          {/* ---------------- Search ---------------- */}
+          <div
+            className={
+              pickerTab === "search"
+                ? ""
+                : "pointer-events-none absolute -left-[9999px] top-0 h-0 overflow-hidden"
+            }
+          >
               <div className="mt-4 flex gap-3">
                 <input
                   ref={searchRef}
@@ -1889,8 +2427,7 @@ export default function ChartPage() {
                   </button>
                 ))}
               </div>
-            </>
-          )}
+          </div>
         </div>
       </main>
     );
@@ -1923,7 +2460,33 @@ export default function ChartPage() {
             </p>
           </div>
 
-          <div className="ml-auto flex items-center gap-3">
+          <div className="ml-auto flex flex-wrap items-center gap-3">
+            {/* Who is presenting. OpenDental will not take this through
+                its API — UserNumPresenter is accepted and ignored,
+                proved against the live server — so the name rides on
+                the plan that gets filed instead. It sits here rather
+                than on the Plan tab because this is where the rest of
+                "who is in the room" already is. */}
+            <label htmlFor="presenter" className="text-xs text-[#8AA6AB]">
+              Presented by
+            </label>
+            <select
+              id="presenter"
+              value={presenterNum ?? ""}
+              onChange={(e) =>
+                setPresenterNum(
+                  e.target.value === "" ? null : Number(e.target.value),
+                )}
+              className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-2 text-sm text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none"
+            >
+              <option value="">Choose…</option>
+              {presenters.map((p) => (
+                <option key={p.user_num} value={p.user_num}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+
             <label htmlFor="prov" className="text-xs text-[#8AA6AB]">
               Provider
             </label>
@@ -1960,7 +2523,7 @@ export default function ChartPage() {
             Each stage owns the screen rather than sharing one long
             scroll, so the coordinator is never scrolling past the tile
             picker with the patient watching. */}
-        <div className="mt-3 flex gap-1 overflow-x-auto rounded-xl border border-[#2C4E54] bg-[#122326] p-1">
+        <div className="mt-3 flex items-end gap-1 overflow-x-auto border-b border-[#2C4E54]">
           {WORK_TABS.map((t) => {
             const active = workTab === t.id;
             return (
@@ -1968,13 +2531,21 @@ export default function ChartPage() {
                 key={t.id}
                 type="button"
                 onClick={() => setWorkTab(t.id)}
-                className={`flex-1 whitespace-nowrap rounded-lg px-4 py-2.5 text-[13px] font-semibold tracking-[0.03em] transition-colors ${
+                className={`relative -mb-px whitespace-nowrap rounded-t-xl border px-5 py-2.5 text-[13px] font-semibold tracking-[0.03em] transition-colors ${
                   active
-                    ? "bg-[#EDF3F1] text-[#0B1719]"
-                    : "text-[#8AA6AB] hover:bg-[#193034]"
+                    ? "border-[#2C4E54] border-b-[#122326] bg-[#122326] text-[#EDF3F1]"
+                    : "border-transparent text-[#8AA6AB] hover:bg-[#16292D] hover:text-[#EDF3F1]"
                 }`}
               >
                 {t.label}
+                {t.id === "sign" && filed !== null && (
+                  <span
+                    className="ml-2 rounded bg-[#193034] px-1.5 py-0.5 font-mono text-[10px] text-[#79B4C4]"
+                    title="A plan was filed this session"
+                  >
+                    filed
+                  </span>
+                )}
               </button>
             );
           })}
@@ -2216,24 +2787,20 @@ export default function ChartPage() {
             back rather than remembered, so it reflects what was just
             committed as well as what has been waiting for months. */}
         <section className="mt-3 overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+          {/* Title row. The bulk controls live here rather than in a
+              strip that appears once something is ticked: a control
+              nobody can see until they have already guessed it exists
+              is not discoverable. They sit above the columns they act
+              on and are greyed until a row is selected, so the screen
+              says what it can do before being asked. */}
           <div className="flex flex-wrap items-center gap-3 border-b border-[#2C4E54] px-4 py-3">
+            {/* Everything OpenDental holds at ProcStatus 1 for this
+                patient: diagnosed, accepted but not done, or planned
+                without a priority. Completed work is never read, so it
+                cannot appear here. */}
             <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase">
-              Pending
+              Diagnosed or Incomplete
             </h2>
-            <span className="font-mono text-xs text-[#8AA6AB]">
-              {planLoading
-                ? "reading…"
-                : `${planRows.length} planned · ${chosenRows.length} diagnosed`}
-            </span>
-
-            <button
-              type="button"
-              onClick={() => patient && loadPlan(patient.PatNum, true)}
-              disabled={planLoading}
-              className="ml-auto rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-40"
-            >
-              Refresh
-            </button>
 
             {planRows.length > 0 && (
               <button
@@ -2241,62 +2808,121 @@ export default function ChartPage() {
                 onClick={() => setWorkTab("plan")}
                 disabled={chosenRows.length === 0}
                 className="rounded-lg bg-[#F0A93B] px-4 py-1.5 text-xs font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
-                title="Put every diagnosed procedure on a plan for the patient to read"
+                title="Put the ticked procedures on a plan for the patient to read"
               >
                 Create TP {chosenRows.length > 0 ? `(${chosenRows.length})` : ""}
               </button>
             )}
-          </div>
 
-          {/* Actions on the ticked rows. Appears only when something is
-              ticked, so the common case — reading the list — is not
-              cluttered by controls that would do nothing. */}
-          {selected.size > 0 && (
-            <div className="flex flex-wrap items-center gap-2 border-b border-[#2C4E54] bg-[#193034] px-4 py-2.5">
-              <span className="font-mono text-xs text-[#F0A93B]">
-                {selected.size} selected
-              </span>
+            <span className="font-mono text-xs text-[#8AA6AB]">
+              {planLoading
+                ? "reading…"
+                : selected.size > 0
+                  ? `${selected.size} of ${planRows.length} ticked`
+                  : `${planRows.length} open · tick what to present`}
+            </span>
 
-              <select
-                value=""
-                onChange={(e) => {
-                  const defNum = Number(e.target.value);
-                  const option = priorities.find((p) => p.def_num === defNum);
-                  if (option === undefined) return;
-                  setPendingAction({
-                    kind: "priority",
-                    def_num: option.def_num,
-                    label: option.label,
-                  });
-                }}
-                className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none"
-              >
-                <option value="">Set priority…</option>
-                {priorities.map((p) => (
-                  <option key={p.def_num} value={p.def_num}>
-                    {p.label}
-                  </option>
-                ))}
-              </select>
+            {/* Master checkbox, sitting above the row checkboxes it
+                controls. It replaces the Clear button: anything ticked
+                means the gesture is clear, nothing ticked means select
+                all. */}
+            <div className="ml-auto flex items-center gap-2">
+              <input
+                ref={masterRef}
+                type="checkbox"
+                checked={planRows.length > 0 && selected.size === planRows.length}
+                onChange={toggleAll}
+                disabled={planRows.length === 0}
+                className="h-5 w-5 shrink-0 accent-[#F0A93B] disabled:opacity-30"
+                aria-label="Select every planned procedure"
+                title={selected.size > 0 ? "Clear the selection" : "Select all"}
+              />
 
               <button
                 type="button"
-                onClick={() => setSelected(new Set())}
-                className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#122326]"
+                onClick={() => patient && loadPlan(patient.PatNum, true)}
+                disabled={planLoading}
+                className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-40"
               >
-                Clear
-              </button>
-
-              {/* Kept apart from the rest, and last. */}
-              <button
-                type="button"
-                onClick={() => setPendingAction({ kind: "delete" })}
-                className="ml-auto rounded-lg border border-[#E4674F] px-3 py-1.5 text-xs font-semibold text-[#E4674F] hover:bg-[#2A1A18]"
-              >
-                Delete…
+                Refresh
               </button>
             </div>
-          )}
+
+            {/* Everything from here acts on the ticked rows. Visible
+                always, disabled until there is something to act on. */}
+            <select
+              value=""
+              disabled={selected.size === 0}
+              onChange={(e) => {
+                const defNum = Number(e.target.value);
+                const option = diagnoses.find((d) => d.def_num === defNum);
+                if (option === undefined) return;
+                setPendingAction({
+                  kind: "dx",
+                  def_num: option.def_num,
+                  label: option.label,
+                });
+              }}
+              className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-30"
+              title="Set the diagnosis on every ticked procedure"
+            >
+              <option value="">Dx ▾</option>
+              {diagnoses.map((d) => (
+                <option key={d.def_num} value={d.def_num}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value=""
+              disabled={selected.size === 0}
+              onChange={(e) => {
+                const defNum = Number(e.target.value);
+                const option = priorities.find((p) => p.def_num === defNum);
+                if (option === undefined) return;
+                setPendingAction({
+                  kind: "priority",
+                  def_num: option.def_num,
+                  label: option.label,
+                });
+              }}
+              className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-30"
+              title="Set the priority on every ticked procedure"
+            >
+              <option value="">Priority ▾</option>
+              {priorities.map((p) => (
+                <option key={p.def_num} value={p.def_num}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+
+            {/* A toggle, not a flag. OpenDental has no preauthorization
+                field anywhere, so this writes a fixed token into the
+                procedure note — and a mark that could not be taken off
+                would sit on the biller's worklist forever. */}
+            <button
+              type="button"
+              disabled={selected.size === 0}
+              onClick={() =>
+                setPendingAction({ kind: "preauth", mode: preauthMode })}
+              className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-30"
+              title="Mark or unmark these procedures as needing a preauthorization"
+            >
+              {preauthMode === "remove" ? "Un-Pre-Auth" : "Pre-Auth"}
+            </button>
+
+            {/* Kept apart from the rest, and last. */}
+            <button
+              type="button"
+              disabled={selected.size === 0}
+              onClick={() => setPendingAction({ kind: "delete" })}
+              className="rounded-lg border border-[#E4674F] px-3 py-1.5 text-xs font-semibold text-[#E4674F] hover:bg-[#2A1A18] disabled:opacity-30"
+            >
+              Delete…
+            </button>
+          </div>
 
           {planRows.length > 0 && (
             <div className="border-b border-[#2C4E54] px-4 py-2">
@@ -2317,10 +2943,13 @@ export default function ChartPage() {
           <div className="divide-y divide-[#2C4E54]">
             {planRows.map((row) => {
               const ticked = selected.has(row.od_id);
-              // Not on a Diag priority means it will not appear on the
-              // plan the patient reads. Dimmed rather than hidden: it
-              // is still planned treatment and still editable.
-              const onPlan = DIAG_RE.test(row.priority_label.trim());
+              // Accepted work is dimmed: it has been agreed and is
+              // waiting to be done, so it is the settled part of the
+              // list rather than the part needing attention. Dimmed,
+              // not hidden — it is still tickable, and re-presenting
+              // work the patient accepted and never came back for is
+              // the reason this list shows it at all.
+              const settled = ACC_RE.test(row.priority_label.trim());
               const busy = removingId === row.od_id || savingRow === row.od_id;
               const fromThisVisit = sessionIds.has(row.od_id);
               const editing = editingPlanFee === row.od_id;
@@ -2329,7 +2958,7 @@ export default function ChartPage() {
                 <div
                   key={row.od_id}
                   className={`flex items-center gap-3 px-4 py-2.5 ${
-                    onPlan ? "" : "opacity-50"
+                    settled ? "opacity-55" : ""
                   } ${ticked ? "bg-[#16292D]" : ""} ${
                     busy ? "animate-pulse" : ""
                   }`}
@@ -2367,6 +2996,14 @@ export default function ChartPage() {
                       {row.proc_date !== "" && <span>{usDate(row.proc_date)}</span>}
                       {row.no_bill_ins && (
                         <span className="text-[#F0A93B]">not billed to insurance</span>
+                      )}
+                      {row.preauth && (
+                        <span
+                          className="text-[#79B4C4]"
+                          title="Marked in the procedure note as needing a preauthorization"
+                        >
+                          autho needed
+                        </span>
                       )}
                     </p>
                   </div>
@@ -2470,7 +3107,13 @@ export default function ChartPage() {
                 <h3 className="text-[13px] font-bold tracking-[0.06em] uppercase">
                   {pendingAction.kind === "delete"
                     ? "Delete from OpenDental"
-                    : `Set priority to ${pendingAction.label}`}
+                    : pendingAction.kind === "dx"
+                      ? `Set diagnosis to ${pendingAction.label}`
+                      : pendingAction.kind === "preauth"
+                        ? pendingAction.mode === "add"
+                          ? "Mark as needing authorization"
+                          : "Remove the authorization mark"
+                        : `Set priority to ${pendingAction.label}`}
                 </h3>
                 <p className="mt-1 text-xs text-[#8AA6AB]">
                   {selectedRows.length} procedure
@@ -2510,6 +3153,14 @@ export default function ChartPage() {
                 </p>
               )}
 
+              {pendingAction.kind === "preauth" && (
+                <p className="border-t border-[#2C4E54] px-5 py-2.5 text-[11px] text-[#8AA6AB]">
+                  {pendingAction.mode === "add"
+                    ? "This writes a line at the top of each procedure note. It does not create a preauthorization — that is still done in OpenDental, from the Treatment Plan module."
+                    : "This takes that line back out. Anything typed by hand around it is kept."}
+                </p>
+              )}
+
               <div className="flex gap-2 border-t border-[#2C4E54] px-5 py-3">
                 <button
                   type="button"
@@ -2533,7 +3184,13 @@ export default function ChartPage() {
                     ? "Working…"
                     : pendingAction.kind === "delete"
                       ? "Delete"
-                      : "Set priority"}
+                      : pendingAction.kind === "dx"
+                        ? "Set diagnosis"
+                        : pendingAction.kind === "preauth"
+                          ? pendingAction.mode === "add"
+                            ? "Mark"
+                            : "Unmark"
+                          : "Set priority"}
                 </button>
               </div>
             </div>
@@ -2550,44 +3207,56 @@ export default function ChartPage() {
                 Treatment plan
               </h2>
               <span className="font-mono text-xs text-[#8AA6AB]">
-                {chosenRows.length} procedure{chosenRows.length === 1 ? "" : "s"}
+                {planTabRows.length} procedure
+                {planTabRows.length === 1 ? "" : "s"}
+                {filed !== null && " · filed"}
               </span>
-              {/* Who presented it. This does not reach OpenDental's
-                  treatment plan record — that field takes a write and
-                  ignores it — so the name goes on the signed plan. */}
-              <label htmlFor="presenter" className="ml-auto text-xs text-[#8AA6AB]">
-                Presented by
-              </label>
-              <select
-                id="presenter"
-                value={presenterNum ?? ""}
-                onChange={(e) =>
-                  setPresenterNum(
-                    e.target.value === "" ? null : Number(e.target.value),
-                  )}
-                className="rounded-lg border border-[#2C4E54] bg-[#193034] px-3 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none"
-              >
-                <option value="">Choose…</option>
-                {presenters.map((p) => (
-                  <option key={p.user_num} value={p.user_num}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
 
               <button
                 type="button"
                 onClick={() => setWorkTab("procedures")}
-                className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034]"
+                className="ml-auto rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034]"
               >
                 Edit treatment
               </button>
             </div>
 
-            {chosenRows.length === 0 ? (
+            {/* What was filed, once something has been. The tab stops
+                showing Diag work at that point: it has been accepted,
+                so there is no Diag work left to show, and an empty
+                table reading "nothing is at a Diag priority" would look
+                like the plan had been lost. */}
+            {filed !== null && (
+              <div className="border-b border-[#2C4E54] bg-[#16292D] px-4 py-3">
+                <p className="text-sm text-[#EDF3F1]">
+                  Filed into OpenDental
+                  {filed.doc_num !== null && (
+                    <span className="ml-2 font-mono text-xs text-[#79B4C4]">
+                      document {filed.doc_num}
+                    </span>
+                  )}
+                </p>
+                <p className="mt-1 font-mono text-[11px] text-[#8AA6AB]">
+                  {new Date(filed.filed_at).toLocaleTimeString()}
+                  {filed.presenter !== "" && ` · presenter ${filed.presenter}`}
+                  {" · "}
+                  {filed.signed ? "signed" : "not signed"}
+                </p>
+                {!filed.signed && (
+                  <p className="mt-1 text-[11px] text-[#F0A93B]">
+                    Signature capture is not built yet, so this copy carries no
+                    signature. It is in the patient&apos;s chart under Treatment
+                    Plans.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {planTabRows.length === 0 ? (
               <p className="px-4 py-8 text-sm text-[#8AA6AB]">
-                Nothing is at a Diag priority, so there is nothing to present.
-                Set one on the Procedures tab.
+                {filed === null
+                  ? "Nothing is ticked, so there is nothing to present. Tick the procedures to show on the Procedures tab — accepted work that was never done can go on a plan again."
+                  : "The filed plan's procedures are no longer on this patient's chart."}
               </p>
             ) : (
               <>
@@ -2603,7 +3272,7 @@ export default function ChartPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#2C4E54]">
-                      {chosenRows.map((row) => (
+                      {planTabRows.map((row) => (
                         <tr key={row.od_id}>
                           <td className="px-4 py-2.5">
                             <div className="text-[#EDF3F1]">{row.descript}</div>
@@ -2634,7 +3303,7 @@ export default function ChartPage() {
                 </div>
 
                 <div className="border-t border-[#2C4E54] px-4 py-3">
-                  <TotalsStrip totals={chosenTotals} emphasisePatient />
+                  <TotalsStrip totals={planTabTotals} emphasisePatient />
                   <p className="mt-2 text-[11px] text-[#8AA6AB]">
                     Insurance figures are OpenDental&apos;s own estimates and
                     depend on the plan&apos;s deductible and annual maximum.
@@ -2642,42 +3311,184 @@ export default function ChartPage() {
                   </p>
                 </div>
 
-                {/* Acceptance. Each row keeps its number and moves from
-                    Diag to Acc, so the order the treatment was planned
-                    in survives the patient saying yes. Anything the
-                    patient declines is left at Diag and comes back the
-                    next time a plan is made. */}
-                <div className="flex flex-wrap items-center gap-3 border-t border-[#2C4E54] px-4 py-3">
-                  <p className="text-xs text-[#8AA6AB]">
-                    Accepting moves {chosenRows.length} procedure
-                    {chosenRows.length === 1 ? "" : "s"} from Diag to Acc in
-                    OpenDental. Leave anything declined on the Procedures tab
-                    at Diag.
-                  </p>
-                  <button
-                    type="button"
-                    onClick={acceptPlan}
-                    disabled={accepting || planLoading}
-                    className="ml-auto rounded-lg bg-[#F0A93B] px-5 py-2 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
-                  >
-                    {accepting ? "Accepting…" : "Patient accepted"}
-                  </button>
-                </div>
+                {/* Anything left at Diag after signing was not accepted.
+                    It is named rather than dropped: declined work stays
+                    on the plan at Diag and is re-presented next visit,
+                    and a screen that simply stopped showing it would
+                    look like it had been deleted. */}
+                {filed !== null && declinedRows.length > 0 && (
+                  <div className="border-t border-[#2C4E54] px-4 py-3">
+                    <p className="text-[11px] font-semibold tracking-[0.06em] uppercase text-[#8AA6AB]">
+                      Not accepted today
+                    </p>
+                    <ul className="mt-1.5 space-y-1">
+                      {declinedRows.map((row) => (
+                        <li
+                          key={row.od_id}
+                          className="flex items-baseline gap-2 text-sm text-[#8AA6AB]"
+                        >
+                          <span className="font-mono text-[#79B4C4]">
+                            {row.proc_code}
+                          </span>
+                          {row.tooth !== "" && (
+                            <span className="font-mono text-xs">
+                              #{row.tooth}
+                            </span>
+                          )}
+                          <span className="truncate">{row.descript}</span>
+                          <span className="ml-auto font-mono text-xs">
+                            {money(row.pat)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-2 text-[11px] text-[#8AA6AB]">
+                      Still planned, still at Diag. It comes back the next time
+                      a plan is made rather than being taken off the chart.
+                    </p>
+                  </div>
+                )}
+
+                {/* Signing lives on the Sign tab. One button that both
+                    accepts and files, rather than two that each did
+                    half of it. */}
+                {filed === null && (
+                  <div className="flex flex-wrap items-center gap-3 border-t border-[#2C4E54] px-4 py-3">
+                    <p className="text-xs text-[#8AA6AB]">
+                      Signing files {chosenRows.length} procedure
+                      {chosenRows.length === 1 ? "" : "s"} into the
+                      patient&apos;s chart
+                      {diagTicked > 0 &&
+                        `, and moves ${diagTicked} of them from Diag to Acc in OpenDental`}
+                      .
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setWorkTab("sign")}
+                      className="ml-auto rounded-lg bg-[#F0A93B] px-5 py-2 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63]"
+                    >
+                      Go to Sign
+                    </button>
+                  </div>
+                )}
               </>
             )}
           </section>
         )}
 
-        {(workTab === "financing" || workTab === "sign") && (
+        {workTab === "sign" && (
+          <section className="mt-3 overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+            <div className="flex flex-wrap items-center gap-3 border-b border-[#2C4E54] px-4 py-3">
+              <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase">
+                Sign
+              </h2>
+              <span className="font-mono text-xs text-[#8AA6AB]">
+                {filed !== null
+                  ? "filed"
+                  : `${chosenRows.length} procedure${
+                      chosenRows.length === 1 ? "" : "s"
+                    } · ${money(chosenTotals.pat)} to the patient`}
+              </span>
+            </div>
+
+            {filed !== null ? (
+              <div className="px-4 py-8">
+                <p className="text-sm text-[#EDF3F1]">
+                  This plan has been filed into OpenDental
+                  {filed.doc_num !== null && (
+                    <span className="ml-2 font-mono text-xs text-[#79B4C4]">
+                      document {filed.doc_num}
+                    </span>
+                  )}
+                  .
+                </p>
+                <p className="mt-1.5 text-xs text-[#8AA6AB]">
+                  It is in the patient&apos;s chart under Treatment Plans, and
+                  the accepted work is at an Acc priority. Filing it again would
+                  make a second copy, so this screen will not.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setWorkTab("plan")}
+                  className="mt-4 rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034]"
+                >
+                  See what was filed
+                </button>
+              </div>
+            ) : chosenRows.length === 0 ? (
+              <p className="px-4 py-8 text-sm text-[#8AA6AB]">
+                Nothing is ticked, so there is nothing to sign. Tick the
+                procedures to present on the Procedures tab.
+              </p>
+            ) : (
+              <div className="px-4 py-5">
+                <p className="text-sm text-[#EDF3F1]">
+                  This does two things, in this order.
+                </p>
+                <ol className="mt-2 space-y-1.5 text-sm text-[#8AA6AB]">
+                  <li>
+                    <span className="font-mono text-xs text-[#79B4C4]">1</span>
+                    {"  "}
+                    {diagTicked === 0
+                      ? "Nothing to accept — everything ticked is already accepted or unprioritised."
+                      : `Moves ${diagTicked} procedure${
+                          diagTicked === 1 ? "" : "s"
+                        } from Diag to Acc in OpenDental, each keeping its number.`}
+                  </li>
+                  <li>
+                    <span className="font-mono text-xs text-[#79B4C4]">2</span>
+                    {"  "}
+                    Builds the plan as a PDF and files it into the
+                    patient&apos;s chart under Treatment Plans.
+                  </li>
+                </ol>
+
+                <p className="mt-3 text-[11px] text-[#F0A93B]">
+                  There is no signature capture yet, so the filed copy carries
+                  no signature.
+                </p>
+
+                {presenterNum === null && (
+                  <p className="mt-3 text-xs text-[#8AA6AB]">
+                    Nobody is named as presenting. Choose a name at the top of
+                    the screen and it prints on the plan; filing without one
+                    still works.
+                  </p>
+                )}
+
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={signAndFile}
+                    disabled={signing || planLoading}
+                    className="rounded-lg bg-[#F0A93B] px-5 py-2.5 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
+                  >
+                    {signing ? "Working…" : "Accept and file the plan"}
+                  </button>
+
+                  {signStep !== "" && (
+                    <span className="font-mono text-xs text-[#8AA6AB]">
+                      {signStep}
+                    </span>
+                  )}
+                </div>
+
+                {planError !== "" && (
+                  <p className="mt-3 text-sm text-[#E4674F]">{planError}</p>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+
+        {workTab === "financing" && (
           <section className="mt-3 rounded-2xl border border-dashed border-[#2C4E54] bg-[#122326] px-6 py-16 text-center">
             <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase text-[#EDF3F1]">
-              {WORK_TABS.find((t) => t.id === workTab)?.label}
+              Financing
             </h2>
             <p className="mx-auto mt-2 max-w-md text-sm text-[#8AA6AB]">
-              {workTab === "financing" &&
-                "How the patient portion gets paid — in full today, or split across visits."}
-              {workTab === "sign" &&
-                "The patient signs, and the signed plan is filed into their chart in OpenDental. Until this is wired, Patient accepted on the Plan tab does the flip to Acc."}
+              How the patient portion gets paid — in full today, or split
+              across visits.
             </p>
             <p className="mt-4 font-mono text-[11px] text-[#4A6165]">
               Not built yet

@@ -1,9 +1,12 @@
-// Treatment plan PDF — v1
+// Treatment plan PDF — v2
 //
 // Renders the plan the patient just agreed to, with their signature on
 // it, and hands back base64 for filing into OpenDental's Imaging module.
 //
 // Changelog:
+//   v2  The header says "Presenter:" rather than "Presented by:",
+//       matching what the office calls the person who sat with the
+//       patient. Nothing else changed.
 //   v1  First cut. Mirrors the column set OpenDental prints.
 //
 // Design notes:
@@ -148,7 +151,7 @@ function header(doc: jsPDF, input: PlanInput): number {
     align: "right",
   });
   if (input.presenterName !== "") {
-    doc.text(`Presented by: ${input.presenterName}`, PAGE_W - MARGIN_X, 70, {
+    doc.text(`Presenter: ${input.presenterName}`, PAGE_W - MARGIN_X, 70, {
       align: "right",
     });
   }

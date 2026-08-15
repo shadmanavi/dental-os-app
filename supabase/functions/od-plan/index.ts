@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 4
+// Version: 5
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -18,9 +18,45 @@
 //     "od_id":1081990, "fee":123.45 }
 //   { "office":"downey", "action":"set_dx", "pat_num":17,
 //     "od_id":1081990, "dx":115 }
+//   { "office":"downey", "action":"set_note", "pat_num":17,
+//     "od_id":1081990, "note":"preauth" }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v5  The preauthorization note.
+//
+//       Whether a procedure needs a preauthorization is the one fact
+//       about it that OpenDental does not hold anywhere. There is no
+//       flag for it on the procedure code, the fee schedule, the
+//       insurance plan, the carrier or the benefit — every one of those
+//       tables was read and none has a field for it, and there is no
+//       preauth table either. A preauthorization is a claim with
+//       ClaimType PreAuth, and it does not exist until somebody clicks
+//       the button. Everything after that click OpenDental tracks well;
+//       nothing before it is tracked at all.
+//
+//       So the office wrote it in the priority field, where it crowded
+//       out the sequence, and in procedure notes, where it was typed
+//       five different ways: "Autho Needed", "NO AUTHO", "to be sent
+//       for pre-authorization", "need to resubmit for autho", and one
+//       procedure reading "Autho Needed || Autho Completed" at once.
+//       None of that can be swept.
+//
+//       Written by this function it is one string, spelled the same
+//       way every time. The suffix is what makes the sweep possible:
+//       a note carrying "(DOS Entry)" was written here rather than
+//       typed, so the biller's worklist can find every procedure
+//       needing a preauthorization and check it against the claims
+//       that actually exist.
+//
+//       It is added at the top and everything already there is kept.
+//       A procedure note is clinical record and this function has no
+//       business editing what a person wrote. procnote is versioned —
+//       448,383 rows across 373,424 procedures at Downey — so each
+//       write files a new row and the old text stays readable.
+//
+//       Writing the same token twice is refused rather than duplicated.
 //
 //   v4  Diagnosis. plan now returns each procedure's Dx and the office's
 //       own diagnosis list, and set_dx writes it. Nothing existing
@@ -147,6 +183,18 @@ const CLAIMPROC_ESTIMATE = 6;
 // Types. Both were found by reading live rows, not from documentation.
 const CATEGORY_PRIORITY = 20;
 const CATEGORY_DIAGNOSIS = 16;
+
+// The notes this function is allowed to write. A fixed set rather than
+// free text: the whole point is that the wording never varies, and a
+// note assembled from whatever the browser sent would be back to five
+// spellings within a month.
+//
+// "(DOS Entry)" marks it as written by Dental OS. It is what makes the
+// biller's sweep possible, and it distinguishes these from the notes
+// staff have been typing by hand for years, which stay untouched.
+const NOTE_TOKENS: Record<string, string> = {
+  preauth: "Autho Needed (DOS Entry)",
+};
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -294,6 +342,7 @@ Deno.serve(async (req: Request) => {
     priority?: number;
     fee?: number;
     dx?: number;
+    note?: string;
   };
 
   try {
@@ -313,6 +362,7 @@ Deno.serve(async (req: Request) => {
     "set_priority",
     "set_fee",
     "set_dx",
+    "set_note",
   ];
 
   if (!ACTIONS.includes(action)) {
@@ -700,6 +750,135 @@ Deno.serve(async (req: Request) => {
       error: honoured
         ? undefined
         : "OpenDental accepted the change and kept its own value.",
+      changed_by: userData.user.email,
+      changed_at: new Date().toISOString(),
+    });
+  }
+
+  // ===================================================================
+  // set_note — add a fixed note to a procedure
+  //
+  // Adds at the top and keeps everything already written. procnote is
+  // versioned, so this files a new row rather than overwriting one, and
+  // the previous text stays readable in OpenDental's history.
+  // ===================================================================
+  if (action === "set_note") {
+    const odId = body.od_id;
+
+    if (typeof odId !== "number" || odId <= 0) {
+      return json({ ok: false, error: "od_id is required." }, 400);
+    }
+
+    const noteKey = (body.note ?? "").toLowerCase().trim();
+    const noteText = NOTE_TOKENS[noteKey];
+
+    if (noteText === undefined) {
+      return json({
+        ok: false,
+        error: `note must be one of: ${Object.keys(NOTE_TOKENS).join(", ")}.`,
+      }, 400);
+    }
+
+    // The procedure has to belong to this patient. An od_id from a
+    // stale screen could otherwise annotate someone else's chart.
+    const before = await odFetch(auth, "GET", `/procedurelogs/${odId}`);
+
+    if (before.http_status === 404) {
+      return json({
+        ok: false,
+        error: "That procedure is no longer in OpenDental.",
+      }, 404);
+    }
+
+    if (before.http_status < 200 || before.http_status >= 300) {
+      return json({
+        ok: false,
+        error: "OpenDental could not read that procedure.",
+        detail: before.body,
+      }, 502);
+    }
+
+    const beforeBody = (before.body ?? {}) as Record<string, unknown>;
+
+    if (Number(beforeBody.PatNum ?? 0) !== patNum) {
+      return json({
+        ok: false,
+        error: "That procedure belongs to a different patient.",
+      }, 403);
+    }
+
+    // The note as it stands. procnotes returns every version, newest
+    // first is not guaranteed, so the latest is chosen by its own key.
+    const existing = await odFetch(auth, "GET", `/procnotes?ProcNum=${odId}`);
+    const noteRows = rowsOf(existing);
+
+    let latest = "";
+    let latestNum = -1;
+
+    for (const row of noteRows) {
+      const num = Number(row.ProcNoteNum ?? 0);
+      if (num > latestNum) {
+        latestNum = num;
+        latest = String(row.Note ?? "");
+      }
+    }
+
+    // Already said. Saying it twice helps nobody and makes the sweep
+    // count wrong.
+    if (latest.includes(noteText)) {
+      return json({
+        ok: true,
+        od_id: odId,
+        note: noteText,
+        already_present: true,
+        wrote: false,
+        changed_by: userData.user.email,
+        changed_at: new Date().toISOString(),
+      });
+    }
+
+    const combined = latest.trim() === ""
+      ? noteText
+      : `${noteText}\r\n${latest}`;
+
+    const posted = await odFetch(auth, "POST", "/procnotes", {
+      PatNum: patNum,
+      ProcNum: odId,
+      Note: combined,
+    });
+
+    if (posted.http_status < 200 || posted.http_status >= 300) {
+      return json({
+        ok: false,
+        error: "OpenDental would not accept that note.",
+        detail: posted.body,
+      }, 502);
+    }
+
+    // Proof, not the response body.
+    const check = await shortQueryAll(
+      auth,
+      `SELECT Note FROM procnote WHERE ProcNum = ${odId} ` +
+        `ORDER BY ProcNoteNum DESC LIMIT 1`,
+    );
+
+    const stored = String(
+      (check.rows[0] ?? {}).Note ?? "",
+    );
+
+    const honoured = stored.includes(noteText);
+
+    return json({
+      ok: honoured,
+      od_id: odId,
+      note: noteText,
+      already_present: false,
+      wrote: honoured,
+      stored,
+      honoured,
+      error: honoured
+        ? undefined
+        : "OpenDental accepted the note and did not store it.",
       changed_by: userData.user.email,
       changed_at: new Date().toISOString(),
     });

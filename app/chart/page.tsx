@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v16
+// Chairside charting — v16.2
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -222,6 +222,57 @@
 //       the plan the patient signs rather than written to the treatment
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
+//
+//   v16.2 The authorization order becomes a column.
+//
+//       Four bulk controls now sit directly above the four per-row
+//       controls they act on — authorization, diagnosis, priority,
+//       delete — in that order left to right. A bulk control above its
+//       own column needs no explaining; one floating elsewhere in the
+//       title row does.
+//
+//       Authorization is a dropdown per row rather than only a bulk
+//       button, because changing one procedure should not require
+//       ticking it first. It writes through the same set_note call the
+//       bulk button uses, so there is one path to OpenDental and not
+//       two.
+//
+//       The amber "autho needed" pill on the second line is gone. The
+//       dropdown states the same fact and can change it; two controls
+//       reporting one field is how a screen starts to disagree with
+//       itself.
+//
+//       Diagnosis is visible again at every width. v16 hid it below the
+//       xl breakpoint to buy horizontal room, which left the tablet —
+//       the device this screen exists for — with no diagnosis control
+//       at all. Nobody chose that; it fell out of a width fix. The
+//       selects are narrower on small screens instead, and the
+//       procedure description was already one truncated line.
+//
+//       Still an order, not a status. Nothing here reports what a
+//       carrier answered: that lives on a claim, and at the moment a
+//       coordinator ticks this, no claim exists.
+//
+//   v16.1 Three corrections from the first PC run of v16.
+//
+//       The master checkbox was sitting mid-row. It was in an ml-auto
+//       group beside Refresh, and in a wrapping flex row that put it
+//       nowhere in particular — visually detached from the column of
+//       checkboxes it controls. It now leads the title row, directly
+//       above that column, and Refresh keeps the right edge on its own.
+//
+//       "Diagnosed or Incomplete" is now "Diags". The long form said
+//       what the panel holds; the short form is what the office calls
+//       it, and the title row has bulk controls to fit.
+//
+//       The preauthorization marker was blue, which is this screen's
+//       colour for existing work and said nothing. It is amber now, and
+//       a pill rather than plain text so it does not blur into the
+//       amber "not billed to insurance" beside it. Red was considered
+//       and rejected: red is being kept for a denial, which is a
+//       different fact, and one that can be true at the same time as
+//       this one. An order to seek authorization and a carrier's answer
+//       are two axes, not two values on one.
 //
 //   v16 The action bar moves into the title row, the plan gets signed,
 //       and every write leaves through one door.
@@ -1266,6 +1317,41 @@ export default function ChartPage() {
     } catch (caught) {
       setPlanError(
         caught instanceof Error ? caught.message : "Couldn't set that diagnosis.",
+      );
+    } finally {
+      setSavingRow(null);
+    }
+  }
+
+  // The authorization order, one row at a time. The bulk button above
+  // does the same write for every ticked row; this is the same call for
+  // one, so a coordinator changing their mind about a single procedure
+  // does not have to tick it first.
+  //
+  // It is an order, not a status. Setting it says the office wants a
+  // preauthorization for this procedure; it says nothing about what a
+  // carrier has answered, and clearing it does not withdraw anything
+  // already sent.
+  async function setRowPreauth(row: PlanRow, want: boolean) {
+    if (patient === null || want === row.preauth) return;
+
+    setSavingRow(row.od_id);
+    setPlanError("");
+
+    try {
+      await odWrite({
+        action: "set_note",
+        pat_num: patient.PatNum,
+        od_id: row.od_id,
+        note: "preauth",
+        mode: want ? "add" : "remove",
+      });
+      await loadPlan(patient.PatNum, true);
+    } catch (caught) {
+      setPlanError(
+        caught instanceof Error
+          ? caught.message
+          : "Couldn't change that authorization order.",
       );
     } finally {
       setSavingRow(null);
@@ -2798,8 +2884,25 @@ export default function ChartPage() {
                 patient: diagnosed, accepted but not done, or planned
                 without a priority. Completed work is never read, so it
                 cannot appear here. */}
+            {/* Master checkbox, in line with the row checkboxes it
+                controls. It sits at the head of that column rather than
+                floating mid-row, so the thing it selects is directly
+                beneath it. It replaces a Clear button: anything ticked
+                means the gesture is clear, nothing ticked means select
+                all. */}
+            <input
+              ref={masterRef}
+              type="checkbox"
+              checked={planRows.length > 0 && selected.size === planRows.length}
+              onChange={toggleAll}
+              disabled={planRows.length === 0}
+              className="h-5 w-5 shrink-0 accent-[#F0A93B] disabled:opacity-30"
+              aria-label="Select every planned procedure"
+              title={selected.size > 0 ? "Clear the selection" : "Select all"}
+            />
+
             <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase">
-              Diagnosed or Incomplete
+              Diags
             </h2>
 
             {planRows.length > 0 && (
@@ -2822,34 +2925,38 @@ export default function ChartPage() {
                   : `${planRows.length} open · tick what to present`}
             </span>
 
-            {/* Master checkbox, sitting above the row checkboxes it
-                controls. It replaces the Clear button: anything ticked
-                means the gesture is clear, nothing ticked means select
-                all. */}
-            <div className="ml-auto flex items-center gap-2">
-              <input
-                ref={masterRef}
-                type="checkbox"
-                checked={planRows.length > 0 && selected.size === planRows.length}
-                onChange={toggleAll}
-                disabled={planRows.length === 0}
-                className="h-5 w-5 shrink-0 accent-[#F0A93B] disabled:opacity-30"
-                aria-label="Select every planned procedure"
-                title={selected.size > 0 ? "Clear the selection" : "Select all"}
-              />
+            <button
+              type="button"
+              onClick={() => patient && loadPlan(patient.PatNum, true)}
+              disabled={planLoading}
+              className="ml-auto rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-40"
+            >
+              Refresh
+            </button>
 
-              <button
-                type="button"
-                onClick={() => patient && loadPlan(patient.PatNum, true)}
-                disabled={planLoading}
-                className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-40"
-              >
-                Refresh
-              </button>
-            </div>
+            {/* Everything from here acts on the ticked rows, in the
+                same order as the per-row controls beneath them: a bulk
+                control sitting directly above the column it changes
+                explains itself without a label.
 
-            {/* Everything from here acts on the ticked rows. Visible
-                always, disabled until there is something to act on. */}
+                Visible always, disabled until there is something to act
+                on. */}
+
+            {/* A toggle, not a flag. OpenDental has no preauthorization
+                field anywhere, so this writes a fixed token into the
+                procedure note — and a mark that could not be taken off
+                would sit on the biller's worklist forever. */}
+            <button
+              type="button"
+              disabled={selected.size === 0}
+              onClick={() =>
+                setPendingAction({ kind: "preauth", mode: preauthMode })}
+              className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-30"
+              title="Mark or unmark these procedures as needing a preauthorization"
+            >
+              {preauthMode === "remove" ? "Un-Pre-Auth" : "Pre-Auth"}
+            </button>
+
             <select
               value=""
               disabled={selected.size === 0}
@@ -2897,21 +3004,6 @@ export default function ChartPage() {
                 </option>
               ))}
             </select>
-
-            {/* A toggle, not a flag. OpenDental has no preauthorization
-                field anywhere, so this writes a fixed token into the
-                procedure note — and a mark that could not be taken off
-                would sit on the biller's worklist forever. */}
-            <button
-              type="button"
-              disabled={selected.size === 0}
-              onClick={() =>
-                setPendingAction({ kind: "preauth", mode: preauthMode })}
-              className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-30"
-              title="Mark or unmark these procedures as needing a preauthorization"
-            >
-              {preauthMode === "remove" ? "Un-Pre-Auth" : "Pre-Auth"}
-            </button>
 
             {/* Kept apart from the rest, and last. */}
             <button
@@ -2997,26 +3089,48 @@ export default function ChartPage() {
                       {row.no_bill_ins && (
                         <span className="text-[#F0A93B]">not billed to insurance</span>
                       )}
-                      {row.preauth && (
-                        <span
-                          className="text-[#79B4C4]"
-                          title="Marked in the procedure note as needing a preauthorization"
-                        >
-                          autho needed
-                        </span>
-                      )}
                     </p>
                   </div>
+
+                  {/* The authorization order, under the bulk button
+                      that does the same thing to every ticked row. A
+                      control is easiest to understand when the bulk
+                      version sits directly above the individual one.
+
+                      Amber while set, because it is an outstanding
+                      instruction rather than a neutral field. It is
+                      deliberately not a status: what a carrier said
+                      lives on a claim, and no claim exists yet at the
+                      moment this is ticked. */}
+                  <select
+                    value={row.preauth ? "1" : "0"}
+                    disabled={busy}
+                    onChange={(e) => setRowPreauth(row, e.target.value === "1")}
+                    className={`w-24 shrink-0 rounded-lg border bg-[#193034] px-2 py-1.5 text-xs focus:border-[#F0A93B] focus:outline-none disabled:opacity-40 xl:w-32 ${
+                      row.preauth
+                        ? "border-[#F0A93B] text-[#F0A93B]"
+                        : "border-[#2C4E54] text-[#EDF3F1]"
+                    }`}
+                    title="Whether this office is asking for a preauthorization on this procedure"
+                  >
+                    <option value="0">Autho —</option>
+                    <option value="1">Autho needed</option>
+                  </select>
 
                   {/* Diagnosis — the clinical finding. Entered here
                       because the coordinator types it while the doctor
                       dictates, and it is what a preauth narrative needs
-                      later. Full names, not OpenDental's abbreviations. */}
+                      later. Full names, not OpenDental's abbreviations.
+
+                      v16 hid this below the xl breakpoint to buy width,
+                      which meant the tablet — the device this screen is
+                      for — had no diagnosis control at all. It is back
+                      at every width, narrower on small screens. */}
                   <select
                     value={row.dx_num}
                     disabled={busy}
                     onChange={(e) => setRowDx(row, Number(e.target.value))}
-                    className="hidden w-32 shrink-0 rounded-lg border border-[#2C4E54] bg-[#193034] px-2 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-40 xl:block"
+                    className="w-24 shrink-0 rounded-lg border border-[#2C4E54] bg-[#193034] px-2 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-40 xl:w-32"
                     title="Diagnosis in OpenDental"
                   >
                     <option value={0}>Dx —</option>
@@ -3034,7 +3148,7 @@ export default function ChartPage() {
                     value={row.priority_num}
                     disabled={busy}
                     onChange={(e) => setRowPriority(row, Number(e.target.value))}
-                    className="shrink-0 rounded-lg border border-[#2C4E54] bg-[#193034] px-2 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-40"
+                    className="w-24 shrink-0 rounded-lg border border-[#2C4E54] bg-[#193034] px-2 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-40 xl:w-28"
                     title="Priority in OpenDental"
                   >
                     <option value={0}>—</option>
@@ -3499,3 +3613,5 @@ export default function ChartPage() {
     </main>
   );
 }
+
+

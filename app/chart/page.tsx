@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v14
+// Chairside charting — v15
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -223,6 +223,51 @@
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
 //
+//   v15 Diagnosis, bulk actions, and the Diag/Acc scheme.
+//
+//       The priority list stopped being a mixture. Both offices now
+//       carry Diag 1-4 and Acc 1-4 and nothing else that this screen
+//       writes: the sequence number survives acceptance, so Diag 2
+//       becomes Acc 2 and the order the treatment was meant to happen
+//       in is not lost at the moment the patient says yes. Authorization
+//       left the priority field entirely — OpenDental tracks a preauth
+//       on the claim, and a label mirroring it by hand was always going
+//       to drift.
+//
+//       Nothing here hardcodes those numbers. The office's own list
+//       arrives with the plan and the pairing is done by name: the Acc
+//       entry whose number matches the Diag entry's. Downey's Acc 1 is
+//       DefNum 734 and Maywood's is 669, so a hardcoded number would
+//       set the wrong thing at one of them and look right at both.
+//
+//       The checkbox changed meaning. It used to say "this is on the
+//       plan", which the priority field now says better and durably.
+//       It selects rows for a bulk action instead, and clears once the
+//       action runs. What the patient is shown is every Diag row, so a
+//       procedure declined at an earlier visit is re-presented rather
+//       than quietly dropped.
+//
+//       Bulk actions confirm; the per-row dropdowns do not. The rule is
+//       scope, not danger: one row is one deliberate tap, several rows
+//       is worth a look at the list first. Delete is a soft delete in
+//       OpenDental, but nobody at a chair knows that, so it names every
+//       procedure it is about to take off.
+//
+//       Diagnosis is the clinical finding behind the procedure, and it
+//       is OpenDental's own Dx field, proved writable on ProcNum
+//       1081990 before this was built. It is a definition list like
+//       priority, per office, and validated server-side. OpenDental
+//       stores a one or two letter abbreviation beside each name and
+//       prints it in the progress notes; this screen shows the full
+//       name, because the coordinator entering it while the doctor
+//       dictates should not have to decode Nc.
+//
+//       Accepting is a button on the Plan tab in this version. It flips
+//       every Diag row to its Acc twin, which is exactly what the
+//       signature will call once the Sign tab is wired — the mechanism
+//       is here so it can be tested before the canvas and the PDF are
+//       in front of a patient.
+//
 // Design notes:
 //   - Dark, high-contrast, large targets. The user is standing, gloved,
 //     and not going to type.
@@ -339,6 +384,10 @@ type PlanRow = {
   proc_date: string;
   priority_num: number;
   priority_label: string;
+  // OpenDental's Dx: the clinical finding behind the procedure. Zero
+  // is how it stores "none chosen", and the label is then empty.
+  dx_num: number;
+  dx_label: string;
   fee: number;
   // null means OpenDental prints an X: not billed to insurance.
   allowed: number | null;
@@ -352,13 +401,20 @@ type PlanRow = {
   estimated: boolean;
 };
 
-// The office's own priority list. Never hardcoded: the two offices
-// number theirs differently.
-type PriorityOption = {
+// A definition list belonging to one office. Never hardcoded: the two
+// offices number theirs differently, and the same DefNum means
+// different things at each. Priority and diagnosis share the shape.
+type DefOption = {
   def_num: number;
   label: string;
   order: number;
 };
+
+// What a bulk action will do, held while the confirmation is on screen.
+// Nothing is written until it is confirmed.
+type PendingAction =
+  | { kind: "priority"; def_num: number; label: string }
+  | { kind: "delete" };
 
 // An OpenDental user, for naming who presented the plan.
 type Presenter = {
@@ -438,6 +494,14 @@ const WORK_TABS: { id: WorkTab; label: string }[] = [
 // ---------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------
+// The Diag/Acc scheme, matched by name rather than by number. The
+// office owns its own list and the DefNums differ between them, so the
+// pairing has to be read at runtime: Diag 2 flips to whichever entry is
+// called Acc 2 at the office being worked in. Adding Diag 5 later is a
+// change in OpenDental, not here.
+const DIAG_RE = /^diag\s*(\d+)$/i;
+const ACC_RE = /^acc\s*(\d+)$/i;
+
 const UPPER = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 const LOWER = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17];
 const SURFACES = ["M", "O", "D", "B", "L"];
@@ -652,14 +716,22 @@ export default function ChartPage() {
   const [planError, setPlanError] = useState("");
   const [removingId, setRemovingId] = useState<number | null>(null);
 
-  // What the coordinator has taken off the plan being shown. Storing
-  // the removals rather than the selections means anything new arrives
-  // checked without a special case — the same rule add-ons follow.
-  // Unchecking is not a clinical act and is never written to OpenDental.
-  const [dropped, setDropped] = useState<Set<number>>(new Set());
+  // Rows ticked for a bulk action. This is a selection, not a state:
+  // it clears once the action runs, and it says nothing about whether
+  // the patient accepted anything. Acceptance lives in the priority
+  // field, where it survives a reload and OpenDental can see it too.
+  const [selected, setSelected] = useState<Set<number>>(new Set());
 
-  // Options for the priority dropdown, from this office's definitions.
-  const [priorities, setPriorities] = useState<PriorityOption[]>([]);
+  // The bulk action awaiting confirmation, and whether it is running.
+  const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+
+  // Flipping Diag to Acc after the patient accepts.
+  const [accepting, setAccepting] = useState(false);
+
+  // Options for the dropdowns, from this office's own definitions.
+  const [priorities, setPriorities] = useState<DefOption[]>([]);
+  const [diagnoses, setDiagnoses] = useState<DefOption[]>([]);
 
   // Who is presenting. OpenDental will not take this through its API —
   // UserNumPresenter is accepted and ignored, proved against the live
@@ -846,11 +918,12 @@ export default function ChartPage() {
         const rows = (data.procedures ?? []) as PlanRow[];
 
         setPlanRows(rows);
-        setPriorities((data.priorities ?? []) as PriorityOption[]);
+        setPriorities((data.priorities ?? []) as DefOption[]);
+        setDiagnoses((data.diagnoses ?? []) as DefOption[]);
 
-        // A refresh keeps what was taken off; a fresh load starts with
-        // everything on.
-        if (!keepChoices) setDropped(new Set());
+        // A selection belongs to the rows that were on screen when it
+        // was made, so a fresh patient clears it.
+        if (!keepChoices) setSelected(new Set());
       } catch (caught) {
         setPlanError(
           caught instanceof Error
@@ -968,13 +1041,146 @@ export default function ChartPage() {
     }
   }
 
-  function toggleChosen(odId: number) {
-    setDropped((previous) => {
+  // Diagnosis writes the same way, and was proved on the live server
+  // first: ProcNum 1081990 took Dx 115 and read back as Caries.
+  async function setRowDx(row: PlanRow, defNum: number) {
+    if (patient === null || defNum === row.dx_num) return;
+
+    setSavingRow(row.od_id);
+    setPlanError("");
+
+    try {
+      await callPlan({
+        action: "set_dx",
+        pat_num: patient.PatNum,
+        od_id: row.od_id,
+        dx: defNum,
+      });
+      await loadPlan(patient.PatNum, true);
+    } catch (caught) {
+      setPlanError(
+        caught instanceof Error ? caught.message : "Couldn't set that diagnosis.",
+      );
+    } finally {
+      setSavingRow(null);
+    }
+  }
+
+  function toggleSelected(odId: number) {
+    setSelected((previous) => {
       const next = new Set(previous);
       if (next.has(odId)) next.delete(odId);
       else next.add(odId);
       return next;
     });
+  }
+
+  // One OpenDental call per procedure: there is no batch endpoint, and
+  // a failure partway through leaves the rows before it changed. Rather
+  // than pretend otherwise, the failures are named and the list is
+  // reloaded so the screen shows what actually happened.
+  async function runPendingAction() {
+    if (patient === null || pendingAction === null) return;
+
+    const rows = planRows.filter((r) => selected.has(r.od_id));
+    if (rows.length === 0) {
+      setPendingAction(null);
+      return;
+    }
+
+    setBulkBusy(true);
+    setPlanError("");
+
+    const failed: string[] = [];
+
+    for (const row of rows) {
+      try {
+        if (pendingAction.kind === "delete") {
+          await callPlan({
+            action: "remove",
+            pat_num: patient.PatNum,
+            od_id: row.od_id,
+          });
+        } else {
+          await callPlan({
+            action: "set_priority",
+            pat_num: patient.PatNum,
+            od_id: row.od_id,
+            priority: pendingAction.def_num,
+          });
+        }
+      } catch {
+        failed.push(
+          `${row.proc_code}${row.tooth === "" ? "" : ` #${row.tooth}`}`,
+        );
+      }
+    }
+
+    setBulkBusy(false);
+    setPendingAction(null);
+    setSelected(new Set());
+
+    if (failed.length > 0) {
+      setPlanError(
+        `OpenDental would not change ${failed.join(", ")}. Everything else went through.`,
+      );
+    }
+
+    await loadPlan(patient.PatNum, true);
+  }
+
+  // Acceptance. Every Diag row moves to its Acc twin, keeping its
+  // number, so the sequence the treatment was planned in survives.
+  // This is what the signature will call once the Sign tab is wired.
+  async function acceptPlan() {
+    if (patient === null || chosenRows.length === 0) return;
+
+    const unpaired = chosenRows.filter(
+      (r) => accForLabel(r.priority_label) === null,
+    );
+
+    if (unpaired.length > 0) {
+      const names = Array.from(
+        new Set(unpaired.map((r) => r.priority_label)),
+      ).join(", ");
+      setPlanError(
+        `This office has no Acc priority matching ${names}. Add it in OpenDental first.`,
+      );
+      return;
+    }
+
+    setAccepting(true);
+    setPlanError("");
+
+    const failed: string[] = [];
+
+    for (const row of chosenRows) {
+      const target = accForLabel(row.priority_label);
+      if (target === null) continue;
+
+      try {
+        await callPlan({
+          action: "set_priority",
+          pat_num: patient.PatNum,
+          od_id: row.od_id,
+          priority: target,
+        });
+      } catch {
+        failed.push(
+          `${row.proc_code}${row.tooth === "" ? "" : ` #${row.tooth}`}`,
+        );
+      }
+    }
+
+    setAccepting(false);
+
+    if (failed.length > 0) {
+      setPlanError(
+        `OpenDental would not accept ${failed.join(", ")}. Everything else went through.`,
+      );
+    }
+
+    await loadPlan(patient.PatNum, true);
   }
 
   // -------------------------------------------------------------------
@@ -1119,8 +1325,10 @@ export default function ChartPage() {
     setWorkTab("procedures");
     setPlanRows([]);
     setPlanError("");
-    setDropped(new Set());
+    setSelected(new Set());
+    setPendingAction(null);
     setPriorities([]);
+    setDiagnoses([]);
     setSessionIds(new Set());
     setSessionMarks({});
     setPresenterNum(null);
@@ -1331,9 +1539,37 @@ export default function ChartPage() {
   // because unchecking an item has to change the number in front of the
   // patient. Each row's figures are still OpenDental's.
   // -------------------------------------------------------------------
+  // What the patient is shown: everything still at a Diag priority.
+  // Work declined at an earlier visit is still Diag, so it comes back
+  // rather than disappearing — re-presenting it is the point.
   const chosenRows = useMemo(
-    () => planRows.filter((r) => !dropped.has(r.od_id)),
-    [planRows, dropped],
+    () => planRows.filter((r) => DIAG_RE.test(r.priority_label.trim())),
+    [planRows],
+  );
+
+  const selectedRows = useMemo(
+    () => planRows.filter((r) => selected.has(r.od_id)),
+    [planRows, selected],
+  );
+
+  // Acc entries by their number, so Diag 2 can find Acc 2 without this
+  // file ever knowing a DefNum.
+  const accByNumber = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const option of priorities) {
+      const matched = ACC_RE.exec(option.label.trim());
+      if (matched !== null) map.set(Number(matched[1]), option.def_num);
+    }
+    return map;
+  }, [priorities]);
+
+  const accForLabel = useCallback(
+    (label: string): number | null => {
+      const matched = DIAG_RE.exec(label.trim());
+      if (matched === null) return null;
+      return accByNumber.get(Number(matched[1])) ?? null;
+    },
+    [accByNumber],
   );
 
   const chosenTotals = useMemo(() => {
@@ -1987,7 +2223,7 @@ export default function ChartPage() {
             <span className="font-mono text-xs text-[#8AA6AB]">
               {planLoading
                 ? "reading…"
-                : `${chosenRows.length} of ${planRows.length} selected`}
+                : `${planRows.length} planned · ${chosenRows.length} diagnosed`}
             </span>
 
             <button
@@ -2005,11 +2241,62 @@ export default function ChartPage() {
                 onClick={() => setWorkTab("plan")}
                 disabled={chosenRows.length === 0}
                 className="rounded-lg bg-[#F0A93B] px-4 py-1.5 text-xs font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
+                title="Put every diagnosed procedure on a plan for the patient to read"
               >
-                Present {chosenRows.length > 0 ? `(${chosenRows.length})` : ""}
+                Create TP {chosenRows.length > 0 ? `(${chosenRows.length})` : ""}
               </button>
             )}
           </div>
+
+          {/* Actions on the ticked rows. Appears only when something is
+              ticked, so the common case — reading the list — is not
+              cluttered by controls that would do nothing. */}
+          {selected.size > 0 && (
+            <div className="flex flex-wrap items-center gap-2 border-b border-[#2C4E54] bg-[#193034] px-4 py-2.5">
+              <span className="font-mono text-xs text-[#F0A93B]">
+                {selected.size} selected
+              </span>
+
+              <select
+                value=""
+                onChange={(e) => {
+                  const defNum = Number(e.target.value);
+                  const option = priorities.find((p) => p.def_num === defNum);
+                  if (option === undefined) return;
+                  setPendingAction({
+                    kind: "priority",
+                    def_num: option.def_num,
+                    label: option.label,
+                  });
+                }}
+                className="rounded-lg border border-[#2C4E54] bg-[#122326] px-3 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none"
+              >
+                <option value="">Set priority…</option>
+                {priorities.map((p) => (
+                  <option key={p.def_num} value={p.def_num}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={() => setSelected(new Set())}
+                className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#122326]"
+              >
+                Clear
+              </button>
+
+              {/* Kept apart from the rest, and last. */}
+              <button
+                type="button"
+                onClick={() => setPendingAction({ kind: "delete" })}
+                className="ml-auto rounded-lg border border-[#E4674F] px-3 py-1.5 text-xs font-semibold text-[#E4674F] hover:bg-[#2A1A18]"
+              >
+                Delete…
+              </button>
+            </div>
+          )}
 
           {planRows.length > 0 && (
             <div className="border-b border-[#2C4E54] px-4 py-2">
@@ -2029,7 +2316,11 @@ export default function ChartPage() {
 
           <div className="divide-y divide-[#2C4E54]">
             {planRows.map((row) => {
-              const picked = !dropped.has(row.od_id);
+              const ticked = selected.has(row.od_id);
+              // Not on a Diag priority means it will not appear on the
+              // plan the patient reads. Dimmed rather than hidden: it
+              // is still planned treatment and still editable.
+              const onPlan = DIAG_RE.test(row.priority_label.trim());
               const busy = removingId === row.od_id || savingRow === row.od_id;
               const fromThisVisit = sessionIds.has(row.od_id);
               const editing = editingPlanFee === row.od_id;
@@ -2038,15 +2329,17 @@ export default function ChartPage() {
                 <div
                   key={row.od_id}
                   className={`flex items-center gap-3 px-4 py-2.5 ${
-                    picked ? "" : "opacity-45"
-                  } ${busy ? "animate-pulse" : ""}`}
+                    onPlan ? "" : "opacity-50"
+                  } ${ticked ? "bg-[#16292D]" : ""} ${
+                    busy ? "animate-pulse" : ""
+                  }`}
                 >
                   <input
                     type="checkbox"
-                    checked={picked}
-                    onChange={() => toggleChosen(row.od_id)}
+                    checked={ticked}
+                    onChange={() => toggleSelected(row.od_id)}
                     className="h-5 w-5 shrink-0 accent-[#F0A93B]"
-                    aria-label={`Include ${row.proc_code}`}
+                    aria-label={`Select ${row.proc_code}`}
                   />
 
                   <div className="min-w-0 flex-1">
@@ -2077,6 +2370,25 @@ export default function ChartPage() {
                       )}
                     </p>
                   </div>
+
+                  {/* Diagnosis — the clinical finding. Entered here
+                      because the coordinator types it while the doctor
+                      dictates, and it is what a preauth narrative needs
+                      later. Full names, not OpenDental's abbreviations. */}
+                  <select
+                    value={row.dx_num}
+                    disabled={busy}
+                    onChange={(e) => setRowDx(row, Number(e.target.value))}
+                    className="hidden w-32 shrink-0 rounded-lg border border-[#2C4E54] bg-[#193034] px-2 py-1.5 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none disabled:opacity-40 xl:block"
+                    title="Diagnosis in OpenDental"
+                  >
+                    <option value={0}>Dx —</option>
+                    {diagnoses.map((d) => (
+                      <option key={d.def_num} value={d.def_num}>
+                        {d.label}
+                      </option>
+                    ))}
+                  </select>
 
                   {/* Priority. The options are this office's own, sent
                       with the plan, because the two offices number
@@ -2148,6 +2460,86 @@ export default function ChartPage() {
           </>
         )}
 
+        {/* Bulk actions name what they are about to touch. A generic
+            "are you sure" gets dismissed reflexively; a list of the
+            actual procedures does not. */}
+        {pendingAction !== null && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+            <div className="w-full max-w-md overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="border-b border-[#2C4E54] px-5 py-3">
+                <h3 className="text-[13px] font-bold tracking-[0.06em] uppercase">
+                  {pendingAction.kind === "delete"
+                    ? "Delete from OpenDental"
+                    : `Set priority to ${pendingAction.label}`}
+                </h3>
+                <p className="mt-1 text-xs text-[#8AA6AB]">
+                  {selectedRows.length} procedure
+                  {selectedRows.length === 1 ? "" : "s"}
+                  {pendingAction.kind === "delete"
+                    ? " will be taken off this patient's treatment plan."
+                    : "."}
+                </p>
+              </div>
+
+              <ul className="max-h-64 divide-y divide-[#2C4E54] overflow-y-auto">
+                {selectedRows.map((row) => (
+                  <li
+                    key={row.od_id}
+                    className="flex items-baseline gap-2 px-5 py-2 text-sm"
+                  >
+                    <span className="font-mono text-[#79B4C4]">
+                      {row.proc_code}
+                    </span>
+                    {row.tooth !== "" && (
+                      <span className="font-mono text-xs text-[#8AA6AB]">
+                        #{row.tooth}
+                      </span>
+                    )}
+                    <span className="truncate text-[#EDF3F1]">
+                      {row.descript}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              {pendingAction.kind === "delete" && (
+                <p className="border-t border-[#2C4E54] px-5 py-2.5 text-[11px] text-[#8AA6AB]">
+                  OpenDental keeps the record — it moves to a deleted
+                  status rather than being destroyed — but it cannot be
+                  put back from this screen.
+                </p>
+              )}
+
+              <div className="flex gap-2 border-t border-[#2C4E54] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setPendingAction(null)}
+                  disabled={bulkBusy}
+                  className="flex-1 rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034] disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={runPendingAction}
+                  disabled={bulkBusy}
+                  className={`flex-1 rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-40 ${
+                    pendingAction.kind === "delete"
+                      ? "bg-[#E4674F] text-[#0B1719] hover:bg-[#EC8571]"
+                      : "bg-[#F0A93B] text-[#0B1719] hover:bg-[#F5BE63]"
+                  }`}
+                >
+                  {bulkBusy
+                    ? "Working…"
+                    : pendingAction.kind === "delete"
+                      ? "Delete"
+                      : "Set priority"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Plan — the same work, laid out for the patient to read.
             No checkboxes and no delete: this is the view they are
             looking at, and editing happens on the Procedures tab. */}
@@ -2188,13 +2580,14 @@ export default function ChartPage() {
                 onClick={() => setWorkTab("procedures")}
                 className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034]"
               >
-                Change selection
+                Edit treatment
               </button>
             </div>
 
             {chosenRows.length === 0 ? (
               <p className="px-4 py-8 text-sm text-[#8AA6AB]">
-                Nothing selected yet. Pick the treatment on the Procedures tab.
+                Nothing is at a Diag priority, so there is nothing to present.
+                Set one on the Procedures tab.
               </p>
             ) : (
               <>
@@ -2248,6 +2641,28 @@ export default function ChartPage() {
                     They are an estimate, not a guarantee.
                   </p>
                 </div>
+
+                {/* Acceptance. Each row keeps its number and moves from
+                    Diag to Acc, so the order the treatment was planned
+                    in survives the patient saying yes. Anything the
+                    patient declines is left at Diag and comes back the
+                    next time a plan is made. */}
+                <div className="flex flex-wrap items-center gap-3 border-t border-[#2C4E54] px-4 py-3">
+                  <p className="text-xs text-[#8AA6AB]">
+                    Accepting moves {chosenRows.length} procedure
+                    {chosenRows.length === 1 ? "" : "s"} from Diag to Acc in
+                    OpenDental. Leave anything declined on the Procedures tab
+                    at Diag.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={acceptPlan}
+                    disabled={accepting || planLoading}
+                    className="ml-auto rounded-lg bg-[#F0A93B] px-5 py-2 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
+                  >
+                    {accepting ? "Accepting…" : "Patient accepted"}
+                  </button>
+                </div>
               </>
             )}
           </section>
@@ -2262,7 +2677,7 @@ export default function ChartPage() {
               {workTab === "financing" &&
                 "How the patient portion gets paid — in full today, or split across visits."}
               {workTab === "sign" &&
-                "The patient signs, and the signed plan is filed into their chart in OpenDental."}
+                "The patient signs, and the signed plan is filed into their chart in OpenDental. Until this is wired, Patient accepted on the Plan tab does the flip to Acc."}
             </p>
             <p className="mt-4 font-mono text-[11px] text-[#4A6165]">
               Not built yet

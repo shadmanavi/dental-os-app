@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 3
+// Version: 4
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -16,6 +16,21 @@
 //     "od_id":1081990, "priority":153 }
 //   { "office":"downey", "action":"set_fee", "pat_num":17,
 //     "od_id":1081990, "fee":123.45 }
+//   { "office":"downey", "action":"set_dx", "pat_num":17,
+//     "od_id":1081990, "dx":115 }
+//
+// ---------------------------------------------------------------------
+// Changelog
+//
+//   v4  Diagnosis. plan now returns each procedure's Dx and the office's
+//       own diagnosis list, and set_dx writes it. Nothing existing
+//       changed shape: every v3 field is still returned under the same
+//       name, so a screen built against v3 keeps working.
+//
+//   v3  set_priority and set_fee.
+//   v2  remove.
+//   v1  plan and presenters.
+// ---------------------------------------------------------------------
 //
 // Why this is a separate function
 //   od-chart is a large, working file that serves charting. This serves
@@ -62,16 +77,35 @@
 //     613 is "Pre-Authorization Needed"; sorting by the number alone
 //     puts them in an order nobody recognises.
 //
-//   - Priority and ProcFee both write. Proved on ProcNum 1081990:
-//     Priority 153 read back as "3", and a fee of 123.45 stuck against
-//     a schedule fee of 210. Worth stating because three fields on
-//     treatplans did the opposite — accepted with 200, changed nothing.
+//   - Priority, ProcFee and Dx all write. Priority and ProcFee were
+//     proved on ProcNum 1081990: Priority 153 read back as "3", and a
+//     fee of 123.45 stuck against a schedule fee of 210. Worth stating
+//     because three fields on treatplans did the opposite — accepted
+//     with 200, changed nothing. Dx is read back here for the same
+//     reason rather than trusted.
 //
 //   - The priority list is per office and the numbering does not match.
 //     Downey's DefNum 148 is "Not Accepted"; Maywood's 148 is
 //     "Optional". Sending a number read from the wrong office would
 //     silently set the wrong thing, so plan returns the list alongside
 //     the procedures and the screen never carries one between offices.
+//
+//   - The diagnosis list has the same shape and the same trap. It is
+//     definition Category 16, which OpenDental's setup screen calls
+//     Diagnosis Types. Thirteen of the fifteen DefNums happen to match
+//     across the two offices, which is worse than none matching: it
+//     would let a careless build work almost everywhere. Downey's 719
+//     is Watch/Observe and Maywood's 719 is not, and Maywood has no
+//     Leaking Margin at all. So the list is read per office and the
+//     value is validated against that office before it is written.
+//
+//     The field carried 267 rows across 817,000 procedures when this
+//     was built, so there is effectively no legacy meaning to preserve.
+//
+//     OpenDental also stores a one or two letter abbreviation for each
+//     diagnosis and prints it in the progress notes. It is deliberately
+//     not returned: the office asked for full names on screen, and
+//     sending an abbreviation invites a future screen to show it.
 //
 //   - Deleting a treatment-planned procedure works, and is a soft
 //     delete: the row stays and moves to ProcStatus 6. Confirmed by
@@ -108,6 +142,11 @@ const PROC_STATUS_DELETED = 6;
 
 // claimproc.Status 6 is Estimate.
 const CLAIMPROC_ESTIMATE = 6;
+
+// definition.Category. 20 is Treat' Plan Priorities, 16 is Diagnosis
+// Types. Both were found by reading live rows, not from documentation.
+const CATEGORY_PRIORITY = 20;
+const CATEGORY_DIAGNOSIS = 16;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -198,6 +237,28 @@ const money = (value: unknown): number => {
   return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0;
 };
 
+// A definition list belonging to one office, in the order that office
+// reads it. Hidden entries are left out: the office hides an entry to
+// retire it, and a retired entry has no business in a picker.
+async function definitionList(
+  auth: string,
+  category: number,
+): Promise<{ list: { def_num: number; label: string; order: number }[]; failed: OdCall | null }> {
+  const { rows, failed } = await shortQueryAll(
+    auth,
+    `SELECT DefNum, ItemName, ItemOrder FROM definition ` +
+      `WHERE Category = ${category} AND IsHidden = 0 ORDER BY ItemOrder`,
+  );
+
+  const list = rows.map((r) => ({
+    def_num: Number(r.DefNum ?? 0),
+    label: String(r.ItemName ?? "").trim(),
+    order: Number(r.ItemOrder ?? 999),
+  })).filter((d) => d.def_num > 0 && d.label !== "");
+
+  return { list, failed };
+}
+
 // =====================================================================
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -232,6 +293,7 @@ Deno.serve(async (req: Request) => {
     od_id?: number;
     priority?: number;
     fee?: number;
+    dx?: number;
   };
 
   try {
@@ -244,7 +306,15 @@ Deno.serve(async (req: Request) => {
   const officeSlug = (body.office ?? "").toLowerCase().trim();
   const action = (body.action ?? "").toLowerCase().trim();
 
-  const ACTIONS = ["plan", "presenters", "remove", "set_priority", "set_fee"];
+  const ACTIONS = [
+    "plan",
+    "presenters",
+    "remove",
+    "set_priority",
+    "set_fee",
+    "set_dx",
+  ];
+
   if (!ACTIONS.includes(action)) {
     return json({
       ok: false,
@@ -345,9 +415,10 @@ Deno.serve(async (req: Request) => {
   // ===================================================================
   if (action === "plan") {
     const sql =
-      `SELECT pl.ProcNum, pl.ToothNum, pl.Surf, pl.Priority, ` +
+      `SELECT pl.ProcNum, pl.ToothNum, pl.Surf, pl.Priority, pl.Dx, ` +
       `pl.ProcDate, pl.ProcFee, ` +
       `d.ItemName AS PriorityName, d.ItemOrder AS PriorityOrder, ` +
+      `dx.ItemName AS DxName, ` +
       `pc.ProcCode, pc.Descript, ` +
       `pr.Abbr AS ProvAbbr, ` +
       `COUNT(cp.ClaimProcNum) AS EstRows, ` +
@@ -360,12 +431,14 @@ Deno.serve(async (req: Request) => {
       `INNER JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
       `LEFT JOIN provider pr ON pr.ProvNum = pl.ProvNum ` +
       `LEFT JOIN definition d ON d.DefNum = pl.Priority ` +
+      `LEFT JOIN definition dx ON dx.DefNum = pl.Dx ` +
       `LEFT JOIN claimproc cp ON cp.ProcNum = pl.ProcNum ` +
       `AND cp.Status = ${CLAIMPROC_ESTIMATE} ` +
       `LEFT JOIN patplan pp ON pp.InsSubNum = cp.InsSubNum ` +
       `WHERE pl.PatNum = ${patNum} AND pl.ProcStatus = ${PROC_STATUS_TP} ` +
-      `GROUP BY pl.ProcNum, pl.ToothNum, pl.Surf, pl.Priority, pl.ProcDate, ` +
-      `pl.ProcFee, d.ItemName, d.ItemOrder, pc.ProcCode, pc.Descript, pr.Abbr ` +
+      `GROUP BY pl.ProcNum, pl.ToothNum, pl.Surf, pl.Priority, pl.Dx, ` +
+      `pl.ProcDate, pl.ProcFee, d.ItemName, d.ItemOrder, dx.ItemName, ` +
+      `pc.ProcCode, pc.Descript, pr.Abbr ` +
       // Unprioritised work sits at the bottom, as OpenDental prints it.
       `ORDER BY CASE WHEN pl.Priority = 0 THEN 1 ELSE 0 END, ` +
       `d.ItemOrder, pl.Priority, pl.ProcNum`;
@@ -380,21 +453,12 @@ Deno.serve(async (req: Request) => {
       }, 502);
     }
 
-    // The dropdown's options, from this office's own definitions. Sent
+    // Both dropdowns' options, from this office's own definitions. Sent
     // with the plan rather than fetched separately, because a screen
     // holding a list from the other office would set the wrong value
     // without ever looking wrong.
-    const priorityList = await shortQueryAll(
-      auth,
-      `SELECT DefNum, ItemName, ItemOrder FROM definition ` +
-        `WHERE Category = 20 AND IsHidden = 0 ORDER BY ItemOrder`,
-    );
-
-    const priorities = priorityList.rows.map((r) => ({
-      def_num: Number(r.DefNum ?? 0),
-      label: String(r.ItemName ?? "").trim(),
-      order: Number(r.ItemOrder ?? 999),
-    })).filter((p) => p.def_num > 0 && p.label !== "");
+    const priorityList = await definitionList(auth, CATEGORY_PRIORITY);
+    const diagnosisList = await definitionList(auth, CATEGORY_DIAGNOSIS);
 
     const procedures = rows.map((r) => {
       const fee = money(r.ProcFee);
@@ -414,6 +478,7 @@ Deno.serve(async (req: Request) => {
       const pat = Math.round((fee - priIns - secIns - writeOff) * 100) / 100;
 
       const priorityNum = Number(r.Priority ?? 0);
+      const dxNum = Number(r.Dx ?? 0);
 
       return {
         od_id: Number(r.ProcNum ?? 0),
@@ -431,6 +496,12 @@ Deno.serve(async (req: Request) => {
         priority_num: priorityNum,
         priority_label: String(r.PriorityName ?? "").trim(),
         priority_order: Number(r.PriorityOrder ?? 999),
+
+        // The clinical finding behind the procedure. Zero is how
+        // OpenDental stores "none chosen", and the label is empty
+        // rather than invented.
+        dx_num: dxNum,
+        dx_label: String(r.DxName ?? "").trim(),
 
         fee,
         allowed,
@@ -471,7 +542,8 @@ Deno.serve(async (req: Request) => {
       count: procedures.length,
       procedures,
       totals,
-      priorities,
+      priorities: priorityList.list,
+      diagnoses: diagnosisList.list,
       // Named so the screen can say where a number came from rather
       // than presenting it as this app's arithmetic.
       money_source:
@@ -480,14 +552,13 @@ Deno.serve(async (req: Request) => {
   }
 
   // ===================================================================
-  // set_priority / set_fee — edit one planned procedure
+  // set_priority / set_fee / set_dx — edit one planned procedure
   //
-  // Both fields were proved to write on ProcNum 1081990 before this was
-  // built. Each sends one field and nothing else, and reads the row back
+  // Each sends one field and nothing else, and reads the row back
   // rather than trusting the response, because this API has form for
   // accepting a value and keeping its own.
   // ===================================================================
-  if (action === "set_priority" || action === "set_fee") {
+  if (action === "set_priority" || action === "set_fee" || action === "set_dx") {
     const odId = body.od_id;
 
     if (typeof odId !== "number" || odId <= 0) {
@@ -524,6 +595,7 @@ Deno.serve(async (req: Request) => {
     let payload: Record<string, unknown>;
     let previous: unknown;
     let requested: number;
+    let fieldName: string;
 
     if (action === "set_fee") {
       const fee = body.fee;
@@ -536,39 +608,45 @@ Deno.serve(async (req: Request) => {
       requested = Math.round(fee * 100) / 100;
       previous = beforeBody.ProcFee ?? null;
       payload = { ProcFee: requested };
+      fieldName = "ProcFee";
     } else {
-      const priority = body.priority;
-      if (typeof priority !== "number" || !Number.isInteger(priority) ||
-        priority < 0
-      ) {
+      // Priority and Dx are both definition numbers and are validated
+      // the same way. The number has to belong to this office's own
+      // list: Downey's 148 is "Not Accepted" and Maywood's 148 is
+      // "Optional", so a value carried across offices would set
+      // something nobody chose. Zero is allowed for either — it is how
+      // OpenDental stores "not set".
+      const isDx = action === "set_dx";
+      const value = isDx ? body.dx : body.priority;
+      const category = isDx ? CATEGORY_DIAGNOSIS : CATEGORY_PRIORITY;
+      const noun = isDx ? "diagnosis" : "priority";
+
+      if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
         return json({
           ok: false,
-          error: "priority must be a definition number, or 0 to clear it.",
+          error: `${noun} must be a definition number, or 0 to clear it.`,
         }, 400);
       }
 
-      // The number has to belong to this office's own list. Downey's 148
-      // is "Not Accepted" and Maywood's 148 is "Optional", so a value
-      // carried across offices would set something nobody chose. Zero is
-      // allowed: it is how OpenDental stores "no priority".
-      if (priority !== 0) {
+      if (value !== 0) {
         const known = await shortQueryAll(
           auth,
           `SELECT DefNum FROM definition ` +
-            `WHERE Category = 20 AND DefNum = ${priority}`,
+            `WHERE Category = ${category} AND DefNum = ${value}`,
         );
 
         if (known.rows.length === 0) {
           return json({
             ok: false,
-            error: `${priority} is not a priority at this office.`,
+            error: `${value} is not a ${noun} at this office.`,
           }, 400);
         }
       }
 
-      requested = priority;
-      previous = beforeBody.Priority ?? null;
-      payload = { Priority: priority };
+      requested = value;
+      previous = (isDx ? beforeBody.Dx : beforeBody.Priority) ?? null;
+      payload = isDx ? { Dx: value } : { Priority: value };
+      fieldName = isDx ? "Dx" : "Priority";
     }
 
     const put = await odFetch(auth, "PUT", `/procedurelogs/${odId}`, payload);
@@ -584,17 +662,24 @@ Deno.serve(async (req: Request) => {
     // Proof, not the response body.
     const check = await shortQueryAll(
       auth,
-      `SELECT pl.ProcFee, pl.Priority, d.ItemName AS PriorityName ` +
+      `SELECT pl.ProcFee, pl.Priority, pl.Dx, ` +
+        `d.ItemName AS PriorityName, dx.ItemName AS DxName ` +
         `FROM procedurelog pl ` +
         `LEFT JOIN definition d ON d.DefNum = pl.Priority ` +
+        `LEFT JOIN definition dx ON dx.DefNum = pl.Dx ` +
         `WHERE pl.ProcNum = ${odId}`,
     );
 
     const stored = (check.rows[0] ?? {}) as Record<string, unknown>;
 
-    const storedValue = action === "set_fee"
-      ? Math.round(Number(stored.ProcFee ?? -1) * 100) / 100
-      : Number(stored.Priority ?? -1);
+    let storedValue: number;
+    if (action === "set_fee") {
+      storedValue = Math.round(Number(stored.ProcFee ?? -1) * 100) / 100;
+    } else if (action === "set_dx") {
+      storedValue = Number(stored.Dx ?? -1);
+    } else {
+      storedValue = Number(stored.Priority ?? -1);
+    }
 
     const honoured = action === "set_fee"
       ? Math.round(storedValue * 100) === Math.round(requested * 100)
@@ -603,11 +688,12 @@ Deno.serve(async (req: Request) => {
     return json({
       ok: honoured,
       od_id: odId,
-      field: action === "set_fee" ? "ProcFee" : "Priority",
+      field: fieldName,
       previous,
       requested,
       stored: storedValue,
       priority_label: String(stored.PriorityName ?? "").trim(),
+      dx_label: String(stored.DxName ?? "").trim(),
       // False means OpenDental took the call and kept its own value.
       // The screen should show what is stored, not what was asked for.
       honoured,

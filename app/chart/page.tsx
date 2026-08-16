@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v16.2
+// Chairside charting — v17
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -222,6 +222,54 @@
 //       the plan the patient signs rather than written to the treatment
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
+//
+//   v17 The patient signs, and the plan can be seen before it is filed.
+//
+//       The signature pad was built in v15 and never mounted. It sits
+//       on the Sign tab above the buttons, because a pad below "Accept
+//       and file" invites filing first and signing after — which files
+//       an unsigned plan and looks like a bug rather than an order of
+//       operations.
+//
+//       An unsigned plan still files. Blocking it would strand the
+//       common case: a patient who wants to take the estimate home and
+//       think. The filed document is named "Treatment Plan Signed" or
+//       "Treatment Plan Unsigned" so the chart says which without
+//       anyone opening it.
+//
+//       The pad reports null rather than a blank image when nothing was
+//       drawn. A blank PNG is a real image and would pass a truthiness
+//       check, filing an unsigned plan as signed.
+//
+//       Preview and Print render through buildPdf, the same function
+//       filing uses, so the paper and the chart cannot disagree. Both
+//       work before signing and after filing. The blob URL is revoked
+//       when it is replaced and when the patient is closed: an
+//       unrevoked URL pins a PDF full of PHI in memory for the life of
+//       the tab.
+//
+//       Acceptance is no longer only "Diag N to Acc N". A priority
+//       named X pairs to one named "X Acc", so "Optional" now becomes
+//       "Optional Acc" and declines to invent anything. The rule is
+//       general rather than a list with Optional in it, so a priority
+//       added next year works by being named for it. Four places tested
+//       for a Diag row and all four now ask the same question: does
+//       this label have an accepted counterpart.
+//
+//       Finding that out moved the pairing hooks above the ones that
+//       consume them — they were being read during render before they
+//       were declared, which is a crash waiting for the office to add
+//       the definition.
+//
+//       D0001 is hidden everywhere. It is the office's documentation
+//       code — a $0 line the doctor hangs a note on, not work and not a
+//       charge. On a plan it reads as a procedure the patient then asks
+//       about, and being tickable it could reach a signed PDF. It is
+//       filtered where the rows arrive rather than where they are
+//       drawn, so totals, selection and the document cannot see a row
+//       the screen does not. od-chart calls the field procCode and
+//       od-plan calls it proc_code; filtering the wrong one matches
+//       nothing and fails silently, so both are filtered by name.
 //
 //   v16.2 The authorization order becomes a column.
 //
@@ -445,6 +493,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { buildTreatmentPlanPdf } from "@/lib/treatmentPlanPdf";
+import SignaturePad from "@/app/components/SignaturePad";
 
 // ---------------------------------------------------------------------
 // Types
@@ -698,8 +747,39 @@ const WORK_TABS: { id: WorkTab; label: string }[] = [
 // pairing has to be read at runtime: Diag 2 flips to whichever entry is
 // called Acc 2 at the office being worked in. Adding Diag 5 later is a
 // change in OpenDental, not here.
-const DIAG_RE = /^diag\s*(\d+)$/i;
+// Codes this screen never shows, whatever OpenDental returns.
+//
+// D0001 is the office's documentation code: the doctor enters it to
+// hang a note on, not to do work or charge for it. On a treatment plan
+// it is noise at best — a $0 line a patient reads as a procedure and
+// asks about — and it is tickable, so it can end up on a presented
+// plan and in the signed PDF.
+//
+// Filtered where the rows arrive rather than where they are drawn, so
+// nothing downstream — totals, selection, the PDF, the flip to Acc —
+// can see a row the screen does not.
+const HIDDEN_PROC_CODES = new Set(["D0001"]);
+
+const isHiddenCode = (code: string): boolean =>
+  HIDDEN_PROC_CODES.has(code.trim().toUpperCase());
+
+// "Acc 2" is the accepted form of "Diag 2". The number is what pairs
+// them, and it is read off the label rather than from a DefNum because
+// the same DefNum means different things at the two offices.
 const ACC_RE = /^acc\s*(\d+)$/i;
+
+// "Optional Acc" and anything else named for what it accepts. Kept
+// separate from ACC_RE so the numbered scheme still matches first:
+// "Acc 2" would otherwise be read as accepting a priority called "Acc",
+// which does not exist.
+const ACC_SUFFIX_RE = /^(.+?)\s+acc$/i;
+
+// Whether a priority label means the work has been accepted. Both
+// schemes count, and this is what dims a settled row.
+const isAcceptedLabel = (label: string): boolean => {
+  const trimmed = label.trim();
+  return ACC_RE.test(trimmed) || ACC_SUFFIX_RE.test(trimmed);
+};
 
 const UPPER = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 const LOWER = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17];
@@ -930,6 +1010,20 @@ export default function ChartPage() {
   const [signing, setSigning] = useState(false);
   const [signStep, setSignStep] = useState("");
   const [filed, setFiled] = useState<FiledPlan | null>(null);
+
+  // The patient's signature as a PNG data URL, or null when the pad is
+  // empty. Null and "blank image" are different things: the pad returns
+  // null when nothing was drawn, because a blank PNG is a real image and
+  // would pass a truthiness check, filing an unsigned plan as signed.
+  //
+  // Memory only, and cleared with the patient. It is a picture of a
+  // person's signature and has no business surviving the visit.
+  const [signature, setSignature] = useState<string | null>(null);
+
+  // The last PDF this screen built, held so Preview and Print show the
+  // same bytes that were filed rather than rebuilding and hoping they
+  // match. Never persisted — it is a PDF full of PHI.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   // The master checkbox needs a ref: indeterminate is a property, not
   // an attribute, so React cannot set it from JSX.
@@ -1172,7 +1266,9 @@ export default function ChartPage() {
 
       try {
         const data = await callPlan({ action: "plan", pat_num: patNum });
-        const rows = (data.procedures ?? []) as PlanRow[];
+        const rows = ((data.procedures ?? []) as PlanRow[]).filter(
+          (r) => !isHiddenCode(r.proc_code),
+        );
 
         setPlanRows(rows);
         setPriorities((data.priorities ?? []) as DefOption[]);
@@ -1463,14 +1559,25 @@ export default function ChartPage() {
 
     const rows = chosenRows;
 
-    // Only a Diag row moves. A ticked Acc row is already accepted and
-    // is being re-presented, not re-accepted; a ticked row with no
-    // priority stays unprioritised, because a sequence number nobody
-    // chose is not this screen's to invent.
-    const toFlip = rows.filter((r) => DIAG_RE.test(r.priority_label.trim()));
+    // Only a row with an accepted counterpart moves — "Diag 2" to
+    // "Acc 2", "Optional" to "Optional Acc". A ticked row that is
+    // already accepted is being re-presented, not re-accepted; a ticked
+    // row with no priority stays unprioritised, because a sequence
+    // number nobody chose is not this screen's to invent.
+    const toFlip = rows.filter(
+      (r) => accForLabel(r.priority_label) !== null,
+    );
 
-    const unpaired = toFlip.filter(
-      (r) => accForLabel(r.priority_label) === null,
+    // toFlip is built from rows that already have a counterpart, so
+    // this is empty by construction. It is kept because the filter
+    // above is the only thing making that true, and a later change to
+    // it should fail loudly here rather than silently accept work into
+    // a priority that does not exist.
+    const unpaired = rows.filter(
+      (r) =>
+        r.priority_label.trim() !== "" &&
+        accForLabel(r.priority_label) === null &&
+        !isAcceptedLabel(r.priority_label),
     );
 
     if (unpaired.length > 0) {
@@ -1532,51 +1639,23 @@ export default function ChartPage() {
       presenters.find((p) => p.user_num === presenterNum)?.name ?? "";
 
     try {
-      const { base64 } = buildTreatmentPlanPdf({
-        officeName: officeLabel,
-        officePhone: "",
-        heading: "Treatment Plan",
-        patientName: `${patient.LName}, ${patient.Preferred || patient.FName}`,
-        patientDob: usDate(patient.Birthdate),
-        patientNumber: patient.PatNum,
-        providerName: shownProviderName,
-        presenterName,
-        planDate: usDate(localISODate(new Date())),
-        rows: rows.map((r) => ({
-          priority: accLabelFor(r.priority_label) ?? r.priority_label,
-          tooth: r.tooth,
-          surf: r.surf,
-          code: r.proc_code,
-          description: r.descript,
-          fee: r.fee,
-          allowed: r.allowed,
-          priIns: r.pri_ins,
-          secIns: r.sec_ins,
-          pat: r.pat,
-        })),
-        totals: {
-          fee: chosenTotals.fee,
-          allowed: chosenTotals.allowed,
-          priIns: chosenTotals.pri_ins,
-          secIns: chosenTotals.sec_ins,
-          pat: chosenTotals.pat,
-        },
-        disclaimer:
-          "Insurance figures are OpenDental's own estimates and depend on " +
-          "the plan's deductible and annual maximum. They are an estimate, " +
-          "not a guarantee.",
-        // No canvas yet. The plan files unsigned rather than pretending
-        // otherwise, and the page says so.
-        signatureDataUrl: null,
-      });
+      const base64 = buildPdf(rows, signature);
 
       setSignStep("Filing into OpenDental…");
+
+      // The name says whether it was signed. A chart holding two plans
+      // for one patient should not need opening to tell which one the
+      // patient put their name to, and "Signed" or "Unsigned" is read
+      // at a glance in OpenDental's document list.
+      const signedWord = signature === null ? "Unsigned" : "Signed";
 
       const result = await callDoc({
         action: "upload",
         patNum: patient.PatNum,
         base64,
-        description: `Treatment Plan ${usDate(localISODate(new Date()))}`,
+        description:
+          `Treatment Plan ${signedWord} ` +
+          `${usDate(localISODate(new Date()))}`,
       });
 
       setFiled({
@@ -1585,7 +1664,7 @@ export default function ChartPage() {
         filed_at: new Date().toISOString(),
         presenter: presenterName,
         od_ids: rows.map((r) => r.od_id),
-        signed: false,
+        signed: signature !== null,
       });
     } catch (caught) {
       setPlanError(
@@ -1708,7 +1787,14 @@ export default function ChartPage() {
       const data = await callChart({ action: "open", pat_num: patNum });
 
       setPatient(data.patient);
-      setProcedures(data.procedures ?? []);
+      // procCode here, proc_code on the plan rows: od-chart and od-plan
+      // name the same field differently, and filtering on the wrong one
+      // fails silently by matching nothing.
+      setProcedures(
+        ((data.procedures ?? []) as Procedure[]).filter(
+          (p) => !isHiddenCode(p.procCode ?? ""),
+        ),
+      );
       setMissingTeeth(data.missing_teeth ?? []);
       setMenu(data.menu ?? []);
       setProviders(data.providers ?? []);
@@ -1755,6 +1841,15 @@ export default function ChartPage() {
     setEditingPlanFee(null);
     setFiled(null);
     setSignStep("");
+    // A signature and a rendered plan are both PHI, and both belong to
+    // the patient who just left. The blob URL is revoked rather than
+    // dropped: an unrevoked URL keeps the PDF alive in memory for the
+    // life of the tab.
+    setSignature(null);
+    setPreviewUrl((previous) => {
+      if (previous !== null) URL.revokeObjectURL(previous);
+      return null;
+    });
     // The same call the tab makes, with no timer. The input is mounted
     // whichever tab is showing, so there is nothing to wait for.
     if (pickerTab === "search") {
@@ -1979,15 +2074,77 @@ export default function ChartPage() {
     [planRows, selected],
   );
 
+  // Every priority that is an accepted form, keyed by the label it
+  // accepts. Two naming schemes, because the office uses two:
+  //
+  //   "Diag 2"   pairs to "Acc 2"        — numbered, the original scheme
+  //   "Optional" pairs to "Optional Acc" — suffixed, added later
+  //
+  // The suffix rule is general rather than a list with "Optional" in it,
+  // so a priority added next year pairs by being named for it and
+  // nobody has to remember this file exists.
+  //
+  // Keys are lowercased: this matches on what a human typed into
+  // OpenDental's definition list, and "optional acc" and "Optional Acc"
+  // are the same intent.
+  //
+  // Pairing is by name at runtime and never by DefNum, because the same
+  // DefNum means different things at the two offices — Downey's 148 is
+  // "Not Accepted" and Maywood's is "Optional".
+  const accByAcceptedLabel = useMemo(() => {
+    const map = new Map<string, number>();
+
+    for (const option of priorities) {
+      const label = option.label.trim();
+
+      // "Acc 2" accepts "Diag 2".
+      const numbered = ACC_RE.exec(label);
+      if (numbered !== null) {
+        map.set(`diag ${numbered[1]}`.toLowerCase(), option.def_num);
+        continue;
+      }
+
+      // "Optional Acc" accepts "Optional". The suffix is stripped to
+      // find what it accepts, so the pair is discovered rather than
+      // hardcoded.
+      const suffixed = ACC_SUFFIX_RE.exec(label);
+      if (suffixed !== null) {
+        const base = suffixed[1].trim().toLowerCase();
+        if (base !== "") map.set(base, option.def_num);
+      }
+    }
+
+    return map;
+  }, [priorities]);
+
+  const accForLabel = useCallback(
+    (label: string): number | null =>
+      accByAcceptedLabel.get(label.trim().toLowerCase()) ?? null,
+    [accByAcceptedLabel],
+  );
+
   // How many ticked rows are still awaiting a decision. Everything
   // else ticked is being re-presented rather than accepted for the
   // first time, and the Sign tab should not claim otherwise.
+  // The rows that were filed, recovered by their OpenDental ids. The
+  // filed record keeps ids rather than rows, so this re-reads them from
+  // the current plan — which is also why View reflects OpenDental as it
+  // stands rather than a frozen copy.
+  const filedRows = useMemo(
+    () =>
+      filed === null
+        ? []
+        : planRows.filter((r) => filed.od_ids.includes(r.od_id)),
+    [planRows, filed],
+  );
+
   const diagTicked = useMemo(
     () =>
       planRows.filter(
-        (r) => selected.has(r.od_id) && DIAG_RE.test(r.priority_label.trim()),
+        (r) =>
+          selected.has(r.od_id) && accForLabel(r.priority_label) !== null,
       ).length,
-    [planRows, selected],
+    [planRows, selected, accForLabel],
   );
 
   // What the Pre-Auth button will do. A selection that is entirely
@@ -2019,9 +2176,9 @@ export default function ChartPage() {
         : planRows.filter(
             (r) =>
               !filed.od_ids.includes(r.od_id) &&
-              DIAG_RE.test(r.priority_label.trim()),
+              accForLabel(r.priority_label) !== null,
           ),
-    [planRows, filed],
+    [planRows, filed, accForLabel],
   );
 
   // The presenter, remembered per office. Most days there is one
@@ -2072,26 +2229,6 @@ export default function ChartPage() {
     node.indeterminate =
       selected.size > 0 && selected.size < planRows.length;
   }, [selected, planRows]);
-
-  // Acc entries by their number, so Diag 2 can find Acc 2 without this
-  // file ever knowing a DefNum.
-  const accByNumber = useMemo(() => {
-    const map = new Map<number, number>();
-    for (const option of priorities) {
-      const matched = ACC_RE.exec(option.label.trim());
-      if (matched !== null) map.set(Number(matched[1]), option.def_num);
-    }
-    return map;
-  }, [priorities]);
-
-  const accForLabel = useCallback(
-    (label: string): number | null => {
-      const matched = DIAG_RE.exec(label.trim());
-      if (matched === null) return null;
-      return accByNumber.get(Number(matched[1])) ?? null;
-    },
-    [accByNumber],
-  );
 
   // The Acc label a Diag row becomes, for printing on the plan. Read
   // from the office's own list rather than assembled, so a office that
@@ -2155,6 +2292,116 @@ export default function ChartPage() {
       pat: round(sum.pat),
     } as PlanTotals;
   }, [chosenRows]);
+
+  // One place that builds the document, so Preview, Print and the filed
+  // copy are the same bytes rather than three renderings that agree
+  // most of the time.
+  //
+  // Rows and signature are arguments rather than read from state: the
+  // caller decides what is being rendered, and a Preview taken before
+  // signing has to be able to say so.
+  const buildPdf = useCallback(
+    (rows: PlanRow[], sig: string | null): string => {
+      if (patient === null) throw new Error("No patient is open.");
+
+      const presenterName =
+        presenters.find((p) => p.user_num === presenterNum)?.name ?? "";
+
+      const { base64 } = buildTreatmentPlanPdf({
+        officeName: officeLabel,
+        officePhone: "",
+        heading: "Treatment Plan",
+        patientName: `${patient.LName}, ${patient.Preferred || patient.FName}`,
+        patientDob: usDate(patient.Birthdate),
+        patientNumber: patient.PatNum,
+        providerName: shownProviderName,
+        presenterName,
+        planDate: usDate(localISODate(new Date())),
+        rows: rows.map((r) => ({
+          priority: accLabelFor(r.priority_label) ?? r.priority_label,
+          tooth: r.tooth,
+          surf: r.surf,
+          code: r.proc_code,
+          description: r.descript,
+          fee: r.fee,
+          allowed: r.allowed,
+          priIns: r.pri_ins,
+          secIns: r.sec_ins,
+          pat: r.pat,
+        })),
+        totals: {
+          fee: chosenTotals.fee,
+          allowed: chosenTotals.allowed,
+          priIns: chosenTotals.pri_ins,
+          secIns: chosenTotals.sec_ins,
+          pat: chosenTotals.pat,
+        },
+        disclaimer:
+          "Insurance figures are OpenDental's own estimates and depend on " +
+          "the plan's deductible and annual maximum. They are an estimate, " +
+          "not a guarantee.",
+        // Null when the pad was never drawn on. The pad returns null
+        // rather than a blank image precisely so this stays honest: a
+        // blank PNG is a real image and would file as a signature.
+        signatureDataUrl: sig,
+      });
+
+      return base64;
+    },
+    [
+      patient,
+      presenters,
+      presenterNum,
+      officeLabel,
+      shownProviderName,
+      accLabelFor,
+      chosenTotals,
+    ],
+  );
+
+  // A blob URL for the current document, replacing any previous one.
+  // Revoking as we go matters: each URL pins a PDF full of PHI in
+  // memory until the tab is closed, and a coordinator previewing a
+  // dozen plans in a morning would pin all twelve.
+  const openPdf = useCallback(
+    (rows: PlanRow[], sig: string | null, print: boolean) => {
+      try {
+        const base64 = buildPdf(rows, sig);
+
+        const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: "application/pdf" });
+        const url = URL.createObjectURL(blob);
+
+        setPreviewUrl((previous) => {
+          if (previous !== null) URL.revokeObjectURL(previous);
+          return url;
+        });
+
+        const opened = window.open(url, "_blank");
+
+        if (opened === null) {
+          setPlanError(
+            "The browser blocked the new tab. Allow pop-ups for this site " +
+              "and try again.",
+          );
+          return;
+        }
+
+        // Printing is asked for once the document has actually rendered.
+        // Calling print() on an empty tab prints an empty tab.
+        if (print) {
+          opened.addEventListener("load", () => opened.print());
+        }
+      } catch (caught) {
+        setPlanError(
+          caught instanceof Error
+            ? caught.message
+            : "The plan could not be built.",
+        );
+      }
+    },
+    [buildPdf],
+  );
 
   // What the Plan tab is looking at. Before signing that is every Diag
   // row, which is what the patient is being asked about. After signing
@@ -3041,7 +3288,7 @@ export default function ChartPage() {
               // not hidden — it is still tickable, and re-presenting
               // work the patient accepted and never came back for is
               // the reason this list shows it at all.
-              const settled = ACC_RE.test(row.priority_label.trim());
+              const settled = isAcceptedLabel(row.priority_label);
               const busy = removingId === row.od_id || savingRow === row.od_id;
               const fromThisVisit = sessionIds.has(row.od_id);
               const editing = editingPlanFee === row.od_id;
@@ -3521,13 +3768,38 @@ export default function ChartPage() {
                   the accepted work is at an Acc priority. Filing it again would
                   make a second copy, so this screen will not.
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setWorkTab("plan")}
-                  className="mt-4 rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034]"
-                >
-                  See what was filed
-                </button>
+                {/* Print stays after filing, because this is when the
+                    patient usually asks for a copy. It re-renders from
+                    the rows that were filed and the same signature, so
+                    the paper matches the chart. Nothing is written to
+                    OpenDental a second time. */}
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setWorkTab("plan")}
+                    className="rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034]"
+                  >
+                    See what was filed
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openPdf(filedRows, signature, false)}
+                    disabled={filedRows.length === 0}
+                    className="rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034] disabled:opacity-40"
+                  >
+                    View filed plan
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openPdf(filedRows, signature, true)}
+                    disabled={filedRows.length === 0}
+                    className="rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034] disabled:opacity-40"
+                  >
+                    Print
+                  </button>
+                </div>
               </div>
             ) : chosenRows.length === 0 ? (
               <p className="px-4 py-8 text-sm text-[#8AA6AB]">
@@ -3557,11 +3829,6 @@ export default function ChartPage() {
                   </li>
                 </ol>
 
-                <p className="mt-3 text-[11px] text-[#F0A93B]">
-                  There is no signature capture yet, so the filed copy carries
-                  no signature.
-                </p>
-
                 {presenterNum === null && (
                   <p className="mt-3 text-xs text-[#8AA6AB]">
                     Nobody is named as presenting. Choose a name at the top of
@@ -3569,6 +3836,23 @@ export default function ChartPage() {
                     still works.
                   </p>
                 )}
+
+                {/* The pad sits above the buttons because the signature
+                    has to be on the document the buttons produce. A pad
+                    below "Accept and file" would invite filing first and
+                    signing after, which files an unsigned plan. */}
+                <div className="mt-5">
+                  <SignaturePad
+                    onChange={setSignature}
+                    disabled={signing}
+                    label="Patient signature"
+                  />
+                  <p className="mt-1.5 text-[11px] text-[#8AA6AB]">
+                    {signature === null
+                      ? "Unsigned. The plan can still be filed — it will be named Unsigned."
+                      : "Signed. The signature prints on the filed copy."}
+                  </p>
+                </div>
 
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <button
@@ -3578,6 +3862,30 @@ export default function ChartPage() {
                     className="rounded-lg bg-[#F0A93B] px-5 py-2.5 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
                   >
                     {signing ? "Working…" : "Accept and file the plan"}
+                  </button>
+
+                  {/* Preview and Print build the same document filing
+                      does, from the same function, so what the patient
+                      reads on paper is what lands in the chart. Both
+                      work before signing: a patient taking an unsigned
+                      estimate home to think about it is a normal end to
+                      the conversation, not an error. */}
+                  <button
+                    type="button"
+                    onClick={() => openPdf(chosenRows, signature, false)}
+                    disabled={signing || planLoading}
+                    className="rounded-lg border border-[#2C4E54] px-4 py-2.5 text-sm hover:bg-[#193034] disabled:opacity-40"
+                  >
+                    Preview
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => openPdf(chosenRows, signature, true)}
+                    disabled={signing || planLoading}
+                    className="rounded-lg border border-[#2C4E54] px-4 py-2.5 text-sm hover:bg-[#193034] disabled:opacity-40"
+                  >
+                    Print
                   </button>
 
                   {signStep !== "" && (

@@ -1,9 +1,27 @@
-// Treatment plan PDF — v2
+// Treatment plan PDF — v3
 //
 // Renders the plan the patient just agreed to, with their signature on
 // it, and hands back base64 for filing into OpenDental's Imaging module.
 //
 // Changelog:
+//   v3  One signature line, not two, and the presentation date moves
+//       into the header.
+//
+//       The second line said "Presented by" with the presenter's name
+//       typed above it. Nobody ever signed it. A ruled line with a name
+//       printed over it reads as a signature at a glance, which makes
+//       the document claim something that did not happen — worse than
+//       having no line at all. Who presented the plan is a fact, and
+//       facts belong in the header.
+//
+//       The date now sits under the presenter's name, top right. A plan
+//       is a conversation held on a day, and a patient returning months
+//       later needs to see which day without reading the fee table.
+//
+//       Whether a doctor should sign a treatment plan is a question for
+//       the office and is deliberately left unanswered here. Nothing is
+//       drawn for a signature nobody has decided to ask for.
+//
 //   v2  The header says "Presenter:" rather than "Presented by:",
 //       matching what the office calls the person who sat with the
 //       patient. Nothing else changed.
@@ -154,6 +172,11 @@ function header(doc: jsPDF, input: PlanInput): number {
     doc.text(`Presenter: ${input.presenterName}`, PAGE_W - MARGIN_X, 70, {
       align: "right",
     });
+    // The date the plan was presented, under the name of whoever
+    // presented it. The two belong together: a plan is a conversation
+    // on a day, and a patient coming back six months later needs to
+    // know which day it was.
+    doc.text(input.planDate, PAGE_W - MARGIN_X, 81, { align: "right" });
   }
 
   return y + 18;
@@ -351,12 +374,15 @@ export function buildTreatmentPlanPdf(input: PlanInput): {
   doc.text("Patient Signature", MARGIN_X, y + 14);
   doc.text(`Date: ${input.planDate}`, MARGIN_X, y + 32);
 
-  doc.line(PAGE_W - MARGIN_X - 240, y + 2, PAGE_W - MARGIN_X, y + 2);
-  doc.text("Presented by", PAGE_W - MARGIN_X - 240, y + 14);
-  if (input.presenterName !== "") {
-    doc.text(input.presenterName, PAGE_W - MARGIN_X - 240, y - 4);
-  }
-  doc.text(`Date: ${input.planDate}`, PAGE_W - MARGIN_X - 240, y + 32);
+  // There was a second signature line here for the presenter. It has
+  // gone: nobody was signing it, and a printed line with a name typed
+  // above it is not a signature — it reads as one at a glance, which is
+  // worse than not having it. Who presented the plan is stated in the
+  // header, where it is a fact rather than an unmade mark.
+  //
+  // Whether a doctor should sign a treatment plan at all is an open
+  // question for the office, not a layout decision. Nothing is drawn
+  // for one until that is answered.
 
   // jsPDF hands back a data URI; OpenDental wants the payload alone.
   const uri = doc.output("datauristring");
@@ -367,3 +393,5 @@ export function buildTreatmentPlanPdf(input: PlanInput): {
     pageCount: doc.getNumberOfPages(),
   };
 }
+
+

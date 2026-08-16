@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v18.1
+// Chairside charting — v18.2
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -222,6 +222,29 @@
 //       the plan the patient signs rather than written to the treatment
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
+//
+//   v18.2 The office's lists all load together, and Close says what it
+//       closes.
+//
+//       Two more reads move off the patient open, for the same reason
+//       the priority and diagnosis lists did in v18: they belong to the
+//       office and were being re-read for every person in the chair.
+//
+//       The provider list was the expensive one. od-chart's open called
+//       fetchAllProviders, which pages /providers at 100 with
+//       overlapping pages — three or four serialised OpenDental round
+//       trips per patient, at Downey's 284 providers, to fill a
+//       dropdown that changes when somebody is hired. It is a providers
+//       action now, read once per office. The presenter list is one
+//       call and moves for the same reason.
+//
+//       The patient's own provider is untouched. It never came from
+//       that list: od-chart resolves it from today's appointment or the
+//       patient record, both read on open, and it still is.
+//
+//       Close is now Close patient. It sits beside a provider dropdown
+//       and a presenter dropdown, and one word of it read as "close the
+//       screen" rather than "finish with this person".
 //
 //   v18.1 Four corrections from the first run of v18 against a plan
 //       that exceeds its maximum.
@@ -1486,18 +1509,47 @@ export default function ChartPage() {
     };
   }, [officeSlug, callPlan]);
 
-  // The office's own users. Read once per patient rather than cached,
-  // because the two offices keep separate user tables and the screen
-  // can change office between patients.
-  const loadPresenters = useCallback(async () => {
-    try {
-      const data = await callPlan({ action: "presenters" });
-      setPresenters((data.presenters ?? []) as Presenter[]);
-    } catch {
-      // A missing presenter list is not worth blocking the plan over.
-      setPresenters([]);
-    }
-  }, [callPlan]);
+  // The office's staff and providers. Both belong to the office rather
+  // than the patient, and both were being read on every open.
+  //
+  // The provider list is the one that cost: od-chart pages /providers
+  // at 100 with overlapping pages, so Downey's 284 are three or four
+  // serialised OpenDental calls — per patient, for a dropdown that
+  // changes when somebody is hired.
+  //
+  // Cleared first and re-read on every office change. The two offices
+  // keep separate user and provider tables, and a ProvNum or a UserNum
+  // from one means something else at the other.
+  useEffect(() => {
+    if (officeSlug === "") return;
+
+    let active = true;
+    setPresenters([]);
+    setProviders([]);
+
+    (async () => {
+      try {
+        const data = await callPlan({ action: "presenters" });
+        if (active) setPresenters((data.presenters ?? []) as Presenter[]);
+      } catch {
+        // A missing presenter list is not worth blocking the chair
+        // over. The plan files without a name on it.
+      }
+
+      try {
+        const data = await callChart({ action: "providers" });
+        if (active) setProviders((data.providers ?? []) as Provider[]);
+      } catch {
+        // The override dropdown falls back to the provider od-chart
+        // resolved for this patient, which is the right one nearly
+        // always.
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [officeSlug, callPlan, callChart]);
 
   // A row that OpenDental has just deleted leaves this screen in two
   // different speeds, on purpose.
@@ -2039,7 +2091,10 @@ export default function ChartPage() {
       );
       setMissingTeeth(data.missing_teeth ?? []);
       setMenu(data.menu ?? []);
-      setProviders(data.providers ?? []);
+      // The provider list is not read here any more — it is the
+      // office's, loaded once when the office was chosen. The provider
+      // resolved for this patient still is, and still comes from
+      // today's appointment or the patient's own record.
       setResolvedProv(data.resolved_provider ?? null);
       setFeeSchedule(data.fee_schedule ?? null);
       setProvOverride(null);
@@ -2051,7 +2106,6 @@ export default function ChartPage() {
       // Not awaited. The chart is usable the moment it is drawn, and
       // pending work is for the conversation afterwards.
       void loadPlan(patNum);
-      void loadPresenters();
     } catch (caught) {
       setLoadError(caught instanceof Error ? caught.message : "Couldn't open that patient.");
     } finally {
@@ -3223,8 +3277,9 @@ export default function ChartPage() {
               type="button"
               onClick={closePatient}
               className="rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034]"
+              title="Finish with this patient and go back to the schedule"
             >
-              Close
+              Close patient
             </button>
           </div>
         </div>

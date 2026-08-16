@@ -6,7 +6,7 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 10
+// Version: 11
 // Changelog:
 //   v1  patients / open / commit / undo, built on what od-chart-probe
 //       established against the live Downey database.
@@ -62,6 +62,29 @@
 //       the results, deduplicated by PatNum. It costs one extra call on
 //       single-word searches and cannot miss anyone regardless of who
 //       else happens to match.
+//   v11 The provider list leaves the patient open.
+//
+//       open read every provider in the practice on every patient. That
+//       is fetchAllProviders, and it is not one call: /providers pages
+//       at 100 with overlapping pages, so Downey's 284 providers cost
+//       three or four round trips — and OpenDental serialises them, so
+//       three round trips is three waits. Paid once per patient, for a
+//       list that changes when somebody is hired.
+//
+//       It moves to a providers action the screen calls once when the
+//       office is chosen. Still per office, because the two offices
+//       have separate provider tables and separate ProvNums.
+//
+//       Nothing about the resolved provider changes, and it could not:
+//       resolved_provider was never read from that list. It comes from
+//       today's appointment's provAbbr, or the patient record's
+//       priProvAbbr, both already inside the payload open was fetching
+//       anyway. The patient's own provider is still read on open, per
+//       patient, exactly as before.
+//
+//       open still returns a providers key, now empty, so a caller
+//       built against v10 gets the shape it expects rather than
+//       undefined.
 //
 // What the probe settled, and why this file looks the way it does:
 //
@@ -469,6 +492,31 @@ function codesInRule(rule: unknown): string[] {
 // ---------------------------------------------------------------------
 // GET /providers caps a page at 100 and the pages overlap, so key on
 // ProvNum and stop when a page contributes nothing new.
+// The dropdown's shape, in one place, so the providers action and any
+// future caller present the same list. Hidden providers are left out:
+// the office hides one to retire them, and a retired provider has no
+// business in a picker.
+function visibleProviderList(
+  providers: Record<string, unknown>[],
+): {
+  ProvNum: number | null;
+  Abbr: string;
+  LName: string;
+  FName: string;
+  Suffix: string;
+}[] {
+  return providers
+    .filter((prov) => String(prov.IsHidden ?? "false") !== "true")
+    .map((prov) => ({
+      ProvNum: (prov.ProvNum as number) ?? null,
+      Abbr: String(prov.Abbr ?? ""),
+      LName: String(prov.LName ?? ""),
+      FName: String(prov.FName ?? ""),
+      Suffix: String(prov.Suffix ?? ""),
+    }))
+    .sort((a, b) => a.Abbr.localeCompare(b.Abbr));
+}
+
 async function fetchAllProviders(
   auth: string,
 ): Promise<Record<string, unknown>[]> {
@@ -668,6 +716,7 @@ Deno.serve(async (req: Request) => {
   const ACTIONS = [
     "schedule",
     "patients",
+    "providers",
     "open",
     "commit",
     "set_fee",
@@ -733,6 +782,30 @@ Deno.serve(async (req: Request) => {
   }
 
   const auth = `ODFHIR ${developerKey}/${customerKey}`;
+
+  // ===================================================================
+  // providers — the office's provider list, for the override dropdown
+  //
+  // Read once when the office is chosen rather than on every patient.
+  // /providers pages at 100 and the pages overlap, so Downey's 284
+  // providers are three or four round trips; OpenDental serialises
+  // them, and open was paying that for every patient to fill a
+  // dropdown that changes when somebody is hired.
+  //
+  // Per office and never carried between them: the two have separate
+  // provider tables and a ProvNum from one means nothing at the other.
+  // ===================================================================
+  if (action === "providers") {
+    const providers = await fetchAllProviders(auth);
+
+    return json({
+      ok: true,
+      office: officeRow.name,
+      office_slug: officeRow.slug,
+      count: providers.length,
+      providers: visibleProviderList(providers),
+    });
+  }
 
   // ===================================================================
   // schedule — one day's appointments, for the Today tab
@@ -1083,12 +1156,18 @@ Deno.serve(async (req: Request) => {
 
     const today = new Date().toISOString().slice(0, 10);
 
-    const [patient, procs, initials, appts, providers] = await Promise.all([
+    // The provider list is gone from here. It was three or four
+    // serialised round trips per patient for a list that belongs to the
+    // office, and it is read once by the providers action instead.
+    //
+    // This does not touch the patient's own provider, which is resolved
+    // below from the appointment and the patient record — both already
+    // in this payload, neither ever read from the list.
+    const [patient, procs, initials, appts] = await Promise.all([
       odFetch(auth, "GET", `/patients/${patNum}`),
       odFetch(auth, "GET", `/procedurelogs?PatNum=${patNum}`),
       odFetch(auth, "GET", `/toothinitials?PatNum=${patNum}`),
       odFetch(auth, "GET", `/appointments?PatNum=${patNum}&date=${today}`),
-      fetchAllProviders(auth),
     ]);
 
     if (patient.http_status < 200 || patient.http_status >= 300) {
@@ -1165,17 +1244,6 @@ Deno.serve(async (req: Request) => {
         ProvNum: (p.PriProv as number) ?? null,
         provAbbr: String(p.priProvAbbr ?? ""),
       };
-
-    const visibleProviders = providers
-      .filter((prov) => String(prov.IsHidden ?? "false") !== "true")
-      .map((prov) => ({
-        ProvNum: prov.ProvNum ?? null,
-        Abbr: String(prov.Abbr ?? ""),
-        LName: String(prov.LName ?? ""),
-        FName: String(prov.FName ?? ""),
-        Suffix: String(prov.Suffix ?? ""),
-      }))
-      .sort((a, b) => a.Abbr.localeCompare(b.Abbr));
 
     // Tiles come from our own tables, read as the caller so RLS applies.
     // The tree belongs to the organization; chart_tile_offices decides
@@ -1282,7 +1350,10 @@ Deno.serve(async (req: Request) => {
       // having a price of zero.
       fees: Object.fromEntries(feeMap),
       resolved_provider: resolvedProvider,
-      providers: visibleProviders,
+      // Empty, deliberately. The list comes from the providers action
+      // now; the key stays so a caller built against v10 reads an array
+      // rather than undefined.
+      providers: [],
       procedures,
       missing_teeth: missingTeeth,
       hidden_teeth: hiddenTeeth,

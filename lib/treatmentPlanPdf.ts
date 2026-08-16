@@ -1,9 +1,26 @@
-// Treatment plan PDF — v3
+// Treatment plan PDF — v4
 //
 // Renders the plan the patient just agreed to, with their signature on
 // it, and hands back base64 for filing into OpenDental's Imaging module.
 //
 // Changelog:
+//   v4  The practice's acceptance wording sits above the signature, and
+//       the date line is ruled when nobody has signed.
+//
+//       The paragraph is the office's own, the same one OpenDental
+//       prints at the foot of its treatment plan. It goes directly
+//       above the line rather than into the estimate disclaimer box:
+//       what a person signs is whatever is immediately above their pen,
+//       and this is the paragraph the office wants acknowledged.
+//
+//       The line is now marked with an X at its start, matching the
+//       printed form the office already uses.
+//
+//       The date is printed only on a copy that carries a signature. An
+//       unsigned plan goes home to be signed by hand, and a date
+//       already on it would be the day the plan was discussed rather
+//       than the day it was agreed to.
+//
 //   v3  One signature line, not two, and the presentation date moves
 //       into the header — from two places to one.
 //
@@ -44,6 +61,19 @@
 
 import { jsPDF } from "jspdf";
 
+// The practice's acceptance wording. Exported so the screen that
+// captures the signature can show the same words the document carries —
+// a patient signing on a tablet should be able to read what they are
+// agreeing to without asking for the printout.
+export const CONSENT_TEXT =
+  "Coverage may be different if your deductible has not been met, " +
+  "annual maximum has been met, your plan has changed, or if your " +
+  "coverage table is lower than average. There is a cancellation fee " +
+  "of $250 or whatever the 3rd party financing charge is (whichever " +
+  "is greater) to cancel this contract. I acknowledge the additional " +
+  "charges noted above are for co-payments, optional, or upgraded " +
+  "treatment not covered by my insurance company.";
+
 export type PlanRow = {
   priority: string;
   tooth: string;
@@ -78,6 +108,10 @@ export type PlanInput = {
   rows: PlanRow[];
   totals: PlanTotals;
   disclaimer: string;
+  // The acceptance wording printed above the signature line. Defaults
+  // to the practice's own; passed in only if an office ever needs
+  // different words.
+  consent?: string;
   signatureDataUrl: string | null;
   financingNote?: string;
 };
@@ -345,12 +379,31 @@ export function buildTreatmentPlanPdf(input: PlanInput): {
   doc.text(lines, MARGIN_X + 6, y + 2);
   y += disclaimerHeight + 30;
 
-  // ---- Signature ----
-  if (y + 90 > PAGE_H - MARGIN_BOTTOM) {
+  // ---- Acceptance ----
+  // Kept out of the disclaimer box above and put here instead, because
+  // this is the paragraph the signature is a signature to. The box
+  // above explains why an estimate is an estimate; this is what the
+  // patient is agreeing to.
+  const consentText = input.consent ?? CONSENT_TEXT;
+  const consentLines = doc.splitTextToSize(
+    consentText,
+    PAGE_W - MARGIN_X * 2,
+  );
+  const consentHeight = consentLines.length * LINE;
+
+  // The acceptance and the line it belongs to are measured together and
+  // move together. A paragraph at the foot of one page with the
+  // signature at the head of the next is a document nobody read.
+  if (y + consentHeight + 90 > PAGE_H - MARGIN_BOTTOM) {
     doc.addPage();
-    y = 120;
+    y = 72;
   }
 
+  doc.setFontSize(8);
+  doc.text(consentLines, MARGIN_X, y);
+  y += consentHeight + 34;
+
+  // ---- Signature ----
   if (input.signatureDataUrl !== null) {
     const props = doc.getImageProperties(input.signatureDataUrl);
     const drawWidth = 200;
@@ -361,18 +414,30 @@ export function buildTreatmentPlanPdf(input: PlanInput): {
     doc.addImage(
       input.signatureDataUrl,
       "PNG",
-      MARGIN_X + 8,
+      MARGIN_X + 16,
       y - drawHeight,
       drawWidth,
       drawHeight,
     );
   }
 
+  doc.setFontSize(9);
+  doc.text("X", MARGIN_X, y - 1);
   doc.setLineWidth(0.6);
-  doc.line(MARGIN_X, y + 2, MARGIN_X + 240, y + 2);
+  doc.line(MARGIN_X + 12, y + 2, MARGIN_X + 300, y + 2);
   doc.setFontSize(8);
-  doc.text("Patient Signature", MARGIN_X, y + 14);
-  doc.text(`Date: ${input.planDate}`, MARGIN_X, y + 32);
+  doc.text("Patient Signature", MARGIN_X + 12, y + 14);
+
+  // A date is printed only where a signature was actually captured. An
+  // unsigned copy is going home to be signed by hand, and the day it
+  // was discussed is not the day it was agreed to.
+  if (input.signatureDataUrl !== null) {
+    doc.text(`Date: ${input.planDate}`, MARGIN_X + 12, y + 32);
+  } else {
+    doc.text("Date:", MARGIN_X + 12, y + 32);
+    doc.setLineWidth(0.6);
+    doc.line(MARGIN_X + 42, y + 34, MARGIN_X + 200, y + 34);
+  }
 
   // There was a second signature line here for the presenter. It has
   // gone: nobody was signing it, and a printed line with a name typed
@@ -393,5 +458,3 @@ export function buildTreatmentPlanPdf(input: PlanInput): {
     pageCount: doc.getNumberOfPages(),
   };
 }
-
-

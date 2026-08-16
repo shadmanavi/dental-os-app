@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 8
+// Version: 9
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -25,6 +25,37 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v9  A procedure belongs to every coverage category whose span
+//       contains it, not to the first one a query happens to return.
+//
+//       v7 and v8 kept one category per procedure and took the first
+//       row back from the union. Two things at Downey make that wrong,
+//       and both are live data rather than theory:
+//
+//       General spans D0000-D9999 and sits at CovOrder 0, so it
+//       contains every procedure in the practice. Any first-match rule
+//       ordered by CovOrder puts the whole plan in General.
+//
+//       Diag/Prev, Basic and Major are retired — covcat.IsHidden = 1 —
+//       but their covspan rows were never deleted, and unordered they
+//       matched first. So procedures came back as category 1, 2 or 3
+//       while the plan states its deductible waivers against 10
+//       (Diagnostic) and 11 (Preventive). The numbers could never meet.
+//       The waiver was therefore never found, and a $50 deductible that
+//       belongs on the first crown landed on the first x-ray instead,
+//       moving every figure after it.
+//
+//       So every matching category is returned, as cov_cat_nums, and
+//       whether a deductible applies becomes a question of membership:
+//       does this procedure fall inside a category the plan waives.
+//       That is what OpenDental's own figures show it doing.
+//
+//       cov_cat_num and cov_cat_name are still sent, now holding the
+//       narrowest non-retired span — the most specific thing OpenDental
+//       knows about the code. Crowns rather than Restorative, X-Ray
+//       rather than General. They are for display; nothing decides
+//       money from them.
 //
 //   v8  The same answers, in half the round trips.
 //
@@ -799,12 +830,23 @@ Deno.serve(async (req: Request) => {
 
       `UNION ALL ` +
 
-      // Which coverage category each planned procedure falls in, which
+      // Every coverage category each planned procedure falls in, which
       // is what decides whether a deductible applies to it. Read rather
       // than inferred: nothing here decides what counts as preventive,
       // OpenDental decided that when the code was set up.
+      //
+      // All of them, not one. A code sits inside several spans at once
+      // — General covers D0000-D9999 — and which one matters depends on
+      // what the plan says, not on what a query returns first.
+      //
+      // NumB carries IsHidden and Amt carries the width of the span, so
+      // the caller can tell a retired category from a live one and the
+      // narrowest from the broadest without a second round trip.
       `SELECT 'cat' AS Kind, pl.ProcNum AS NumA, ` +
-      `0 AS NumB, 0 AS Amt, cov.CovCatNum AS NumC, ` +
+      `cov.IsHidden AS NumB, ` +
+      `(CAST(SUBSTRING(cs.ToCode, 2) AS UNSIGNED) - ` +
+      `CAST(SUBSTRING(cs.FromCode, 2) AS UNSIGNED)) AS Amt, ` +
+      `cov.CovCatNum AS NumC, ` +
       `COALESCE(cov.Description, '') AS Label, 0 AS NumD ` +
       `FROM procedurelog pl ` +
       `INNER JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
@@ -821,19 +863,50 @@ Deno.serve(async (req: Request) => {
       usedByPlan.set(Number(r.NumA ?? 0), money(r.Amt));
     }
 
-    // A procedure can fall in more than one span. The first is kept,
-    // which is how OpenDental resolves it — spans are ordered and the
-    // earliest match wins.
-    const catByProc = new Map<number, { num: number; name: string }>();
+    // A procedure falls in every span whose range contains its code,
+    // and that is normally several. Keeping the first was wrong twice
+    // over at Downey: General spans D0000-D9999, so it contains
+    // everything, and the retired Diag/Prev, Basic and Major still have
+    // covspan rows, so they matched while the plan's waivers name
+    // Diagnostic and Preventive. Nothing ever matched, and the
+    // deductible went to the wrong procedure.
+    //
+    // So all of them are kept, and whether a deductible applies becomes
+    // a membership test the caller can make against what the plan
+    // actually states.
+    const catsByProc = new Map<number, number[]>();
+
+    // What to show a human: the narrowest live span, which is the most
+    // specific thing OpenDental knows about the code. Retired
+    // categories are left out of this — they are not what the office
+    // reads today — but they stay in the list above, because a plan
+    // written years ago may still name one.
+    const displayCat = new Map<
+      number,
+      { num: number; name: string; width: number }
+    >();
+
     for (const r of ceilingRows.filter((r) => r.Kind === "cat")) {
       const procNum = Number(r.NumA ?? 0);
       const covCatNum = Number(r.NumC ?? 0);
       if (procNum === 0 || covCatNum === 0) continue;
-      if (catByProc.has(procNum)) continue;
-      catByProc.set(procNum, {
-        num: covCatNum,
-        name: String(r.Label ?? "").trim(),
-      });
+
+      const list = catsByProc.get(procNum) ?? [];
+      if (!list.includes(covCatNum)) list.push(covCatNum);
+      catsByProc.set(procNum, list);
+
+      if (Number(r.NumB ?? 0) === 1) continue;
+
+      const width = Number(r.Amt ?? 0);
+      const best = displayCat.get(procNum);
+
+      if (best === undefined || width < best.width) {
+        displayCat.set(procNum, {
+          num: covCatNum,
+          name: String(r.Label ?? "").trim(),
+          width,
+        });
+      }
     }
 
     const planNums = Array.from(
@@ -954,10 +1027,16 @@ Deno.serve(async (req: Request) => {
         estimate_note: String(r.EstimateNote ?? "").trim(),
         pri_plan_num: Number(r.PriPlanNum ?? 0),
 
-        // The coverage category this procedure falls in, which decides
-        // whether the plan's deductible applies to it.
-        cov_cat_num: catByProc.get(Number(r.ProcNum ?? 0))?.num ?? 0,
-        cov_cat_name: catByProc.get(Number(r.ProcNum ?? 0))?.name ?? "",
+        // Every coverage category this procedure falls in. This is
+        // what decides whether the plan's deductible applies to it: the
+        // plan waives the deductible per category, and a procedure is
+        // waived if it is inside one of those categories.
+        cov_cat_nums: catsByProc.get(Number(r.ProcNum ?? 0)) ?? [],
+
+        // The narrowest live category, for showing a person. Nothing
+        // decides money from these two.
+        cov_cat_num: displayCat.get(Number(r.ProcNum ?? 0))?.num ?? 0,
+        cov_cat_name: displayCat.get(Number(r.ProcNum ?? 0))?.name ?? "",
         write_off: writeOff,
         deductible: money(r.DedApplied),
         pat,
@@ -1410,5 +1489,3 @@ Deno.serve(async (req: Request) => {
     removed_at: new Date().toISOString(),
   });
 });
-
-

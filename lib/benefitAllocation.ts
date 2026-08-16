@@ -1,6 +1,25 @@
-// Benefit allocation — v2
+// Benefit allocation — v3
 //
 // Changelog:
+//   v3  A procedure is matched to the plan's deductible waivers by
+//       membership, not by one category number.
+//
+//       v2 read the waivers correctly and could never apply them.
+//       od-plan sent one coverage category per procedure and the plan
+//       states its waivers against others — Downey returned the retired
+//       Diag/Prev (1) while the plan waives Diagnostic (10) and
+//       Preventive (11) — so the lookup missed every time and the
+//       deductible fell on the first x-ray rather than the first crown.
+//       Measured against OpenDental on a $1,500 plan, that moved the
+//       point where the maximum ran out by $50 and put every figure
+//       after it out by the same.
+//
+//       A procedure now arrives with every category its code falls in,
+//       and the waiver applies if any of them is waived. Where more
+//       than one category states an amount, the lowest wins — a plan
+//       that says $0 for Preventive and $50 for Basic on a code inside
+//       both is stating a waiver.
+//
 //   v2  The deductible respects category waivers. v1 took it from the
 //       first covered row, which matched OpenDental's total but not its
 //       rows: four x-rays came out at $0 and $2 instead of $13 each,
@@ -77,11 +96,16 @@ export type AllocatableRow = {
   has_override: boolean;
   // Whether insurance applies to this procedure at all.
   covered: boolean;
-  // The coverage category OpenDental puts this procedure in. Decides
-  // whether the plan's deductible applies to it — a plan charging $50
-  // will usually waive it for Diagnostic and Preventive, and says so
-  // with a benefit row per category.
-  cov_cat_num: number;
+  // Every coverage category this procedure's code falls in. Together
+  // they decide whether the plan's deductible applies to it: a plan
+  // charging $50 will usually waive it for Diagnostic and Preventive,
+  // and says so with a benefit row per category.
+  //
+  // A list rather than one number, because a code sits inside several
+  // spans at once — General covers everything — and which of them
+  // matters is decided by what the plan names, not by picking one and
+  // hoping it is the same one.
+  cov_cat_nums: number[];
 };
 
 export type CategoryDeductible = {
@@ -199,13 +223,28 @@ export function allocateBenefit(
     categoryDeductible.set(c.cov_cat_num, c.amount);
   }
 
-  // Whether the deductible applies to a procedure in this category.
+  // How much deductible a procedure can absorb, given the categories
+  // its code falls in.
+  //
   // A category with a stated deductible of zero is a waiver — the
   // common case, and the reason a $13 x-ray keeps its full estimate
-  // while the crown behind it absorbs the $50.
-  const deductibleApplies = (covCatNum: number): boolean => {
-    const stated = categoryDeductible.get(covCatNum);
-    return stated === undefined || stated > 0;
+  // while the crown behind it absorbs the $50. Where a procedure is in
+  // more than one category that states an amount, the lowest applies: a
+  // plan saying $0 for Preventive is waiving the code, whatever a
+  // broader category alongside it says.
+  //
+  // A procedure in no stated category falls to the plan-wide figure.
+  const deductibleCeiling = (covCatNums: number[]): number => {
+    const stated: number[] = [];
+
+    for (const covCatNum of covCatNums) {
+      const amount = categoryDeductible.get(covCatNum);
+      if (amount !== undefined) stated.push(amount);
+    }
+
+    if (stated.length === 0) return deductibleLeft;
+
+    return Math.min(deductibleLeft, Math.min(...stated));
   };
 
   let remaining = Math.max(0, primary.remaining_max);
@@ -265,9 +304,10 @@ export function allocateBenefit(
     // any allowed-amount reduction already inside it.
     const rate = row.fee > 0 ? row.pri_base / row.fee : 0;
 
-    const takeDeductible = deductibleApplies(row.cov_cat_num)
-      ? Math.min(deductibleLeft, row.fee)
-      : 0;
+    const takeDeductible = Math.min(
+      deductibleCeiling(row.cov_cat_nums),
+      row.fee,
+    );
     deductibleLeft = round(deductibleLeft - takeDeductible);
 
     // Deductible off the fee, then the rate — OpenDental's order.

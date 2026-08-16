@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v17
+// Chairside charting — v18.1
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -222,6 +222,79 @@
 //       the plan the patient signs rather than written to the treatment
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
+//
+//   v18.1 Four corrections from the first run of v18 against a plan
+//       that exceeds its maximum.
+//
+//       The deductible was never applied. od-plan sent one coverage
+//       category per procedure and the plan states its waivers against
+//       different ones, so the lookup missed every time and the $50
+//       landed on the first x-ray instead of the first crown — which
+//       moved where the maximum ran out and put every figure after it
+//       out by the same amount. Fixed in od-plan v9 and
+//       benefitAllocation v3; this file passes the category list
+//       through.
+//
+//       The deleted flag was being truncated away on rows with a long
+//       description, which is exactly the row where it matters. The
+//       description now gives way to it rather than the other way
+//       round.
+//
+//       Row contents shifted mid-delete and settled back. The action
+//       button's label goes Delete, then an ellipsis, then Gone —
+//       three widths — and the description beside it is flex-1, so
+//       every control between them moved. The button is a fixed width
+//       now.
+//
+//       The practice's acceptance wording appears above the signature
+//       pad, the same words the PDF carries.
+//
+//   v18 The annual maximum is applied here, the office's lists are read
+//       once, deleted rows stand still, and the panels fold away.
+//
+//       OpenDental's stored insurance estimates are correct for the
+//       last ordering a human looked at in its Windows client, and
+//       silently wrong after anything is changed at the chair. Nothing
+//       in the API recalculates them. So this screen applies the
+//       remaining annual maximum itself, over OpenDental's own uncapped
+//       per-procedure figures (claimproc.BaseEst), in the order
+//       OpenDental consumes benefit: priority ItemOrder, unprioritised
+//       last. lib/benefitAllocation.ts does the arithmetic and matches
+//       OpenDental row for row on a plan that exceeds its maximum.
+//
+//       The allocation runs over the whole plan, not the ticked subset.
+//       Un-ticking a procedure does not give its benefit back — that
+//       work is still planned, and the maximum is still spoken for. The
+//       plan and the PDF then show the allocated figures for whatever
+//       is ticked.
+//
+//       Rows a human overrode by hand are passed through untouched. A
+//       number somebody typed is not this screen's to recompute.
+//
+//       The priority and diagnosis lists now load once when the office
+//       is chosen, not with every patient. They belong to the office
+//       and change about once a year; od-plan v8 takes include_lists
+//       false and this asks for it. Still never carried across an
+//       office switch — Downey's DefNum 148 is "Not Accepted" and
+//       Maywood's is "Optional".
+//
+//       Display order is frozen. A reload after a write keeps the order
+//       already on screen and appends anything new; only Refresh
+//       re-reads the order from OpenDental. A priority changed
+//       mid-conversation used to move the row out from under the
+//       finger that changed it, into whatever the next tap landed on.
+//
+//       A deleted row stays where it was, flagged, until Refresh, for
+//       the same reason. The tooth chart is the opposite case: its dot
+//       clears immediately, because the mark is the whole point of the
+//       chart. v17 kept session marks per tooth, which could not be
+//       taken back, so a deleted procedure left its tooth lit until the
+//       patient was closed and opened again. Marks are now held per
+//       procedure.
+//
+//       Existing and Diagnosed fold away. In portrait, and on the
+//       eleven-inch class the office runs, the two panels push the
+//       planned list below the fold.
 //
 //   v17 The patient signs, and the plan can be seen before it is filed.
 //
@@ -493,6 +566,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { buildTreatmentPlanPdf } from "@/lib/treatmentPlanPdf";
+import { CONSENT_TEXT } from "@/lib/treatmentPlanPdf";
+import {
+  allocateBenefit,
+  type AllocatableRow,
+  type AllocatedRow,
+  type PlanBenefit,
+} from "@/lib/benefitAllocation";
 import SignaturePad from "@/app/components/SignaturePad";
 
 // ---------------------------------------------------------------------
@@ -608,6 +688,24 @@ type PlanRow = {
   allowed: number | null;
   pri_ins: number;
   sec_ins: number;
+  // OpenDental's estimate before any limitation. The annual maximum is
+  // applied over these rather than over pri_ins and sec_ins, which
+  // already carry whatever cap was in force the last time its Windows
+  // client recalculated — and that ordering is not necessarily the one
+  // on screen now.
+  pri_base: number;
+  sec_base: number;
+  // True when somebody typed a figure over the estimate by hand. Those
+  // rows are never recomputed here.
+  has_override: boolean;
+  // Every coverage category this procedure's code falls in. A code
+  // sits inside several spans at once, and which of them matters is
+  // decided by what the plan names — so all of them travel, and the
+  // waiver test is a membership test.
+  cov_cat_nums: number[];
+  // The narrowest live category, for showing a person. Nothing decides
+  // money from this one.
+  cov_cat_num: number;
   write_off: number;
   deductible: number;
   pat: number;
@@ -680,6 +778,15 @@ type PlanTotals = {
 };
 
 type Bucket = "existing" | "diagnosed";
+
+// A tooth lit by this visit. Held per procedure rather than per tooth:
+// a mark that only knew its tooth could not be taken back when that
+// procedure was deleted.
+type SessionMark = {
+  od_id: number | null;
+  tooth: string;
+  bucket: Bucket;
+};
 
 type NavState = {
   category: Category | null;
@@ -1030,8 +1137,37 @@ export default function ChartPage() {
   const masterRef = useRef<HTMLInputElement>(null);
 
   // Options for the dropdowns, from this office's own definitions.
+  // Read when the office loads rather than with each patient: they
+  // belong to the office, not the person in the chair.
   const [priorities, setPriorities] = useState<DefOption[]>([]);
   const [diagnoses, setDiagnoses] = useState<DefOption[]>([]);
+
+  // The patient's insurance plans as OpenDental states them: annual
+  // maximum, deductible, category waivers and what has been paid this
+  // year. The ceiling this screen applies comes from here.
+  const [benefits, setBenefits] = useState<PlanBenefit[]>([]);
+
+  // The order the planned list is drawn in, held apart from the rows
+  // themselves. A reload after a write keeps this and appends anything
+  // new; Refresh replaces it with OpenDental's order. Rows must not
+  // move under the finger that is working on them.
+  const [displayOrder, setDisplayOrder] = useState<number[]>([]);
+
+  // Rows deleted during this session. They are gone from OpenDental and
+  // gone from planRows, and are kept here only so the list can go on
+  // showing them, flagged, until Refresh.
+  const [deletedRows, setDeletedRows] = useState<PlanRow[]>([]);
+
+  // The same deletions, as ids that outlive Refresh, so the tooth chart
+  // stops drawing a dot for work that is no longer there.
+  const [removedIds, setRemovedIds] = useState<Set<number>>(new Set());
+
+  // Whether each charting panel is open. Both start open; on a portrait
+  // tablet they are what pushes the planned list off the screen.
+  const [panelOpen, setPanelOpen] = useState<Record<Bucket, boolean>>({
+    existing: true,
+    diagnosed: true,
+  });
 
   // Who is presenting. OpenDental will not take this through its API —
   // UserNumPresenter is accepted and ignored, proved against the live
@@ -1084,9 +1220,11 @@ export default function ChartPage() {
   // What this visit has marked, so a tooth lights up the moment it is
   // charted rather than after a reload. The session ledger used to
   // carry this; it is the only job of it that outlived v13.
-  const [sessionMarks, setSessionMarks] = useState<
-    Record<string, { existing: boolean; diagnosed: boolean }>
-  >({});
+  //
+  // A list of procedures, not a map of teeth. v17 held the latter and
+  // could not unmark anything: deleting the only procedure on a tooth
+  // left the dot lit until the patient was closed.
+  const [sessionMarks, setSessionMarks] = useState<SessionMark[]>([]);
 
   const [committing, setCommitting] = useState(false);
   const [commitError, setCommitError] = useState("");
@@ -1260,19 +1398,43 @@ export default function ChartPage() {
   // Everything arrives checked; the coordinator removes rather than adds.
   // -------------------------------------------------------------------
   const loadPlan = useCallback(
-    async (patNum: number, keepChoices = false) => {
+    async (patNum: number, keepChoices = false, resort = false) => {
       setPlanLoading(true);
       setPlanError("");
 
       try {
-        const data = await callPlan({ action: "plan", pat_num: patNum });
+        const data = await callPlan({
+          action: "plan",
+          pat_num: patNum,
+          // The priority and diagnosis lists come with the office, not
+          // the patient. Asking for them again on every open spent
+          // about a second and a half of a serialised API's time on two
+          // lists that had not moved.
+          include_lists: false,
+        });
         const rows = ((data.procedures ?? []) as PlanRow[]).filter(
           (r) => !isHiddenCode(r.proc_code),
         );
 
         setPlanRows(rows);
-        setPriorities((data.priorities ?? []) as DefOption[]);
-        setDiagnoses((data.diagnoses ?? []) as DefOption[]);
+        setBenefits((data.benefits ?? []) as PlanBenefit[]);
+
+        // Order is frozen unless this is a Refresh. OpenDental returns
+        // the plan in the order it consumes benefit — priority
+        // ItemOrder, unprioritised last — and a priority changed
+        // mid-conversation would otherwise move that row somewhere else
+        // in the list the instant it was saved.
+        const serverIds = rows.map((r) => r.od_id);
+
+        setDisplayOrder((previous) => {
+          if (resort || previous.length === 0) return serverIds;
+          const known = new Set(previous);
+          return [...previous, ...serverIds.filter((id) => !known.has(id))];
+        });
+
+        // Refresh is also what clears the deleted markers. Until then
+        // they hold their place in the list.
+        if (resort) setDeletedRows([]);
 
         // A selection belongs to the rows that were on screen when it
         // was made, so a fresh patient clears it.
@@ -1290,6 +1452,40 @@ export default function ChartPage() {
     [callPlan],
   );
 
+  // The office's priority and diagnosis lists. One read when the office
+  // is chosen, then held: they are definition lists that change about
+  // once a year, and they are the same for every patient in the
+  // building.
+  //
+  // Never carried across an office switch. The same DefNum means
+  // different things at the two — Downey's 148 is "Not Accepted" and
+  // Maywood's is "Optional" — so the lists are cleared and re-read the
+  // moment the office changes, rather than lingering and setting the
+  // wrong thing without ever looking wrong.
+  useEffect(() => {
+    if (officeSlug === "") return;
+
+    let active = true;
+    setPriorities([]);
+    setDiagnoses([]);
+
+    (async () => {
+      try {
+        const data = await callPlan({ action: "lists" });
+        if (!active) return;
+        setPriorities((data.priorities ?? []) as DefOption[]);
+        setDiagnoses((data.diagnoses ?? []) as DefOption[]);
+      } catch {
+        // Empty dropdowns rather than a blocked chair. Changing office
+        // and changing back re-reads them.
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [officeSlug, callPlan]);
+
   // The office's own users. Read once per patient rather than cached,
   // because the two offices keep separate user tables and the screen
   // can change office between patients.
@@ -1302,6 +1498,42 @@ export default function ChartPage() {
       setPresenters([]);
     }
   }, [callPlan]);
+
+  // A row that OpenDental has just deleted leaves this screen in two
+  // different speeds, on purpose.
+  //
+  // In the list it stays exactly where it was, flagged, until Refresh.
+  // A row that vanished under the finger that deleted it pulls the next
+  // row up into whatever that finger taps next, and the next tap is
+  // usually another delete.
+  //
+  // On the tooth chart the dot goes now. The mark is the whole point of
+  // the chart, and a lit tooth with nothing on it is a lie about the
+  // patient rather than a stale list.
+  //
+  // No reload: OpenDental was just told, and asking it to say so again
+  // is a round trip on an API that serialises them.
+  function markDeleted(rows: PlanRow[]) {
+    if (rows.length === 0) return;
+
+    const ids = new Set(rows.map((r) => r.od_id));
+
+    setDeletedRows((previous) => [
+      ...previous.filter((r) => !ids.has(r.od_id)),
+      ...rows,
+    ]);
+    setRemovedIds((previous) => {
+      const next = new Set(previous);
+      for (const id of ids) next.add(id);
+      return next;
+    });
+    setPlanRows((previous) => previous.filter((r) => !ids.has(r.od_id)));
+    setSelected((previous) => {
+      const next = new Set(previous);
+      for (const id of ids) next.delete(id);
+      return next;
+    });
+  }
 
   // Removing a procedure takes it off the plan in OpenDental. It is a
   // soft delete there, so nothing is destroyed, but it is still a write
@@ -1324,7 +1556,7 @@ export default function ChartPage() {
         pat_num: patient.PatNum,
         od_id: row.od_id,
       });
-      await loadPlan(patient.PatNum, true);
+      markDeleted([row]);
     } catch (caught) {
       setPlanError(
         caught instanceof Error ? caught.message : "Couldn't remove that.",
@@ -1488,6 +1720,7 @@ export default function ChartPage() {
     setPlanError("");
 
     const failed: string[] = [];
+    const removed: PlanRow[] = [];
 
     for (const row of rows) {
       try {
@@ -1497,6 +1730,7 @@ export default function ChartPage() {
             pat_num: patient.PatNum,
             od_id: row.od_id,
           });
+          removed.push(row);
         } else if (pendingAction.kind === "dx") {
           await odWrite({
             action: "set_dx",
@@ -1535,6 +1769,14 @@ export default function ChartPage() {
       setPlanError(
         `OpenDental would not change ${failed.join(", ")}. Everything else went through.`,
       );
+    }
+
+    // A delete is settled here rather than by re-reading. The rows hold
+    // their place with a flag until Refresh, and OpenDental has already
+    // said yes to each one.
+    if (pendingAction.kind === "delete") {
+      markDeleted(removed);
+      return;
     }
 
     await loadPlan(patient.PatNum, true);
@@ -1831,10 +2073,15 @@ export default function ChartPage() {
     setPlanError("");
     setSelected(new Set());
     setPendingAction(null);
-    setPriorities([]);
-    setDiagnoses([]);
+    // The priority and diagnosis lists are the office's and stay. They
+    // are cleared when the office changes, which is the only time they
+    // can be wrong.
+    setBenefits([]);
+    setDisplayOrder([]);
+    setDeletedRows([]);
+    setRemovedIds(new Set());
     setSessionIds(new Set());
-    setSessionMarks({});
+    setSessionMarks([]);
     // The presenter is deliberately not cleared. It is the same person
     // for the next patient nearly always, and it is re-read from
     // storage anyway.
@@ -1872,20 +2119,25 @@ export default function ChartPage() {
 
     for (const p of procedures) {
       if (p.ToothNum === "") continue;
+      // The chart is only read when the patient is opened, so without
+      // this the dot for a procedure deleted two minutes ago stays lit
+      // until the patient is closed and opened again.
+      if (removedIds.has(p.ProcNum)) continue;
       if (!map[p.ToothNum]) map[p.ToothNum] = { existing: false, diagnosed: false };
       if (p.ProcStatus === "TP") map[p.ToothNum].diagnosed = true;
       else if (EXISTING_STATUSES.has(p.ProcStatus)) map[p.ToothNum].existing = true;
     }
 
-    for (const [toothNum, mark] of Object.entries(sessionMarks)) {
-      if (toothNum === "") continue;
-      if (!map[toothNum]) map[toothNum] = { existing: false, diagnosed: false };
-      if (mark.diagnosed) map[toothNum].diagnosed = true;
-      if (mark.existing) map[toothNum].existing = true;
+    for (const mark of sessionMarks) {
+      if (mark.tooth === "") continue;
+      if (mark.od_id !== null && removedIds.has(mark.od_id)) continue;
+      if (!map[mark.tooth]) map[mark.tooth] = { existing: false, diagnosed: false };
+      if (mark.bucket === "diagnosed") map[mark.tooth].diagnosed = true;
+      else map[mark.tooth].existing = true;
     }
 
     return map;
-  }, [procedures, sessionMarks]);
+  }, [procedures, sessionMarks, removedIds]);
 
   const missingSet = useMemo(() => new Set(missingTeeth), [missingTeeth]);
 
@@ -2009,18 +2261,19 @@ export default function ChartPage() {
         );
       }
 
-      // Light the tooth immediately.
-      setSessionMarks((prev) => {
-        const next = { ...prev };
-        for (const e of entries) {
-          if (e.tooth === "") continue;
-          const mark = next[e.tooth] ?? { existing: false, diagnosed: false };
-          if (bucket === "diagnosed") mark.diagnosed = true;
-          else mark.existing = true;
-          next[e.tooth] = mark;
-        }
-        return next;
-      });
+      // Light the tooth immediately. One mark per procedure, carrying
+      // its OpenDental id where there is one, so deleting that
+      // procedure can put the tooth back.
+      setSessionMarks((prev) => [
+        ...prev,
+        ...entries
+          .filter((e) => e.tooth !== "")
+          .map((e): SessionMark => ({
+            od_id: e.od_id,
+            tooth: e.tooth,
+            bucket,
+          })),
+      ]);
 
       // Remember what this session wrote, so those rows can be marked
       // in the pending list rather than kept in a list of their own.
@@ -2068,6 +2321,110 @@ export default function ChartPage() {
     () => planRows.filter((r) => selected.has(r.od_id)),
     [planRows, selected],
   );
+
+  // -------------------------------------------------------------------
+  // The annual maximum
+  //
+  // OpenDental caps its insurance estimates only when its Windows
+  // client recalculates, and nothing in the API triggers that. Its
+  // stored figures are therefore right for the last ordering somebody
+  // looked at on a PC, and silently wrong after anything is changed at
+  // the chair. So the ceiling is applied here, over OpenDental's own
+  // uncapped per-procedure estimates, in the order OpenDental consumes
+  // benefit.
+  //
+  // Over the whole plan, not the ticked subset: un-ticking a procedure
+  // does not hand its benefit back, because that work is still planned
+  // and the maximum is still spoken for.
+  //
+  // Deleted rows are already out of planRows, which is correct — they
+  // are out of OpenDental too, and their share of the maximum is free.
+  // -------------------------------------------------------------------
+  const allocation = useMemo(
+    () =>
+      allocateBenefit(
+        planRows.map((r): AllocatableRow => ({
+          od_id: r.od_id,
+          pri_base: r.pri_base,
+          sec_base: r.sec_base,
+          pri_ins: r.pri_ins,
+          sec_ins: r.sec_ins,
+          write_off: r.write_off,
+          fee: r.fee,
+          has_override: r.has_override,
+          covered: r.covered,
+          cov_cat_nums: r.cov_cat_nums ?? [],
+        })),
+        benefits,
+      ),
+    [planRows, benefits],
+  );
+
+  const allocByRow = useMemo(() => {
+    const map = new Map<number, AllocatedRow>();
+    for (const r of allocation.rows) map.set(r.od_id, r);
+    return map;
+  }, [allocation]);
+
+  // What a row is shown as. Allocation covers every row it was given,
+  // including the pass-through case where there is no ceiling to apply,
+  // so this falls back to OpenDental's own figures only for a row that
+  // was never allocated — a deleted one being drawn from its snapshot.
+  const figuresFor = useCallback(
+    (row: PlanRow) => {
+      const allocated = allocByRow.get(row.od_id);
+
+      if (allocated === undefined) {
+        return {
+          pri_ins: row.pri_ins,
+          sec_ins: row.sec_ins,
+          pat: row.pat,
+          deductible: row.deductible,
+          limited: false,
+        };
+      }
+
+      return {
+        pri_ins: allocated.pri_ins,
+        sec_ins: allocated.sec_ins,
+        pat: allocated.pat,
+        deductible: allocated.deductible,
+        limited: allocated.limited,
+      };
+    },
+    [allocByRow],
+  );
+
+  // The planned list as it is drawn: the frozen order, with rows
+  // deleted this session still standing in their places until Refresh,
+  // and anything new appended.
+  const displayRows = useMemo(() => {
+    const live = new Map(planRows.map((r) => [r.od_id, r]));
+    const gone = new Map(deletedRows.map((r) => [r.od_id, r]));
+    const placed = new Set<number>();
+    const out: { row: PlanRow; deleted: boolean }[] = [];
+
+    for (const id of displayOrder) {
+      const row = live.get(id);
+      if (row !== undefined) {
+        out.push({ row, deleted: false });
+        placed.add(id);
+        continue;
+      }
+
+      const removed = gone.get(id);
+      if (removed !== undefined) {
+        out.push({ row: removed, deleted: true });
+        placed.add(id);
+      }
+    }
+
+    for (const row of planRows) {
+      if (!placed.has(row.od_id)) out.push({ row, deleted: false });
+    }
+
+    return out;
+  }, [planRows, deletedRows, displayOrder]);
 
   const selectedRows = useMemo(
     () => planRows.filter((r) => selected.has(r.od_id)),
@@ -2270,14 +2627,18 @@ export default function ChartPage() {
 
   const chosenTotals = useMemo(() => {
     const sum = chosenRows.reduce(
-      (acc, r) => ({
-        fee: acc.fee + r.fee,
-        allowed: acc.allowed + (r.allowed ?? 0),
-        pri_ins: acc.pri_ins + r.pri_ins,
-        sec_ins: acc.sec_ins + r.sec_ins,
-        write_off: acc.write_off + r.write_off,
-        pat: acc.pat + r.pat,
-      }),
+      (acc, r) => {
+        const figures = figuresFor(r);
+
+        return {
+          fee: acc.fee + r.fee,
+          allowed: acc.allowed + (r.allowed ?? 0),
+          pri_ins: acc.pri_ins + figures.pri_ins,
+          sec_ins: acc.sec_ins + figures.sec_ins,
+          write_off: acc.write_off + r.write_off,
+          pat: acc.pat + figures.pat,
+        };
+      },
       { fee: 0, allowed: 0, pri_ins: 0, sec_ins: 0, write_off: 0, pat: 0 },
     );
 
@@ -2291,7 +2652,7 @@ export default function ChartPage() {
       write_off: round(sum.write_off),
       pat: round(sum.pat),
     } as PlanTotals;
-  }, [chosenRows]);
+  }, [chosenRows, figuresFor]);
 
   // One place that builds the document, so Preview, Print and the filed
   // copy are the same bytes rather than three renderings that agree
@@ -2317,18 +2678,22 @@ export default function ChartPage() {
         providerName: shownProviderName,
         presenterName,
         planDate: usDate(localISODate(new Date())),
-        rows: rows.map((r) => ({
-          priority: accLabelFor(r.priority_label) ?? r.priority_label,
-          tooth: r.tooth,
-          surf: r.surf,
-          code: r.proc_code,
-          description: r.descript,
-          fee: r.fee,
-          allowed: r.allowed,
-          priIns: r.pri_ins,
-          secIns: r.sec_ins,
-          pat: r.pat,
-        })),
+        rows: rows.map((r) => {
+          const figures = figuresFor(r);
+
+          return {
+            priority: accLabelFor(r.priority_label) ?? r.priority_label,
+            tooth: r.tooth,
+            surf: r.surf,
+            code: r.proc_code,
+            description: r.descript,
+            fee: r.fee,
+            allowed: r.allowed,
+            priIns: figures.pri_ins,
+            secIns: figures.sec_ins,
+            pat: figures.pat,
+          };
+        }),
         totals: {
           fee: chosenTotals.fee,
           allowed: chosenTotals.allowed,
@@ -2337,9 +2702,15 @@ export default function ChartPage() {
           pat: chosenTotals.pat,
         },
         disclaimer:
-          "Insurance figures are OpenDental's own estimates and depend on " +
-          "the plan's deductible and annual maximum. They are an estimate, " +
-          "not a guarantee.",
+          "Insurance figures are estimates based on this plan's benefits " +
+          "as they stand today, and depend on the deductible and annual " +
+          "maximum. They are an estimate, not a guarantee." +
+          (allocation.applied && allocation.remaining_max !== null
+            ? " This plan has " +
+              money(allocation.remaining_max) +
+              " of its annual maximum left for the year, applied to the " +
+              "treatment above in the order it is planned."
+            : ""),
         // Null when the pad was never drawn on. The pad returns null
         // rather than a blank image precisely so this stays honest: a
         // blank PNG is a real image and would file as a signature.
@@ -2356,6 +2727,8 @@ export default function ChartPage() {
       shownProviderName,
       accLabelFor,
       chosenTotals,
+      figuresFor,
+      allocation,
     ],
   );
 
@@ -2417,14 +2790,18 @@ export default function ChartPage() {
     if (filed === null) return chosenTotals;
 
     const sum = acceptedRows.reduce(
-      (acc, r) => ({
-        fee: acc.fee + r.fee,
-        allowed: acc.allowed + (r.allowed ?? 0),
-        pri_ins: acc.pri_ins + r.pri_ins,
-        sec_ins: acc.sec_ins + r.sec_ins,
-        write_off: acc.write_off + r.write_off,
-        pat: acc.pat + r.pat,
-      }),
+      (acc, r) => {
+        const figures = figuresFor(r);
+
+        return {
+          fee: acc.fee + r.fee,
+          allowed: acc.allowed + (r.allowed ?? 0),
+          pri_ins: acc.pri_ins + figures.pri_ins,
+          sec_ins: acc.sec_ins + figures.sec_ins,
+          write_off: acc.write_off + r.write_off,
+          pat: acc.pat + figures.pat,
+        };
+      },
       { fee: 0, allowed: 0, pri_ins: 0, sec_ins: 0, write_off: 0, pat: 0 },
     );
 
@@ -2438,7 +2815,7 @@ export default function ChartPage() {
       write_off: round(sum.write_off),
       pat: round(sum.pat),
     } as PlanTotals;
-  }, [filed, chosenTotals, acceptedRows]);
+  }, [filed, chosenTotals, acceptedRows, figuresFor]);
 
   // -------------------------------------------------------------------
   // Render
@@ -2959,13 +3336,30 @@ export default function ChartPage() {
             const cats = menu.filter((m) => m.bucket === bucket);
             const accent = bucket === "existing" ? "#79B4C4" : "#F0A93B";
             const deep = state.category !== null;
+            const open = panelOpen[bucket];
 
             return (
               <section
                 key={bucket}
-                className="flex min-h-[200px] flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326] xl:min-h-[340px]"
+                className={`flex flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326] ${
+                  open ? "min-h-[200px] xl:min-h-[340px]" : ""
+                }`}
               >
-                <div className="flex items-center gap-2.5 border-b border-[#2C4E54] px-4 py-3">
+                {/* The header is the fold. Both panels open on a wide
+                    screen and both fit; in portrait, and on the
+                    eleven-inch class this office runs, they push the
+                    planned list off the bottom. Folding one away is
+                    quicker than scrolling past it all morning. */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPanelOpen((previous) => ({
+                      ...previous,
+                      [bucket]: !previous[bucket],
+                    }))}
+                  aria-expanded={open}
+                  className="flex w-full items-center gap-2.5 border-b border-[#2C4E54] px-4 py-3 text-left hover:bg-[#16292D]"
+                >
                   <i
                     className="h-5 w-[3px] rounded-sm"
                     style={{ background: accent }}
@@ -2981,8 +3375,16 @@ export default function ChartPage() {
                       ? `${state.category?.label} › ${state.pending.label}`
                       : state.category?.label ?? ""}
                   </span>
-                </div>
+                  <span
+                    className="shrink-0 font-mono text-xs text-[#8AA6AB]"
+                    aria-hidden="true"
+                  >
+                    {open ? "▾" : "▸"}
+                  </span>
+                </button>
 
+                {open && (
+                  <>
                 {deep && (
                   <button
                     type="button"
@@ -3110,6 +3512,8 @@ export default function ChartPage() {
                     })}
                   </div>
                 )}
+                  </>
+                )}
               </section>
             );
           })}
@@ -3172,11 +3576,15 @@ export default function ChartPage() {
                   : `${planRows.length} open · tick what to present`}
             </span>
 
+            {/* Refresh is the only thing that re-sorts. Everything
+                else keeps the order that is already on screen, and
+                clears the deleted markers with it. */}
             <button
               type="button"
-              onClick={() => patient && loadPlan(patient.PatNum, true)}
+              onClick={() => patient && loadPlan(patient.PatNum, true, true)}
               disabled={planLoading}
               className="ml-auto rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-40"
+              title="Re-read this patient's plan from OpenDental and re-sort it"
             >
               Refresh
             </button>
@@ -3280,8 +3688,9 @@ export default function ChartPage() {
           )}
 
           <div className="divide-y divide-[#2C4E54]">
-            {planRows.map((row) => {
-              const ticked = selected.has(row.od_id);
+            {displayRows.map(({ row, deleted }) => {
+              const ticked = !deleted && selected.has(row.od_id);
+              const figures = figuresFor(row);
               // Accepted work is dimmed: it has been agreed and is
               // waiting to be done, so it is the settled part of the
               // list rather than the part needing attention. Dimmed,
@@ -3289,7 +3698,8 @@ export default function ChartPage() {
               // work the patient accepted and never came back for is
               // the reason this list shows it at all.
               const settled = isAcceptedLabel(row.priority_label);
-              const busy = removingId === row.od_id || savingRow === row.od_id;
+              const busy =
+                deleted || removingId === row.od_id || savingRow === row.od_id;
               const fromThisVisit = sessionIds.has(row.od_id);
               const editing = editingPlanFee === row.od_id;
 
@@ -3297,37 +3707,58 @@ export default function ChartPage() {
                 <div
                   key={row.od_id}
                   className={`flex items-center gap-3 px-4 py-2.5 ${
-                    settled ? "opacity-55" : ""
+                    deleted ? "opacity-45" : settled ? "opacity-55" : ""
                   } ${ticked ? "bg-[#16292D]" : ""} ${
-                    busy ? "animate-pulse" : ""
+                    busy && !deleted ? "animate-pulse" : ""
                   }`}
                 >
                   <input
                     type="checkbox"
                     checked={ticked}
+                    disabled={deleted}
                     onChange={() => toggleSelected(row.od_id)}
-                    className="h-5 w-5 shrink-0 accent-[#F0A93B]"
+                    className="h-5 w-5 shrink-0 accent-[#F0A93B] disabled:opacity-30"
                     aria-label={`Select ${row.proc_code}`}
                   />
 
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm">
-                      <span className="font-mono text-[#79B4C4]">
+                    {/* Only the description gives way. v18 truncated the
+                        whole line, which took the flag with it on
+                        exactly the rows where it matters — a deleted
+                        procedure with a long name looked like a live
+                        one. The code, the tooth and the flags hold their
+                        width; the description is the part a coordinator
+                        can already guess from the code. */}
+                    <p className="flex items-baseline gap-2 text-sm">
+                      <span className="shrink-0 font-mono text-[#79B4C4]">
                         {row.proc_code}
                       </span>
                       {row.tooth !== "" && (
-                        <span className="ml-2 font-mono text-xs text-[#8AA6AB]">
+                        <span className="shrink-0 font-mono text-xs text-[#8AA6AB]">
                           #{row.tooth}
                           {row.surf !== "" ? ` ${row.surf}` : ""}
                         </span>
                       )}
-                      <span className="ml-2 text-[#EDF3F1]">{row.descript}</span>
-                      {fromThisVisit && (
+                      <span className="truncate text-[#EDF3F1]">
+                        {row.descript}
+                      </span>
+                      {fromThisVisit && !deleted && (
                         <span
-                          className="ml-2 rounded bg-[#193034] px-1.5 py-0.5 font-mono text-[10px] text-[#79B4C4]"
+                          className="shrink-0 rounded bg-[#193034] px-1.5 py-0.5 font-mono text-[10px] text-[#79B4C4]"
                           title="Charted during this visit"
                         >
                           new
+                        </span>
+                      )}
+                      {/* Gone from OpenDental, still holding its place
+                          here so the list does not move under the next
+                          tap. Refresh clears it. */}
+                      {deleted && (
+                        <span
+                          className="shrink-0 rounded bg-[#2A1A18] px-1.5 py-0.5 font-mono text-[10px] text-[#E4674F]"
+                          title="Deleted from OpenDental. Refresh to clear it from this list."
+                        >
+                          deleted
                         </span>
                       )}
                     </p>
@@ -3434,10 +3865,26 @@ export default function ChartPage() {
                         {money(row.fee)}
                       </button>
                     )}
+                    {/* Insurance and patient are this screen's
+                        allocation, not OpenDental's stored figures:
+                        those are capped for whatever ordering its
+                        Windows client last saw. A row the maximum ran
+                        out on says so rather than showing a bare zero. */}
                     <div className="font-mono text-[11px] text-[#8AA6AB]">
-                      ins {row.allowed === null ? "—" : money(row.pri_ins + row.sec_ins)}
+                      ins{" "}
+                      {row.allowed === null
+                        ? "—"
+                        : money(figures.pri_ins + figures.sec_ins)}
+                      {figures.limited && (
+                        <span
+                          className="ml-1 text-[#E4674F]"
+                          title="The plan's annual maximum is used up before this procedure"
+                        >
+                          max
+                        </span>
+                      )}
                       {" · "}
-                      <span className="text-[#F0A93B]">pt {money(row.pat)}</span>
+                      <span className="text-[#F0A93B]">pt {money(figures.pat)}</span>
                     </div>
                   </div>
 
@@ -3445,10 +3892,19 @@ export default function ChartPage() {
                     type="button"
                     onClick={() => removePending(row)}
                     disabled={busy}
-                    title="Remove from the treatment plan in OpenDental"
-                    className="shrink-0 rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs text-[#E4674F] hover:bg-[#193034] disabled:opacity-40"
+                    title={
+                      deleted
+                        ? "Already deleted from OpenDental"
+                        : "Remove from the treatment plan in OpenDental"
+                    }
+                    /* Fixed width. The label goes Delete, then an
+                       ellipsis, then Gone, and letting the button
+                       resize between them moved every control on the
+                       row — the description beside it is flex-1 and
+                       absorbs whatever the button gives up. */
+                    className="w-[74px] shrink-0 rounded-lg border border-[#2C4E54] px-2 py-1.5 text-center text-xs text-[#E4674F] hover:bg-[#193034] disabled:opacity-40"
                   >
-                    {busy ? "…" : "Delete"}
+                    {deleted ? "Gone" : busy ? "…" : "Delete"}
                   </button>
                 </div>
               );
@@ -3633,32 +4089,41 @@ export default function ChartPage() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#2C4E54]">
-                      {planTabRows.map((row) => (
-                        <tr key={row.od_id}>
-                          <td className="px-4 py-2.5">
-                            <div className="text-[#EDF3F1]">{row.descript}</div>
-                            <div className="mt-0.5 font-mono text-[11px] text-[#8AA6AB]">
-                              {row.proc_code}
-                              {row.tooth !== "" && ` · tooth ${row.tooth}`}
-                              {row.surf !== "" && ` ${row.surf}`}
-                            </div>
-                          </td>
-                          <td className="px-2 py-2.5 text-right font-mono">
-                            {money(row.fee)}
-                          </td>
-                          <td className="px-2 py-2.5 text-right font-mono text-[#8AA6AB]">
-                            {/* X is OpenDental's own mark for work it is
-                                not billing to insurance. */}
-                            {row.allowed === null ? "X" : money(row.allowed)}
-                          </td>
-                          <td className="px-2 py-2.5 text-right font-mono text-[#79B4C4]">
-                            {money(row.pri_ins + row.sec_ins)}
-                          </td>
-                          <td className="px-4 py-2.5 text-right font-mono font-semibold text-[#F0A93B]">
-                            {money(row.pat)}
-                          </td>
-                        </tr>
-                      ))}
+                      {planTabRows.map((row) => {
+                        const figures = figuresFor(row);
+
+                        return (
+                          <tr key={row.od_id}>
+                            <td className="px-4 py-2.5">
+                              <div className="text-[#EDF3F1]">{row.descript}</div>
+                              <div className="mt-0.5 font-mono text-[11px] text-[#8AA6AB]">
+                                {row.proc_code}
+                                {row.tooth !== "" && ` · tooth ${row.tooth}`}
+                                {row.surf !== "" && ` ${row.surf}`}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2.5 text-right font-mono">
+                              {money(row.fee)}
+                            </td>
+                            <td className="px-2 py-2.5 text-right font-mono text-[#8AA6AB]">
+                              {/* X is OpenDental's own mark for work it is
+                                  not billing to insurance. */}
+                              {row.allowed === null ? "X" : money(row.allowed)}
+                            </td>
+                            <td className="px-2 py-2.5 text-right font-mono text-[#79B4C4]">
+                              {money(figures.pri_ins + figures.sec_ins)}
+                              {figures.limited && (
+                                <div className="text-[10px] text-[#E4674F]">
+                                  annual max reached
+                                </div>
+                              )}
+                            </td>
+                            <td className="px-4 py-2.5 text-right font-mono font-semibold text-[#F0A93B]">
+                              {money(figures.pat)}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -3666,10 +4131,34 @@ export default function ChartPage() {
                 <div className="border-t border-[#2C4E54] px-4 py-3">
                   <TotalsStrip totals={planTabTotals} emphasisePatient />
                   <p className="mt-2 text-[11px] text-[#8AA6AB]">
-                    Insurance figures are OpenDental&apos;s own estimates and
-                    depend on the plan&apos;s deductible and annual maximum.
-                    They are an estimate, not a guarantee.
+                    Insurance figures are estimates based on this plan&apos;s
+                    benefits as they stand today, and depend on the deductible
+                    and annual maximum. They are an estimate, not a guarantee.
                   </p>
+
+                  {/* Said out loud, with the number, because a patient
+                      looking at a reduced estimate deserves the reason
+                      rather than a smaller figure than the one they were
+                      quoted last visit. */}
+                  {allocation.applied && allocation.remaining_max !== null && (
+                    <p className="mt-1.5 text-[11px] text-[#F0A93B]">
+                      This plan has {money(allocation.remaining_max)} of
+                      {allocation.annual_max === null
+                        ? " its annual maximum"
+                        : ` its ${money(allocation.annual_max)} annual maximum`}{" "}
+                      left for the year. It is applied in the order the
+                      treatment is planned, and the estimate runs{" "}
+                      {money(allocation.over_by)} past it, so procedures beyond
+                      that point show reduced or no insurance.
+                    </p>
+                  )}
+
+                  {allocation.secondary_present && (
+                    <p className="mt-1.5 text-[11px] text-[#8AA6AB]">
+                      A secondary plan is on file. The maximum above was applied
+                      to the primary only.
+                    </p>
+                  )}
                 </div>
 
                 {/* Anything left at Diag after signing was not accepted.
@@ -3837,11 +4326,22 @@ export default function ChartPage() {
                   </p>
                 )}
 
+                {/* The wording the signature is a signature to, in the
+                    same words the PDF carries and directly above the
+                    pad. A patient signing on a tablet should be able to
+                    read what they are agreeing to without asking for
+                    the printout. */}
+                <div className="mt-5 rounded-xl border border-[#2C4E54] bg-[#0F1D20] p-3">
+                  <p className="text-[11.5px] leading-snug text-[#8AA6AB]">
+                    {CONSENT_TEXT}
+                  </p>
+                </div>
+
                 {/* The pad sits above the buttons because the signature
                     has to be on the document the buttons produce. A pad
                     below "Accept and file" would invite filing first and
                     signing after, which files an unsigned plan. */}
-                <div className="mt-5">
+                <div className="mt-4">
                   <SignaturePad
                     onChange={setSignature}
                     disabled={signing}
@@ -3921,5 +4421,3 @@ export default function ChartPage() {
     </main>
   );
 }
-
-

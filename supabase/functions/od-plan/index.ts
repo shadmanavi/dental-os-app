@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 5
+// Version: 8
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -19,10 +19,105 @@
 //   { "office":"downey", "action":"set_dx", "pat_num":17,
 //     "od_id":1081990, "dx":115 }
 //   { "office":"downey", "action":"set_note", "pat_num":17,
-//     "od_id":1081990, "note":"preauth" }
+//     "od_id":1082014, "note":"preauth", "mode":"add" }
+//   { "office":"downey", "action":"set_note", "pat_num":17,
+//     "od_id":1082014, "note":"preauth", "mode":"remove" }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v8  The same answers, in half the round trips.
+//
+//       v7 was correct and slow. Opening a patient went from four
+//       OpenDental calls to seven, and OpenDental serialises them, so
+//       seven calls is seven waits — measured previously at 6.7 seconds
+//       for 31 sequential reads. The office noticed immediately.
+//
+//       The three the ceiling needed are now one union: the plan's
+//       limits, what has been paid this year, and each procedure's
+//       coverage category. The shapes differ so every row carries a
+//       kind and the columns are read according to it. Less pleasant to
+//       read than three queries; two fewer waits.
+//
+//       The priority and diagnosis lists moved out of plan altogether,
+//       into a lists action the screen calls once when it loads. They
+//       belong to the office and change perhaps twice a year, and they
+//       were being re-read for every patient. plan still sends them
+//       unless asked not to, so a caller built against v7 keeps
+//       working.
+//
+//       Opening a patient is now three calls: the money, the notes, and
+//       the ceiling. One fewer than before any of this began.
+//
+//   v7  The ceiling, and the figure it is applied to.
+//
+//       OpenDental caps a plan's estimates at the annual maximum, but
+//       only when its own Windows client recalculates — opening the
+//       Treatment Plan module is one trigger, saving from Procedure
+//       Info another. Nothing this API offers will do it: the published
+//       resource list has no recalculate method, and ChartModules
+//       serves only ProgNotes, PatientInfo and PlannedAppts.
+//
+//       Measured on patient 32569 at Downey: estimates summed to
+//       $2,078.20 against a $1,500 maximum. Opening the module in the
+//       client wrote the capped figures back and they held after it was
+//       closed. So the stored numbers are correct for whatever ordering
+//       was in force the last time a person looked, and silently wrong
+//       for any ordering since. That matters because acceptance changes
+//       the ordering, and acceptance is what this screen exists to
+//       change.
+//
+//       Four things are added so the screen can apply the ceiling
+//       itself rather than present a number it knows may be stale:
+//
+//       BaseEst per procedure — the estimate before any limitation.
+//       OpenDental's ComputeBaseEst finishes it and states in the
+//       source that it will not be altered further; the maximum is
+//       applied afterwards and writes only InsEstTotal and InsPayEst.
+//       It is therefore the one figure that survives a procedure being
+//       zeroed, and the only thing that makes reallocation possible
+//       without this app deciding what a carrier covers.
+//
+//       The benefit itself — annual maximum, deductible, and how much
+//       of each has gone this year. The remaining maximum is not stored
+//       anywhere; it is the difference, and it is what actually
+//       constrains today's plan.
+//
+//       Category deductibles. A plan charging $50 usually waives it for
+//       Diagnostic and Preventive, and says so with one benefit row per
+//       category. Without them a $13 x-ray absorbs the deductible and
+//       the crown behind it does not — which matches OpenDental on the
+//       total and on no individual line.
+//
+//       The coverage category each procedure falls in, read through
+//       covspan. Nothing here decides what counts as preventive;
+//       OpenDental decided that when the code was set up.
+//
+//       Also returned: EstimateNote, which is where OpenDental writes
+//       "Over annual max" and "Exclusion" in words, and a flag for
+//       whether any figure on the row was overridden by hand. An
+//       overridden row is passed through untouched — a number a person
+//       typed is not this app's to recompute.
+//
+//       Nothing was removed and nothing changed shape. Every v6 field
+//       is still returned under the same name.
+//
+//   v6  The note comes off again, and the plan says which procedures
+//       carry it.
+//
+//       v5 could add the token and not remove it, which made the
+//       screen's preauthorization control a one-way door: a procedure
+//       marked by accident stayed marked, and the biller's worklist
+//       would carry it forever. Removal takes out the token and
+//       nothing else. Everything a person typed around it is kept,
+//       matched line by line, because a procedure note is clinical
+//       record and this function has no business editing prose.
+//
+//       plan now returns preauth per procedure. Without it the screen
+//       would have to guess the state of its own toggle, or ask once
+//       per row — seventeen extra calls on a patient this size, served
+//       sequentially by an API that has already been measured doing
+//       exactly that at 6.7 seconds for 31.
 //
 //   v5  The preauthorization note.
 //
@@ -196,6 +291,59 @@ const NOTE_TOKENS: Record<string, string> = {
   preauth: "Autho Needed (DOS Entry)",
 };
 
+// Take one token out of a note and leave everything else exactly as it
+// was. The token is matched as a whole line first, which is how this
+// function writes it. The embedded case is handled second and only if
+// it is still there — someone may have typed around it in OpenDental,
+// and the remainder of their sentence is theirs to keep.
+function stripToken(note: string, token: string): string {
+  const kept = note
+    .split(/\r\n|\r|\n/)
+    .filter((line) => line.trim() !== token);
+
+  let next = kept.join("\r\n").trim();
+
+  if (next.includes(token)) {
+    next = next.split(token).join("").trim();
+  }
+
+  return next;
+}
+
+// The newest note on each of a patient's planned procedures, and
+// whether it carries the token. procnote is versioned — 448,383 rows
+// across 373,424 procedures at Downey — so the newest version of each
+// is selected in SQL rather than every version being read and sorted
+// here.
+async function preauthByProc(
+  auth: string,
+  patNum: number,
+  token: string,
+): Promise<Set<number>> {
+  const { rows } = await shortQueryAll(
+    auth,
+    `SELECT pn.ProcNum, pn.Note FROM procnote pn ` +
+      `INNER JOIN ( ` +
+      `SELECT ProcNum, MAX(ProcNoteNum) AS MaxNum FROM procnote ` +
+      `WHERE ProcNum IN ( ` +
+      `SELECT ProcNum FROM procedurelog ` +
+      `WHERE PatNum = ${patNum} AND ProcStatus = ${PROC_STATUS_TP}` +
+      `) GROUP BY ProcNum` +
+      `) latest ON latest.ProcNum = pn.ProcNum ` +
+      `AND latest.MaxNum = pn.ProcNoteNum`,
+  );
+
+  const marked = new Set<number>();
+
+  for (const row of rows) {
+    if (String(row.Note ?? "").includes(token)) {
+      marked.add(Number(row.ProcNum ?? 0));
+    }
+  }
+
+  return marked;
+}
+
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -343,6 +491,8 @@ Deno.serve(async (req: Request) => {
     fee?: number;
     dx?: number;
     note?: string;
+    mode?: string;
+    include_lists?: boolean;
   };
 
   try {
@@ -357,6 +507,7 @@ Deno.serve(async (req: Request) => {
 
   const ACTIONS = [
     "plan",
+    "lists",
     "presenters",
     "remove",
     "set_priority",
@@ -428,6 +579,40 @@ Deno.serve(async (req: Request) => {
   // No group filter, because staff are cross-trained and a biller or a
   // manager presents plans as readily as a treatment coordinator.
   // ===================================================================
+  // ===================================================================
+  // lists — the office's priority and diagnosis definitions
+  //
+  // Read once when the screen loads rather than on every patient open.
+  // They belong to the office and change perhaps twice a year, and two
+  // serialised OpenDental calls per patient for data that has not moved
+  // since the morning is two waits the coordinator did not need.
+  //
+  // Still per office and never cached across them: Downey's DefNum 148
+  // is "Not Accepted" and Maywood's is "Optional", so a list carried
+  // between offices would set the wrong thing without ever looking
+  // wrong.
+  // ===================================================================
+  if (action === "lists") {
+    const priorityList = await definitionList(auth, CATEGORY_PRIORITY);
+    const diagnosisList = await definitionList(auth, CATEGORY_DIAGNOSIS);
+
+    if (priorityList.failed !== null || diagnosisList.failed !== null) {
+      return json({
+        ok: false,
+        error: "OpenDental could not read this office's definition lists.",
+        detail: (priorityList.failed ?? diagnosisList.failed)?.body,
+      }, 502);
+    }
+
+    return json({
+      ok: true,
+      office: officeRow.name,
+      office_slug: officeRow.slug,
+      priorities: priorityList.list,
+      diagnoses: diagnosisList.list,
+    });
+  }
+
   if (action === "presenters") {
     const { rows, failed } = await shortQueryAll(
       auth,
@@ -474,9 +659,31 @@ Deno.serve(async (req: Request) => {
       `COUNT(cp.ClaimProcNum) AS EstRows, ` +
       `COALESCE(SUM(CASE WHEN pp.Ordinal = 1 THEN cp.InsPayEst ELSE 0 END), 0) AS PriIns, ` +
       `COALESCE(SUM(CASE WHEN pp.Ordinal > 1 THEN cp.InsPayEst ELSE 0 END), 0) AS SecIns, ` +
+      // BaseEst is the estimate before any limitation is applied.
+      // OpenDental's ComputeBaseEst finishes it and states in the
+      // source that it will not be altered further; the annual maximum
+      // is applied afterwards and touches only InsEstTotal and
+      // InsPayEst. So this is the one figure that survives a procedure
+      // being zeroed for running past the maximum, and the only thing
+      // that makes reallocation possible without recomputing what a
+      // carrier covers.
+      `COALESCE(SUM(CASE WHEN pp.Ordinal = 1 THEN cp.BaseEst ELSE 0 END), 0) AS PriBase, ` +
+      `COALESCE(SUM(CASE WHEN pp.Ordinal > 1 THEN cp.BaseEst ELSE 0 END), 0) AS SecBase, ` +
       `COALESCE(SUM(cp.WriteOff), 0) AS WriteOff, ` +
       `COALESCE(SUM(cp.DedApplied), 0) AS DedApplied, ` +
-      `COALESCE(MAX(cp.NoBillIns), 0) AS NoBillIns ` +
+      `COALESCE(MAX(cp.NoBillIns), 0) AS NoBillIns, ` +
+      // OpenDental's own words for why a figure is what it is: "Over
+      // annual max", "Exclusion", an age limitation. Shown rather than
+      // inferred — a reason read from the source of truth beats one
+      // this app guesses at.
+      `COALESCE(MAX(cp.EstimateNote), '') AS EstimateNote, ` +
+      // A hand-typed override. OpenDental stores -1 for "none", so
+      // anything else means a human decided this number and no
+      // reallocation may touch it.
+      `MAX(CASE WHEN cp.InsEstTotalOverride <> -1 ` +
+      `OR cp.DedEstOverride <> -1 OR cp.PercentOverride <> -1 ` +
+      `THEN 1 ELSE 0 END) AS HasOverride, ` +
+      `MAX(CASE WHEN pp.Ordinal = 1 THEN cp.PlanNum ELSE NULL END) AS PriPlanNum ` +
       `FROM procedurelog pl ` +
       `INNER JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
       `LEFT JOIN provider pr ON pr.ProvNum = pl.ProvNum ` +
@@ -507,8 +714,187 @@ Deno.serve(async (req: Request) => {
     // with the plan rather than fetched separately, because a screen
     // holding a list from the other office would set the wrong value
     // without ever looking wrong.
-    const priorityList = await definitionList(auth, CATEGORY_PRIORITY);
-    const diagnosisList = await definitionList(auth, CATEGORY_DIAGNOSIS);
+    // The two dropdown lists. They belong to the office, not the
+    // patient, and change perhaps twice a year — but they were being
+    // read on every patient open, which is two serialised OpenDental
+    // calls per patient for data that had not moved since the morning.
+    //
+    // The screen now reads them once, through the lists action, and
+    // asks for them here only if it has not. Default is to send them,
+    // so a caller that has not been updated keeps working.
+    const wantLists = body.include_lists !== false;
+
+    const priorityList = wantLists
+      ? await definitionList(auth, CATEGORY_PRIORITY)
+      : { list: [], failed: null };
+
+    const diagnosisList = wantLists
+      ? await definitionList(auth, CATEGORY_DIAGNOSIS)
+      : { list: [], failed: null };
+
+    // Which procedures already carry the preauthorization token. Read
+    // separately from the money so that query stays as it was verified.
+    const preauthSet = await preauthByProc(
+      auth,
+      patNum,
+      NOTE_TOKENS.preauth,
+    );
+
+    // ---------------------------------------------------------------
+    // The ceiling, in one round trip.
+    //
+    // OpenDental applies the annual maximum inside its Windows client
+    // and stores the result, but nothing this app can call makes it
+    // recalculate. So a plan reordered chairside carries figures capped
+    // for an ordering that no longer exists, and the screen has to
+    // apply the ceiling itself.
+    //
+    // Three things are needed for that: the maximum and deductible, how
+    // much of each has gone this year, and which coverage category each
+    // procedure falls in. v7 asked for them as three queries, which
+    // cost three round trips on every patient open — and OpenDental
+    // serialises API calls, so three round trips is three waits, not
+    // one. Together with the money and the notes that made seven calls
+    // to open a patient, and the office felt it.
+    //
+    // They are unioned instead. The shapes differ, so each row carries
+    // a kind and the columns are read according to it — ugly to read,
+    // but one wait instead of three.
+    //
+    // Nothing here decides what a carrier covers. That is BaseEst, read
+    // with the money above, and it is never recomputed.
+    const yearStart = `${new Date().getFullYear()}-01-01`;
+
+    const ceilingSql =
+      // The plan's own limits. BenefitType 5 is the annual maximum and
+      // 2 is the deductible. A row with no category is the plan-wide
+      // one; rows with a category are the waivers, and a plan charging
+      // $50 usually waives it for Diagnostic and Preventive.
+      `SELECT 'benefit' AS Kind, b.PlanNum AS NumA, ` +
+      `b.BenefitType AS NumB, b.MonetaryAmt AS Amt, ` +
+      `b.CovCatNum AS NumC, ` +
+      `COALESCE(cat.Description, '') AS Label, ` +
+      `COALESCE(pp.Ordinal, 0) AS NumD ` +
+      `FROM benefit b ` +
+      `LEFT JOIN covcat cat ON cat.CovCatNum = b.CovCatNum ` +
+      `INNER JOIN inssub isub ON isub.PlanNum = b.PlanNum ` +
+      `INNER JOIN patplan pp ON pp.InsSubNum = isub.InsSubNum ` +
+      `WHERE pp.PatNum = ${patNum} AND b.BenefitType IN (2, 5) ` +
+
+      `UNION ALL ` +
+
+      // What the carrier has already paid this benefit year. The
+      // maximum that constrains today's plan is what is left of it, and
+      // OpenDental does not store that — it is the difference.
+      //
+      // The benefit year is taken as the calendar year, which is what
+      // both offices use. A service-year plan would need its renewal
+      // month and is not handled.
+      `SELECT 'used' AS Kind, cp.PlanNum AS NumA, ` +
+      `0 AS NumB, COALESCE(SUM(cp.InsPayAmt), 0) AS Amt, ` +
+      `0 AS NumC, '' AS Label, 0 AS NumD ` +
+      `FROM claimproc cp ` +
+      `WHERE cp.PatNum = ${patNum} AND cp.DateCP >= '${yearStart}' ` +
+      `AND cp.InsPayAmt > 0 GROUP BY cp.PlanNum ` +
+
+      `UNION ALL ` +
+
+      // Which coverage category each planned procedure falls in, which
+      // is what decides whether a deductible applies to it. Read rather
+      // than inferred: nothing here decides what counts as preventive,
+      // OpenDental decided that when the code was set up.
+      `SELECT 'cat' AS Kind, pl.ProcNum AS NumA, ` +
+      `0 AS NumB, 0 AS Amt, cov.CovCatNum AS NumC, ` +
+      `COALESCE(cov.Description, '') AS Label, 0 AS NumD ` +
+      `FROM procedurelog pl ` +
+      `INNER JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
+      `INNER JOIN covspan cs ON pc.ProcCode BETWEEN cs.FromCode AND cs.ToCode ` +
+      `INNER JOIN covcat cov ON cov.CovCatNum = cs.CovCatNum ` +
+      `WHERE pl.PatNum = ${patNum} AND pl.ProcStatus = ${PROC_STATUS_TP}`;
+
+    const ceilingRows = (await shortQueryAll(auth, ceilingSql)).rows;
+
+    const benefitRows = ceilingRows.filter((r) => r.Kind === "benefit");
+
+    const usedByPlan = new Map<number, number>();
+    for (const r of ceilingRows.filter((r) => r.Kind === "used")) {
+      usedByPlan.set(Number(r.NumA ?? 0), money(r.Amt));
+    }
+
+    // A procedure can fall in more than one span. The first is kept,
+    // which is how OpenDental resolves it — spans are ordered and the
+    // earliest match wins.
+    const catByProc = new Map<number, { num: number; name: string }>();
+    for (const r of ceilingRows.filter((r) => r.Kind === "cat")) {
+      const procNum = Number(r.NumA ?? 0);
+      const covCatNum = Number(r.NumC ?? 0);
+      if (procNum === 0 || covCatNum === 0) continue;
+      if (catByProc.has(procNum)) continue;
+      catByProc.set(procNum, {
+        num: covCatNum,
+        name: String(r.Label ?? "").trim(),
+      });
+    }
+
+    const planNums = Array.from(
+      new Set(benefitRows.map((r) => Number(r.NumA ?? 0))),
+    ).filter((n) => n > 0);
+
+    const benefits = planNums.map((planNum) => {
+      const forPlan = benefitRows.filter(
+        (r) => Number(r.NumA ?? 0) === planNum,
+      );
+
+      const annualMaxRow = forPlan.find(
+        (r) => Number(r.NumB) === 5 && Number(r.NumC ?? 0) === 0,
+      );
+
+      // The plan-wide deductible is the one with no category attached.
+      const deductibleRow = forPlan.find(
+        (r) => Number(r.NumB) === 2 && Number(r.NumC ?? 0) === 0,
+      );
+
+      // Categories the plan states a different deductible for. In
+      // practice these are the zeroes. Sent as a list rather than
+      // folded into one number, because which procedure bears the
+      // deductible changes which row on the printed plan shows it, and
+      // a coordinator comparing the tablet against OpenDental notices.
+      const categoryDeductibles = forPlan
+        .filter((r) => Number(r.NumB) === 2 && Number(r.NumC ?? 0) !== 0)
+        .map((r) => ({
+          cov_cat_num: Number(r.NumC ?? 0),
+          category_name: String(r.Label ?? "").trim(),
+          amount: money(r.Amt),
+        }));
+
+      const paid = usedByPlan.get(planNum) ?? 0;
+
+      // -1 is OpenDental's "not specified". A plan with no stated
+      // maximum has no ceiling to apply, and null says that plainly
+      // rather than pretending the limit is zero.
+      const rawMax = annualMaxRow === undefined ? -1 : money(annualMaxRow.Amt);
+      const rawDed = deductibleRow === undefined ? -1 : money(deductibleRow.Amt);
+
+      const annualMax = rawMax > 0 ? rawMax : null;
+      const deductible = rawDed >= 0 ? rawDed : null;
+
+      return {
+        plan_num: planNum,
+        ordinal: Number(forPlan[0]?.NumD ?? 0),
+        annual_max: annualMax,
+        deductible,
+        category_deductibles: categoryDeductibles,
+        paid_this_year: paid,
+        // OpenDental does not record deductible taken separately from
+        // payment on a paid claim in a way this can read reliably, so
+        // it is reported as zero rather than guessed at.
+        deductible_used: 0,
+        remaining_max: annualMax === null
+          ? null
+          : Math.round((annualMax - paid) * 100) / 100,
+        benefit_year_start: yearStart,
+      };
+    });
 
     const procedures = rows.map((r) => {
       const fee = money(r.ProcFee);
@@ -557,6 +943,21 @@ Deno.serve(async (req: Request) => {
         allowed,
         pri_ins: priIns,
         sec_ins: secIns,
+
+        // The uncapped estimate, and whether anything about this row
+        // was decided by hand. Both are needed to reallocate a
+        // remaining annual maximum honestly; neither is displayed
+        // directly.
+        pri_base: money(r.PriBase),
+        sec_base: money(r.SecBase),
+        has_override: Number(r.HasOverride ?? 0) === 1,
+        estimate_note: String(r.EstimateNote ?? "").trim(),
+        pri_plan_num: Number(r.PriPlanNum ?? 0),
+
+        // The coverage category this procedure falls in, which decides
+        // whether the plan's deductible applies to it.
+        cov_cat_num: catByProc.get(Number(r.ProcNum ?? 0))?.num ?? 0,
+        cov_cat_name: catByProc.get(Number(r.ProcNum ?? 0))?.name ?? "",
         write_off: writeOff,
         deductible: money(r.DedApplied),
         pat,
@@ -565,6 +966,11 @@ Deno.serve(async (req: Request) => {
         // more useful than "insurance won't pay".
         no_bill_ins: noBillIns,
         estimated: estRows > 0,
+
+        // Whether this procedure is marked as needing a
+        // preauthorization. It is a note written by this app, not an
+        // OpenDental field — there is no such field anywhere.
+        preauth: preauthSet.has(Number(r.ProcNum ?? 0)),
       };
     });
 
@@ -594,6 +1000,11 @@ Deno.serve(async (req: Request) => {
       totals,
       priorities: priorityList.list,
       diagnoses: diagnosisList.list,
+      // The ceiling, per plan. Sent alongside the rows rather than
+      // folded into them, because applying it is a decision the screen
+      // makes and shows its working for, not a number that arrives
+      // looking like OpenDental's.
+      benefits,
       // Named so the screen can say where a number came from rather
       // than presenting it as this app's arithmetic.
       money_source:
@@ -779,6 +1190,17 @@ Deno.serve(async (req: Request) => {
       }, 400);
     }
 
+    // Add unless removal is asked for. Defaulting this way keeps every
+    // v5 caller working unchanged.
+    const mode = (body.mode ?? "add").toLowerCase().trim();
+
+    if (mode !== "add" && mode !== "remove") {
+      return json({
+        ok: false,
+        error: "mode must be add or remove.",
+      }, 400);
+    }
+
     // The procedure has to belong to this patient. An od_id from a
     // stale screen could otherwise annotate someone else's chart.
     const before = await odFetch(auth, "GET", `/procedurelogs/${odId}`);
@@ -823,21 +1245,28 @@ Deno.serve(async (req: Request) => {
       }
     }
 
-    // Already said. Saying it twice helps nobody and makes the sweep
-    // count wrong.
-    if (latest.includes(noteText)) {
+    const wasPresent = latest.includes(noteText);
+
+    // Nothing to do. Adding a token twice makes the biller's count
+    // wrong; removing one that was never there files a pointless
+    // version of a clinical note.
+    if (wasPresent === (mode === "add")) {
       return json({
         ok: true,
         od_id: odId,
         note: noteText,
-        already_present: true,
+        mode,
+        present: wasPresent,
+        already_present: wasPresent,
         wrote: false,
         changed_by: userData.user.email,
         changed_at: new Date().toISOString(),
       });
     }
 
-    const combined = latest.trim() === ""
+    const combined = mode === "remove"
+      ? stripToken(latest, noteText)
+      : latest.trim() === ""
       ? noteText
       : `${noteText}\r\n${latest}`;
 
@@ -866,19 +1295,25 @@ Deno.serve(async (req: Request) => {
       (check.rows[0] ?? {}).Note ?? "",
     );
 
-    const honoured = stored.includes(noteText);
+    // What OpenDental now holds, which is the only answer that counts.
+    const nowPresent = stored.includes(noteText);
+    const honoured = nowPresent === (mode === "add");
 
     return json({
       ok: honoured,
       od_id: odId,
       note: noteText,
+      mode,
+      present: nowPresent,
       already_present: false,
       wrote: honoured,
       stored,
       honoured,
       error: honoured
         ? undefined
-        : "OpenDental accepted the note and did not store it.",
+        : mode === "add"
+        ? "OpenDental accepted the note and did not store it."
+        : "OpenDental accepted the removal and kept the note.",
       changed_by: userData.user.email,
       changed_at: new Date().toISOString(),
     });
@@ -975,3 +1410,5 @@ Deno.serve(async (req: Request) => {
     removed_at: new Date().toISOString(),
   });
 });
+
+

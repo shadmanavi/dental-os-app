@@ -5,7 +5,7 @@
 //
 // Changelog:
 //   v3  One signature line, not two, and the presentation date moves
-//       into the header.
+//       into the header — from two places to one.
 //
 //       The second line said "Presented by" with the presenter's name
 //       typed above it. Nobody ever signed it. A ruled line with a name
@@ -155,10 +155,10 @@ function header(doc: jsPDF, input: PlanInput): number {
     { align: "center" },
   );
 
-  y += 12;
+  // The date used to print here too, under the patient's name. It is
+  // in the header block now, under the presenter, and one date on a
+  // one-page document is enough.
   doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
-  doc.text(input.planDate, PAGE_W / 2, y, { align: "center" });
 
   // Patient number and provider sit to the right, as OpenDental prints them.
   doc.setFontSize(8);

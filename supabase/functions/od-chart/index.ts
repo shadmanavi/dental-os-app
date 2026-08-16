@@ -6,201 +6,78 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 8
+// Version: 10
 // Changelog:
 //   v1  patients / open / commit / undo, built on what od-chart-probe
 //       established against the live Downey database.
-//   v2  The existing bucket wrote ProcStatus 'EC' and OpenDental refused
-//       it: "ProcStatus may only be set to Treatment Planned (TP),
-//       Complete (C), or Existing Other Provider (EO)." Probing settled
-//       that EC cannot be reached at all through this API — POST rejects
-//       it, and so does a PUT on a row already created at EO. Only TP, C
-//       and EO are writable.
+//   v2  OpenDental refused ProcStatus 'EC' on both POST and PUT, so the
+//       existing bucket commits at EO. A knowing compromise: EC means
+//       the work was done here, EO means another provider did it, and
+//       the API only offers the latter. DELETE on a row at EO also
+//       returned 400, so undo does not work on existing entries.
+//   v3  Adds "schedule", the Today tab on the patient picker.
 //
-//       The existing bucket therefore commits at EO. This is a knowing
-//       compromise: EC means the work was done at this practice, EO means
-//       another provider did it, and the API only offers the latter.
-//       Revisit if OpenDental opens EC to writes.
+//       GET /appointments returns the whole day but no patient names,
+//       and those extra calls cannot be hidden behind concurrency: 31
+//       fired at once took 6661ms with the slowest single call at
+//       6659ms, because OpenDental serves them one after another. One
+//       joined ShortQuery returned the same 32 rows, names included, in
+//       305ms.
 //
-//       Also: DELETE on a procedure at EO returned 400, so undo does not
-//       work on existing entries. The response now says so rather than
-//       failing silently.
-//   v3  Adds "schedule", the Today tab on the patient picker. A clinician
-//       picks from the day's appointments instead of typing a surname.
-//
-//       Three probe runs decided how this is built:
-//
-//       - GET /appointments?date= returns the whole day and every row
-//         carries PatNum, but no row carries a patient name. Rendering
-//         the tab off REST needs one extra call per appointment.
-//       - Those extra calls cannot be hidden behind concurrency. Thirty-
-//         one of them fired at once took 6661ms, with the slowest single
-//         call at 6659ms: OpenDental served them one after another.
-//       - One PUT /queries/ShortQuery joining appointment to patient and
-//         operatory returned the same 32 rows, with names and operatory
-//         names on every one, in 305ms. Row parity was confirmed against
-//         both the REST count and a COUNT(*).
-//
-//       So this action is a single joined read-only SELECT. Thirty-three
-//       calls become one, and the screen opens in roughly a third of the
-//       time. The endpoint rejects anything that is not read-only with a
-//       401, so the statement cannot mutate anything.
-//
-//       Four things the raw table exposes that REST did not:
-//
-//       - AptStatus is an integer, not a word. 1 = Scheduled and
-//         5 = Broken are confirmed against live data. The rest of the
-//         enum is carried here but flagged unverified.
-//       - DateTimeArrived / Seated / Dismissed are populated, so checked
-//         in, in the chair, and dismissed are derived rather than
-//         fetched. An unset one reads as midnight, not null.
-//       - IsHygiene and IsHidden come back as 0/1 integers where REST
-//         returned strings.
-//       - Confirmed is a DefNum, not text. Resolving it needs a join on
-//         definition, which this version does not do.
+//       AptStatus is an integer (1 Scheduled and 5 Broken confirmed);
+//       the arrival, seating and dismissal timestamps are populated, so
+//       presence is derived, and an unset one reads as midnight.
 //   v4  Migration 010 moved the tile tree from the office up to the
-//       organization, so this file had to move with it. The old query
-//       filtered chart_categories on office_id, which no longer exists.
-//
-//       Greenwood does mostly the same dentistry at both sites; what
-//       differs is which procedures each one offers. So there is now one
-//       tree, and each tile carries the offices it is available at
-//       through chart_tile_offices. This action reads the tree for the
-//       organization and filters the tiles to the office being worked
-//       in — the clinician sees no difference, but an edit is made once
-//       rather than twice.
-//
-//       Two tile behaviours arrive with it, both found in the six-month
-//       procedure survey rather than assumed:
-//
-//       - Paired tiles. A crown is two procedures. D2751d appeared 136
-//         times at Downey beside D2751: the prep is billed at the first
-//         visit and the delivery at the seat. Both lines are created at
-//         diagnosis, so a tile with a delivery_code posts twice.
-//
-//         The delivery line posts at zero. Splitting the base fee is
-//         parked, because the fee lookup found Denti-Cal running as a
-//         flat-copay plan and uninsured patients carrying no fee
-//         schedule at all — neither divides cleanly. Whether OpenDental
-//         honours a zero has not been established, so the delivery line
-//         is read back and the fee it actually stored is returned. If
-//         OpenDental overrides it, the response will say so rather than
-//         the number being quietly wrong.
-//
-//       - Add-ons. Selecting a PFM crown brings porcelain margins with
-//         it, already checked. The negotiation with the patient is
-//         subtraction: decline the cost and the clinician unchecks it.
-//         Each add-on still checked at commit posts as its own
-//         procedure line, confirmed with Shad.
-//
-//       Because one tap can now write several lines, commit returns a
-//       lines array. The old top-level fields still describe the base
-//       line, so a caller that has not been updated keeps working.
-//
-//       Nothing here writes a fee for a base procedure. That rule is
-//       unchanged: OpenDental prices its own work.
-//   v5  Two things the office asked for after using v4.
-//
-//       - Search by date of birth or patient number, not only surname.
-//         Greenwood has several thousand patients and surnames repeat;
-//         the day's schedule already showed two different Mendozas and
-//         two Chavezes. A single box still takes all three: anything
-//         that is only digits is read as a patient number, anything
-//         that parses as a date is read as a birthdate, and everything
-//         else is a surname. A surname and a birthdate together narrow
-//         further, which is what OpenDental's own documentation
-//         recommends for identifying a patient.
-//
-//       - Providers by name rather than initials. The schedule returned
-//         ProvNum and nothing else, so the screen could only show
-//         "GP - YK". The schedule query now joins the provider table
-//         for both the dentist and the hygienist, and the patient load
-//         already carried full names. Initials are still returned
-//         alongside, because that is what the office uses on paper.
-//   v6  Unparks the fee split, and lets a fee be overridden at the chair.
-//
-//       The split was parked because no safe way to read a price had
-//       been found. od-survey v4 found it. Reading fee schedules 409 and
-//       410 returned D2751 at $476 under Denti-Cal and $1,366 under the
-//       Dental Masters Membership, with every delivery code at zero.
-//       That is exactly the shape Shad described: OpenDental holds the
-//       whole fee on the prep and nothing on the seat, and the app is
-//       to divide it.
-//
-//       So a paired tile now posts half on each line. The halving is
-//       done in whole cents, remainder to the base, so the two lines
-//       always add back to the fee OpenDental gave. This is still not
-//       pricing: no number is originated here, only divided.
-//
-//       Two things the live data forced:
-//
-//       - A missing fee row is not a zero. D2740d has no row at all in
-//         either schedule, while D2750 is a genuine zero under
-//         Denti-Cal. A paired tile whose base code has no row refuses
-//         to commit and names the code, rather than posting something
-//         unpredictable.
-//       - The schedule has to be resolved per patient, not per office.
-//         Insurance first, then the patient record, never the provider.
-//
-//       The override is per procedure, for one patient, on one visit.
-//       It does not touch a fee schedule. On a paired tile it applies
-//       to the total and is then split; on a single tile it applies to
-//       that line. Omitted, nothing changes: OpenDental prices its own
-//       work exactly as before.
-//
-//       open now also returns the resolved schedule and the price of
-//       every code the menu can write, so the screen can show a number
-//       before anyone taps.
+//       organization. There is now one tree, and each tile carries the
+//       offices it is available at. Paired tiles and add-ons arrive
+//       with it, so commit returns a lines array.
+//   v5  Search takes a date of birth or a patient number as well as a
+//       surname. The schedule query joins the provider table, so rows
+//       name the dentist or hygienist rather than showing initials.
+//   v6  Unparks the fee split. Reading fee schedules 409 and 410
+//       returned D2751 at $476 under Denti-Cal and $1,366 under the
+//       Dental Masters Membership, with every delivery code at zero —
+//       exactly the shape Shad described. A paired tile posts half on
+//       each line, halved in whole cents with the remainder to the
+//       base, so the two always add back. A missing fee row is not a
+//       zero, so a paired tile whose base code has no row refuses to
+//       commit and names the code.
 //   v7  Adds "set_fee", so a fee can be corrected on the line itself
-//       after it has been written.
+//       after it has been written. It sends ProcFee and nothing else,
+//       and reads the row back rather than trusting the response.
+//   v8  The search box takes a first name too: two words are read as
+//       surname then first name, comma optional.
+//   v9  Tried falling back to a first-name search only when the surname
+//       search came back empty.
+//   v10 v9's fallback was the wrong shape, and testing found it out.
 //
-//       v6 asked for the fee before committing, which turned out to be
-//       the wrong moment. The number that needs changing is usually the
-//       one already on screen, and by then it belongs to a specific
-//       procedure rather than to a tile. Editing it where it is shown
-//       also drops the constraint that the two halves of a crown must
-//       stay equal: once both lines exist they are just two procedures,
-//       and the office can put whatever it likes on each.
+//       Searching "shad" returned "Shadde, Roger" — LName matches on a
+//       prefix, so the surname search was not empty and the first-name
+//       retry never ran. Shad himself was not in the list. Making the
+//       fallback conditional on an empty result only works if surnames
+//       never share a prefix with first names, which is not a property
+//       anyone can rely on.
 //
-//       The split still happens at commit. It is a sensible starting
-//       point, not a rule to be enforced afterwards.
-//
-//       This action writes a fee and nothing else. It cannot change a
-//       code, a tooth, a status or a patient, and it reads the row back
-//       afterwards rather than trusting the response — OpenDental has
-//       already been seen ignoring what it was sent, and a fee that
-//       silently did not stick would be worse than one that refused.
-//   v8  The search box takes a first name too.
-//
-//       Surnames repeat: today's schedule alone held two Mendozas and
-//       two Chavezes. Typing "Mendoza Juanita" now narrows to one
-//       person. A comma is optional, so "Mendoza, Juanita" works the
-//       same way, because that is how the name is written everywhere
-//       else on the screen.
-//
-//       One word is still a surname. Nothing here tries to guess that a
-//       lone word might be a first name — there is no way to tell, and
-//       guessing wrong would quietly return the wrong list.
+//       A single word now searches both fields every time and merges
+//       the results, deduplicated by PatNum. It costs one extra call on
+//       single-word searches and cannot miss anyone regardless of who
+//       else happens to match.
 //
 // What the probe settled, and why this file looks the way it does:
 //
 //   - POST /procedurelogs wants procCode (the CDT string). CodeNum is a
 //     GET filter only, and sending it returns "procCode is required."
-//   - ProcFee is omitted deliberately. OpenDental priced a D2391 at
-//     210.00 on its own. Greenwood prices through five different
-//     mechanisms — patient fee schedule, insurance plan, Blue Book,
-//     discount plan, provider default — and reimplementing that chain
-//     here would drift from OpenDental within a month.
-//   - ProvNum is sent only when the caller picked one. Omitted, OpenDental
-//     falls back to the patient's primary provider, which is what the
-//     office wants by default.
-//   - ProcStatus EC cannot be written. Existing entries go in at EO. See
-//     the v2 changelog above.
+//   - ProvNum is sent only when the caller picked one. Omitted,
+//     OpenDental falls back to the patient's primary provider.
+//   - ProcStatus EC cannot be written. Existing entries go in at EO.
 //   - A missing tooth is not a procedure. It is a toothinitial row with
-//     InitialType 'Missing'. Missing and Hidden are independent flags; one
-//     tooth was observed carrying both.
-//   - GET /providers pages, and the pages overlap. Reading one page misses
-//     providers; reading pages without deduplicating counts them twice.
+//     InitialType 'Missing'. Missing and Hidden are independent flags.
+//   - GET /providers pages, and the pages overlap. Reading one page
+//     misses providers; reading pages without deduplicating counts them
+//     twice.
+//   - The fee table's schedule column is FeeSched. information_schema
+//     cannot be consulted: OpenDental rejects any query containing the
+//     word SCHEMA.
 //
 // Required secrets (already set for the other od-* functions):
 //   OD_DEVELOPER_KEY
@@ -219,7 +96,7 @@
 //     Optional: "pat_num":5969
 //     A bare query is read as a patient number if it is all digits, a
 //     birthdate if it parses as one, a surname and first name if it has
-//     two parts, and a surname otherwise.
+//     two parts, and both name fields at once if it is a single word.
 //   { "office":"downey", "action":"open", "pat_num":17 }
 //   { "office":"downey", "action":"commit", "pat_num":17,
 //     "tile_id":"<uuid>", "tooth_num":"30", "surfaces":["M","O"],
@@ -286,9 +163,7 @@ function isAnterior(toothNum: string): boolean {
 //
 // The REST endpoint returns words; the underlying column is an integer.
 // Only 1 and 5 have been seen on live Downey data and matched against
-// the REST wording, so only those two are marked verified. The rest come
-// from OpenDental's published enum and are flagged unverified, so the
-// screen can tell "known" apart from "assumed".
+// the REST wording, so only those two are marked verified.
 // ---------------------------------------------------------------------
 const APT_STATUS: Record<number, { label: string; verified: boolean }> = {
   1: { label: "Scheduled", verified: true },
@@ -413,30 +288,18 @@ async function odFetch(
   return { method, url, http_status: response.status, body: parsed };
 }
 
-// GET /providers caps a page at 100 and the pages overlap, so key on
-// ProvNum and stop when a page contributes nothing new.
 // ---------------------------------------------------------------------
 // Pricing
 //
 // Dental OS still does not decide what anything costs. It reads the
 // number OpenDental already holds and, for a two-visit procedure,
-// divides it between the two lines. That division is the only
-// arithmetic performed on a fee anywhere in this system.
+// divides it between the two lines.
 //
-// Which schedule to read was settled against live data:
-//
-//   - The insurance plan's fee schedule, if the patient has a usable
-//     plan. Pending, medical and terminated plans do not count.
-//   - Otherwise the fee schedule on the patient record. A membership
-//     such as Dental Masters lands here — OpenDental's Discount Plans
-//     screen sets patient.FeeSched and nothing else, so there is no
-//     third table to walk.
-//   - Never the provider's. Shad was explicit.
-//
-// The fee table's schedule column is FeeSched, confirmed by running
-// the query rather than by reading the docs, which disagree with
-// themselves. information_schema cannot be consulted at all:
-// OpenDental rejects any query containing the word SCHEMA.
+// Which schedule to read was settled against live data: the insurance
+// plan's fee schedule if the patient has a usable plan, otherwise the
+// one on the patient record. A membership such as Dental Masters lands
+// there, because OpenDental's Discount Plans screen sets
+// patient.FeeSched and nothing else. Never the provider's.
 // ---------------------------------------------------------------------
 type FeeSchedule = {
   source: "insurance plan" | "patient record" | "nothing set";
@@ -510,8 +373,7 @@ async function resolveFeeSchedule(
 // Amounts for a set of codes in one schedule, in one call.
 //
 // A code with no row is left out of the map rather than recorded as
-// zero. The two are not the same thing: D2740d has no row in either of
-// Greenwood's schedules, while D2750 is a real zero under Denti-Cal.
+// zero. The two are not the same thing.
 const SAFE_PROC_CODE = /^[A-Za-z0-9._-]{1,20}$/;
 
 async function lookupFees(
@@ -605,6 +467,8 @@ function codesInRule(rule: unknown): string[] {
 }
 
 // ---------------------------------------------------------------------
+// GET /providers caps a page at 100 and the pages overlap, so key on
+// ProvNum and stop when a page contributes nothing new.
 async function fetchAllProviders(
   auth: string,
 ): Promise<Record<string, unknown>[]> {
@@ -872,9 +736,6 @@ Deno.serve(async (req: Request) => {
 
   // ===================================================================
   // schedule — one day's appointments, for the Today tab
-  //
-  // A single joined SELECT. Placed before the pat_num actions because it
-  // deliberately does not take one.
   // ===================================================================
   if (action === "schedule") {
     const requested = (body.date ?? "").trim();
@@ -900,8 +761,6 @@ Deno.serve(async (req: Request) => {
       `a.ProvNum, a.ProvHyg, a.IsHygiene, a.ProcDescript, ` +
       `a.DateTimeArrived, a.DateTimeSeated, a.DateTimeDismissed, ` +
       `p.LName, p.FName, p.Preferred, o.OpName, o.Abbrev, o.IsHidden, ` +
-      // The dentist and the hygienist are two different columns on the
-      // appointment, so the provider table is joined twice.
       `dr.Abbr AS DrAbbr, dr.LName AS DrLName, dr.FName AS DrFName, ` +
       `dr.Suffix AS DrSuffix, ` +
       `hy.Abbr AS HygAbbr, hy.LName AS HygLName, hy.FName AS HygFName ` +
@@ -913,8 +772,6 @@ Deno.serve(async (req: Request) => {
       `WHERE a.AptDateTime >= '${dayStart}' AND a.AptDateTime < '${dayEnd}' ` +
       `ORDER BY a.AptDateTime, a.Op`;
 
-    // ShortQuery caps a page at 100 rows, and Offset was confirmed to
-    // advance rather than being ignored. Walk until a short page lands.
     const PAGE = 100;
     const rows: Record<string, unknown>[] = [];
 
@@ -962,8 +819,6 @@ Deno.serve(async (req: Request) => {
         status: status.label,
         status_num: statusNum,
         status_verified: status.verified,
-        // Broken is the one status confirmed unopenable. Everything else
-        // stays live rather than being greyed on an assumption.
         openable: statusNum !== 5 && patNum > 0,
         presence: presenceOf(r),
         operatory_num: Number(r.Op ?? 0),
@@ -972,8 +827,6 @@ Deno.serve(async (req: Request) => {
         operatory_hidden: Number(r.IsHidden ?? 0) === 1,
         prov_num: Number(r.ProvNum ?? 0),
         prov_abbr: String(r.DrAbbr ?? "").trim(),
-        // "Dr. Kaur" rather than "GP - YK". Initials are kept alongside
-        // because that is what the office writes on paper.
         prov_name: providerName(r.DrFName, r.DrLName, r.DrSuffix),
         prov_hyg: Number(r.ProvHyg ?? 0),
         hyg_abbr: String(r.HygAbbr ?? "").trim(),
@@ -993,8 +846,6 @@ Deno.serve(async (req: Request) => {
       ? appointments
       : appointments.filter((a) => !a.operatory_hidden);
 
-    // Chips for the operatories actually carrying appointments today,
-    // rather than all 55 rows of the operatory table.
     const opSeen = new Map<
       number,
       { num: number; name: string; abbr: string; count: number }
@@ -1109,7 +960,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // ---- By surname, birthdate, or both ----
+    // ---- By name, birthdate, or a combination ----
     if (lastName === "" && birthdate === "") {
       return json({
         ok: false,
@@ -1146,10 +997,56 @@ Deno.serve(async (req: Request) => {
       ? (call.body as Record<string, unknown>[])
       : [];
 
+    // A single word could be either name, and LName matches on a prefix,
+    // so "shad" finds "Shadde" and looks successful while missing the
+    // person actually wanted. Both fields are therefore searched every
+    // time rather than only when the first comes back empty.
+    let alsoSearchedFirstName = false;
+
+    if (lastName !== "" && firstName === "" && birthdate === "") {
+      alsoSearchedFirstName = true;
+
+      const byFirst = await odFetch(
+        auth,
+        "GET",
+        `/patients/Simple?hideInactive=true&FName=${
+          encodeURIComponent(lastName)
+        }`,
+      );
+
+      if (
+        byFirst.http_status >= 200 && byFirst.http_status < 300 &&
+        Array.isArray(byFirst.body)
+      ) {
+        // Merged on PatNum. Someone whose first and last name both match
+        // should appear once, not twice.
+        const seen = new Set<number>(
+          rows.map((r) => Number(r.PatNum ?? 0)),
+        );
+
+        for (const r of byFirst.body as Record<string, unknown>[]) {
+          const n = Number(r.PatNum ?? 0);
+          if (n > 0 && !seen.has(n)) {
+            seen.add(n);
+            rows.push(r);
+          }
+        }
+      }
+    }
+
+    // Alphabetical by surname, so a merged list reads like one list.
+    rows.sort((a, b) =>
+      String(a.LName ?? "").localeCompare(String(b.LName ?? ""))
+    );
+
     // Naming what was actually searched makes a wrong reading obvious:
     // a mistyped date searched as a surname explains itself.
     const searchedByParts: string[] = [];
-    if (lastName !== "") searchedByParts.push("surname");
+    if (lastName !== "") {
+      searchedByParts.push(
+        alsoSearchedFirstName ? "surname or first name" : "surname",
+      );
+    }
     if (firstName !== "") searchedByParts.push("first name");
     if (birthdate !== "") searchedByParts.push("date of birth");
 
@@ -1251,8 +1148,7 @@ Deno.serve(async (req: Request) => {
     ) ?? null;
 
     // The provider on today's appointment first; the patient's primary
-    // provider otherwise. Greenwood keeps schedules but asked not to lean
-    // on them, so the appointment is the signal, not the schedule.
+    // provider otherwise.
     const apptProv = liveAppt && typeof liveAppt.ProvNum === "number" &&
         liveAppt.ProvNum !== 0
       ? liveAppt.ProvNum
@@ -1282,11 +1178,8 @@ Deno.serve(async (req: Request) => {
       .sort((a, b) => a.Abbr.localeCompare(b.Abbr));
 
     // Tiles come from our own tables, read as the caller so RLS applies.
-    //
     // The tree belongs to the organization; chart_tile_offices decides
-    // which of its tiles this particular office offers. The !inner on
-    // that join is what does the filtering — a tile with no row for this
-    // office drops out rather than arriving and being hidden later.
+    // which of its tiles this particular office offers.
     const { data: categories, error: catError } = await supabase
       .from("chart_categories")
       .select(
@@ -1330,19 +1223,12 @@ Deno.serve(async (req: Request) => {
           entry_kind: t.entry_kind,
           initial_type: t.initial_type,
           needs_surfaces: t.needs_surfaces === true,
-          // OpenDental's own classification of the code, carried through
-          // so the screen knows whether to ask for a tooth, a surface, a
-          // quadrant or nothing.
           treat_area: t.treat_area ?? null,
-          // Present means this tile writes two lines, not one.
           delivery_code: t.delivery_code ?? null,
           is_paired: String(t.delivery_code ?? "") !== "",
           // Kept only long enough to gather the codes a tile can write,
-          // then stripped before the menu is sent. The browser has no
-          // use for the rule itself and resolving it is the server's job.
+          // then stripped before the menu is sent.
           code_rule_raw: t.code_rule ?? null,
-          // Add-ons arrive with the tile, already in their default
-          // state. The clinician removes rather than adds.
           addons: ((t.chart_tile_addons ?? []) as Record<string, unknown>[])
             .filter((a) => a.is_active !== false)
             .sort((a, b) =>
@@ -1428,8 +1314,7 @@ Deno.serve(async (req: Request) => {
     const surfaces = normalizeSurfaces(body.surfaces);
 
     // Read the tile through RLS, and confirm it belongs to this caller's
-    // organization and is offered at this office, rather than trusting
-    // the id the browser sent.
+    // organization and is offered at this office.
     const { data: tile, error: tileError } = await supabase
       .from("chart_tiles")
       .select(
@@ -1461,9 +1346,8 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: "That tile belongs to another organization." }, 403);
     }
 
-    // Availability is a property of the tile, so it is checked here as
-    // well as filtered in the menu. The menu is a convenience; this is
-    // the gate.
+    // Availability is checked here as well as filtered in the menu. The
+    // menu is a convenience; this is the gate.
     const availableAt = ((tile.chart_tile_offices ?? []) as Record<string, unknown>[])
       .map((row) => String(row.office_id ?? ""));
 
@@ -1531,10 +1415,6 @@ Deno.serve(async (req: Request) => {
 
     // -----------------------------------------------------------------
     // Procedure
-    //
-    // One tap can now write several lines: the base code, a delivery
-    // code if the tile is paired, and one line per surviving add-on.
-    // Each is posted separately, and the response lists them all.
     // -----------------------------------------------------------------
     if (tile.needs_surfaces === true && surfaces.length === 0) {
       return json({ ok: false, error: "Pick at least one surface." }, 400);
@@ -1550,19 +1430,13 @@ Deno.serve(async (req: Request) => {
       return json({ ok: false, error: resolved.error }, 400);
     }
 
-    // The bucket decides the status, and that is why existing and
-    // diagnosed share one set of codes.
-    //
-    // EO rather than EC: OpenDental's API refuses EC on both POST and PUT.
-    // EO overstates the case slightly — it implies another provider did
-    // the work — but it is the only "already done" status this API will
-    // accept alongside TP and C.
+    // The bucket decides the status. EO rather than EC: OpenDental's API
+    // refuses EC on both POST and PUT.
     const procStatus = category.bucket === "existing" ? "EO" : "TP";
     const procDate = new Date().toISOString().slice(0, 10);
 
     // Which add-ons survived. The browser sends the ones still checked;
-    // anything not belonging to this tile, or switched off, is dropped
-    // here rather than trusted.
+    // anything not belonging to this tile is dropped rather than trusted.
     const requestedAddonIds = Array.isArray(body.addon_ids)
       ? (body.addon_ids as unknown[]).map((a) => String(a))
       : null;
@@ -1576,7 +1450,6 @@ Deno.serve(async (req: Request) => {
       ? tileAddons.filter((a) => a.is_default_on === true)
       : tileAddons.filter((a) => requestedAddonIds.includes(String(a.id)));
 
-    // Every line this commit intends to write, base first.
     type PlannedLine = {
       role: "base" | "delivery" | "addon";
       label: string;
@@ -1595,8 +1468,6 @@ Deno.serve(async (req: Request) => {
 
       if (toothNum !== "") p.ToothNum = toothNum;
 
-      // Sent only when the user overrode it. Left out, OpenDental
-      // assigns the patient's primary provider.
       if (typeof body.prov_num === "number" && body.prov_num > 0) {
         p.ProvNum = body.prov_num;
       }
@@ -1609,13 +1480,10 @@ Deno.serve(async (req: Request) => {
     // -----------------------------------------------------------------
     // Pricing, and only for a paired tile
     //
-    // A single procedure is still priced entirely by OpenDental: no
-    // ProcFee is sent and nothing here decides what it costs. A paired
-    // tile is the exception, because OpenDental holds the whole fee on
-    // the prep and zero on the seat, and Greenwood wants it halved.
-    //
-    // An override replaces the fee OpenDental holds, for this patient
-    // on this visit only. It changes no fee schedule.
+    // A single procedure is still priced entirely by OpenDental. A
+    // paired tile is the exception, because OpenDental holds the whole
+    // fee on the prep and zero on the seat. The halves are a starting
+    // point: set_fee can change either line afterwards.
     // -----------------------------------------------------------------
     const deliveryCode = String(tile.delivery_code ?? "").trim();
     const isPaired = deliveryCode !== "";
@@ -1643,16 +1511,14 @@ Deno.serve(async (req: Request) => {
 
         const found = fees.get(resolved.procCode);
 
-        // Absent is not zero. A code with no row in this schedule would
-        // be priced by OpenDental in some way this function cannot
-        // predict, and half of an unknown number is not a number.
+        // Absent is not zero. Half of an unknown number is not a number.
         if (found === undefined) {
           return json({
             ok: false,
             error: isPaired
               ? `${resolved.procCode} has no fee in ${
                 feeSchedule.fee_sched_name || "this patient's fee schedule"
-              }, so it cannot be split between the two visits. Set the fee in OpenDental, or enter one here.`
+              }, so it cannot be split between the two visits. Set the fee in OpenDental, or change it on the line afterwards.`
               : `${resolved.procCode} has no fee in this patient's fee schedule.`,
             resolved_code: resolved.procCode,
             fee_schedule: feeSchedule,
@@ -1666,13 +1532,10 @@ Deno.serve(async (req: Request) => {
       if (isPaired) split = splitFee(baseFee);
     }
 
-    // Base. Surfaces belong to this line only — a delivery code or an
-    // add-on is not a surface restoration.
+    // Base. Surfaces belong to this line only.
     const base = basePayload(resolved.procCode);
     if (surfaces.length > 0) base.Surf = surfaces.join("");
 
-    // A fee is stated only when this function worked one out. Left off,
-    // OpenDental prices the line itself, which is the normal case.
     if (split !== null) {
       base.ProcFee = split.base;
     } else if (override !== null) {
@@ -1687,9 +1550,7 @@ Deno.serve(async (req: Request) => {
       payload: base,
     });
 
-    // Delivery. The second visit of a two-visit procedure, created now
-    // so the treatment plan shows the whole job, carrying the other
-    // half of the fee.
+    // Delivery. Created now so the treatment plan shows the whole job.
     if (isPaired) {
       const delivery = basePayload(deliveryCode);
       delivery.ProcFee = split === null ? 0 : split.delivery;
@@ -1734,14 +1595,13 @@ Deno.serve(async (req: Request) => {
           proc_code: l.proc_code,
           payload: l.payload,
         })),
-        // Kept so a caller written against v3 still sees what it expects.
         would_post: planned[0].payload,
         fee_schedule: feeSchedule,
         fee_source: feeSource,
         fee_total: baseFee,
         fee_split: split,
         note: isPaired
-          ? "The fee is halved between the two visits, remainder to the prep. Add-ons are priced by OpenDental."
+          ? "The fee is halved between the two visits, remainder to the prep. Either line can be changed afterwards."
           : override !== null
             ? "The fee was overridden for this procedure only. No fee schedule changed."
             : "ProcFee is omitted on purpose. OpenDental prices it.",
@@ -1751,12 +1611,9 @@ Deno.serve(async (req: Request) => {
     // -----------------------------------------------------------------
     // Write them, in order, stopping at the first refusal.
     //
-    // A partial commit is possible: the base can land and a later line
-    // be refused. Rolling back would mean deleting a procedure, and
-    // OpenDental has already been observed refusing to delete rows at
-    // some statuses. So nothing is undone automatically — the response
-    // reports exactly which lines exist, and the screen can offer undo
-    // on the ones that are undoable.
+    // A partial commit is possible. Rolling back would mean deleting a
+    // procedure, and OpenDental has been observed refusing to delete
+    // rows at some statuses. So nothing is undone automatically.
     // -----------------------------------------------------------------
     type WrittenLine = {
       role: string;
@@ -1789,10 +1646,9 @@ Deno.serve(async (req: Request) => {
       const cb = (created.body ?? {}) as Record<string, unknown>;
       const procNum = typeof cb.ProcNum === "number" ? cb.ProcNum : null;
 
-      // OpenDental prices procedures on its own and may overwrite what
-      // was sent. Where a fee was stated, the value that came back is
-      // compared with it, so an override shows up here rather than
-      // being discovered later in a report.
+      // Where a fee was stated, the value that came back is compared
+      // with it, so an override shows up here rather than being
+      // discovered later in a report.
       let feeHonoured: boolean | null = null;
       const stated = line.payload.ProcFee;
       if (typeof stated === "number") {
@@ -1813,8 +1669,6 @@ Deno.serve(async (req: Request) => {
         fee: cb.ProcFee ?? null,
         prov_num: cb.ProvNum ?? null,
         prov_abbr: String(cb.provAbbr ?? ""),
-        // OpenDental would not delete a procedure sitting at EO during
-        // testing, so the screen should not offer undo on those rows.
         undoable: procStatus !== "EO",
         fee_honoured: feeHonoured,
       });
@@ -1839,19 +1693,14 @@ Deno.serve(async (req: Request) => {
       bucket: category.bucket,
       resolved_because: resolved.why,
 
-      // Where the money came from, so a surprising number on a
-      // statement can be traced back to a schedule rather than guessed at.
       fee_schedule: feeSchedule,
       fee_source: feeSource,
       fee_total: baseFee,
       fee_split: split,
 
-      // Every line that reached OpenDental.
       line_count: written.length,
       lines: written,
 
-      // A later line was refused after an earlier one landed. Nothing is
-      // rolled back; the caller is told plainly what is missing.
       partial: failure !== null,
       partial_failure: failure === null ? null : {
         role: failure.line.role,
@@ -1860,7 +1709,7 @@ Deno.serve(async (req: Request) => {
         detail: failure.detail,
       },
 
-      // The base line, flat, so a caller written against v3 keeps working.
+      // The base line, flat, so an older caller keeps working.
       od_id: baseLine?.od_id ?? null,
       proc_code: baseLine?.proc_code ?? resolved.procCode,
       descript: baseLine?.descript ?? "",
@@ -1880,15 +1729,9 @@ Deno.serve(async (req: Request) => {
   // ===================================================================
   // set_fee — correct the fee on a procedure already written
   //
-  // Deliberately narrow. It sends ProcFee and nothing else, so this
-  // cannot be used to change a code, a tooth, a status or a patient by
-  // accident. The row is read back afterwards because OpenDental has
-  // been observed ignoring values it was sent, and a fee that quietly
-  // failed to save would be worse than one that refused outright.
-  //
-  // No halving here. The split belongs to the moment a paired tile is
-  // committed; once both lines exist they are two ordinary procedures
-  // and the office can put whatever it likes on each.
+  // Deliberately narrow. It sends ProcFee and nothing else, and reads
+  // the row back because OpenDental has been observed ignoring values
+  // it was sent.
   // ===================================================================
   if (action === "set_fee") {
     const procNum = body.od_id;
@@ -1906,13 +1749,10 @@ Deno.serve(async (req: Request) => {
       }, 400);
     }
 
-    // Whole cents. A fee carrying a third decimal would be rounded by
-    // the database anyway, and rounding here means the value read back
-    // can be compared with what was sent.
+    // Whole cents, so the value read back can be compared with what was
+    // sent.
     const amount = Math.round(fee * 100) / 100;
 
-    // What it was, so the response can say what changed rather than
-    // only what it is now.
     const before = await odFetch(auth, "GET", `/procedurelogs/${procNum}`);
 
     if (before.http_status === 404) {

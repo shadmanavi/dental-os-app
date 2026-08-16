@@ -20,10 +20,7 @@
 //
 //       Shad set the rule: an insured patient is priced from the
 //       insurance plan's fee schedule, an uninsured one from the fee
-//       schedule on the patient record. This action proves that chain
-//       resolves on real patients before anything is built on it, by
-//       walking patplan to inssub to insplan and showing every step
-//       rather than only the answer.
+//       schedule on the patient record.
 //
 //       Four things it deliberately surfaces rather than deciding:
 //
@@ -31,62 +28,61 @@
 //         plans, one pending and one terminated. Which one counts is a
 //         rule, and the raw fields are shown so the rule can be checked
 //         against them.
-//       - CopayFeeSched, ManualFeeSchedNum and IsBlueBookEnabled. A
-//         plan can price through paths other than its FeeSched. If any
-//         of these are set on a Greenwood plan, "read insplan.FeeSched"
-//         is too simple and the response will show it.
+//       - CopayFeeSched and PlanType. A plan can price through paths
+//         other than its FeeSched. If any are set on a Greenwood plan,
+//         "read insplan.FeeSched" is too simple and the response shows
+//         it.
 //       - fee rows carry ClinicNum and ProvNum. The same code in the
 //         same schedule can hold more than one amount. Every matching
 //         row is returned, not the first one found.
 //       - Whether a fee row exists at all. A schedule with no row for a
 //         code is not a zero fee; it is a gap, and the two must not be
 //         confused.
-//   v3  v2's fee query failed. It selected fee.FeeSchedNum, and the
-//       column is called FeeSched, so the whole thing came back 400 and
-//       no amounts were read at all. That was the second column name
-//       guessed wrong in this project, so this version stops guessing:
-//       it reads information_schema first and reports the real columns
-//       of every table it is about to touch. The report is part of the
-//       answer, not a debugging aid.
+//   v3  Tried to read information_schema first, to stop guessing column
+//       names, and to walk a discount plan table as a middle link in
+//       the pricing chain.
+//   v4  Both of v3's ideas were wrong, and the run proved it.
 //
-//       It also corrects the chain. v2 assumed insurance, then the
-//       patient record. Shad found the real second link: a patient with
-//       no insurance is priced from a discount plan — Greenwood's is
-//       "Dental Masters Membership" — which carries its own fee
-//       schedule. The patient record is the third link, not the second.
-//       That also explains the ADC-365 membership code and the "Dental
-//       Max" and "Dental Pro" categories the procedure survey turned up
-//       and could not place.
-//
-//       Provider fee schedules are deliberately not consulted. Shad was
-//       explicit: never use them.
-//
-//       The discount plan tables are queried defensively. Their column
-//       names are not in OpenDental's published API documentation, so
-//       the query is built from what information_schema actually
-//       reports and skipped, with a plain explanation, if the columns
-//       are not there.
-//   v4  v3 could not read the schema at all. OpenDental refuses any
-//       query containing the word SCHEMA, so the information_schema
-//       call came back 401 with "Query cannot contain \"SCHEMA\"." and
-//       everything that depended on it reported a false negative: the
-//       fee column looked missing and the discount plan tables looked
-//       absent, when neither had actually been checked.
-//
-//       So this version stops trying to look the answer up and simply
-//       tries both. It runs the fee query with f.FeeSched, and if that
-//       is rejected, runs it again with f.FeeSchedNum. Whichever
-//       succeeded is reported. Two calls in the worst case, no guessing
+//       OpenDental refuses any query containing the word SCHEMA, so the
+//       information_schema call came back 401 with "Query cannot
+//       contain \"SCHEMA\"." Everything depending on it then reported a
+//       false negative: the fee column looked missing and the discount
+//       plan tables looked absent, when neither had been checked at
+//       all. So this version stops trying to look the answer up and
+//       simply tries both. The fee query runs with f.FeeSched, and if
+//       that is rejected, runs again with f.FeeSchedNum. Whichever
+//       answered is reported. Two calls in the worst case, no guessing
 //       in any case.
 //
-//       The discount plan step is gone. v3 was built on the theory that
-//       a membership lives in its own table and forms a middle link in
-//       the chain. It does not: PatNum 17, who holds the Dental Masters
-//       Membership, resolved to fee schedule 410 straight off the
-//       patient record. OpenDental's Discount Plans screen sets
-//       patient.FeeSched and nothing else, so the chain is the two
-//       links Shad described in the first place — insurance, then the
-//       patient record — and provider fee schedules are never used.
+//       The discount plan step is gone. v3 assumed a membership lives
+//       in its own table and forms a middle link. It does not: PatNum
+//       17, who holds the Dental Masters Membership, resolved to fee
+//       schedule 410 straight off the patient record. OpenDental's
+//       Discount Plans screen sets patient.FeeSched and nothing else,
+//       so the chain is the two links Shad described in the first
+//       place — insurance, then the patient record. Provider fee
+//       schedules are never consulted; he was explicit about that.
+//   v5  Adds "acceptance", which checks Greenwood's own convention for
+//       what a patient has agreed to.
+//
+//       OpenDental has no acceptance flag. Its reports infer engagement
+//       from whether a planned procedure later became scheduled or
+//       completed, which is a proxy rather than an answer. Greenwood
+//       filled that gap by overloading the treatment priority: Shad
+//       confirmed with the office that 1 through 8 mean accepted and 9
+//       means not accepted, and that there is no zero.
+//
+//       A convention held in people's heads is worth checking against
+//       what they actually type, so this counts every priority on every
+//       treatment-planned procedure and reports the names OpenDental
+//       gives them alongside the raw numbers. Three things would
+//       falsify the rule and are therefore reported plainly: a priority
+//       of zero appearing at all, most procedures carrying no priority,
+//       or names that do not read as acceptance.
+//
+//       The dollar value of each priority comes back too, because if
+//       this is to pay commission then the number that matters is the
+//       money behind the count, not the count.
 //
 // Why SQL rather than the REST endpoints:
 //   GET /procedurelogs filters by PatNum. Pulling six months across the
@@ -563,7 +559,10 @@ Deno.serve(async (req: Request) => {
 
     const patList = patNums.join(",");
 
-    // ---- The patient's own fee schedule, the fallback in the rule ----
+    // ---- The patient's own fee schedule ----
+    // This is also where a membership lands. The Discount Plans screen
+    // in OpenDental sets this column; there is no separate table to
+    // walk, which v3 learned the hard way.
     const patientSql =
       `SELECT p.PatNum, p.FeeSched, fs.Description AS FeeSchedName, ` +
       `fs.FeeSchedType ` +
@@ -788,8 +787,6 @@ Deno.serve(async (req: Request) => {
         patients_examined: patients.length,
         patients_auto_selected: patientsAutoSelected,
         codes_examined: codes,
-        // Read rather than assumed. v2 guessed this column and the whole
-        // fee query failed silently as a result.
         // Discovered by trying, not by assuming.
         fee_schedule_column: feeSchedColumn === ""
           ? "neither FeeSched nor FeeSchedNum worked"

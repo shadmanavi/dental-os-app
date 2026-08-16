@@ -6,7 +6,7 @@
 // from real volume instead of from a guess about dentistry in general.
 //
 // Deploy path: supabase/functions/od-survey/index.ts
-// Version: 5
+// Version: 6
 // Changelog:
 //   v1  procedure_mix action. One joined SELECT over procedurelog and
 //       procedurecode, grouped by code, ordered by count.
@@ -20,7 +20,10 @@
 //
 //       Shad set the rule: an insured patient is priced from the
 //       insurance plan's fee schedule, an uninsured one from the fee
-//       schedule on the patient record.
+//       schedule on the patient record. This action proves that chain
+//       resolves on real patients before anything is built on it, by
+//       walking patplan to inssub to insplan and showing every step
+//       rather than only the answer.
 //
 //       Four things it deliberately surfaces rather than deciding:
 //
@@ -83,6 +86,25 @@
 //       The dollar value of each priority comes back too, because if
 //       this is to pay commission then the number that matters is the
 //       money behind the count, not the count.
+//   v6  Header merge only. No executable code changed.
+//
+//       Two copies of v5 existed: one deployed to Supabase, one on
+//       disk. Neither had been written on the machine that held
+//       them, and their code was byte-for-byte identical - the fork
+//       was entirely in this comment block, so nothing could have
+//       misbehaved and nothing announced itself.
+//
+//       The deployed copy is the base, because it alone recorded v5
+//       and its v3 and v4 entries are the corrected ones. From the
+//       disk copy, one sentence in v2 is restored: the note that
+//       fee_lookup walks patplan to inssub to insplan and shows each
+//       step, which the code does and the deployed header omitted.
+//
+//       The disk copy also claimed the plan bullet covered
+//       ManualFeeSchedNum and IsBlueBookEnabled. It does not. The
+//       query selects ip.PlanType and ip.CopayFeeSched, so the
+//       deployed wording is kept and the disk wording discarded as
+//       a description of something never built.
 //
 // Why SQL rather than the REST endpoints:
 //   GET /procedurelogs filters by PatNum. Pulling six months across the

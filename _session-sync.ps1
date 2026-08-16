@@ -1,5 +1,5 @@
 # =====================================================================
-#  Dental OS - Session Sync  v1
+#  Dental OS - Session Sync  v1.1
 #
 #  One command, run at the handoff moment. It proves that disk, live
 #  and GitHub all agree, then packs the result for the next chat.
@@ -24,7 +24,19 @@
 #    stops dead. Nothing is deployed, committed or packed.
 #
 #  Changelog:
-#    v1  First cut.
+#    v1    First cut.
+#    v1.1  The final banner printed 'supabase\migrations' where the
+#          separator line belonged, and dropped the separator.
+#
+#          PowerShell variable names are case-insensitive, so the
+#          pack loop's $sub and the global $Sub separator were one
+#          variable. The loop left it holding the last subtree name.
+#          Cosmetic in its effect, but the same class of fault this
+#          whole script exists to catch: two things that looked
+#          separate quietly turning out to be the same thing.
+#
+#          The loop variable is now $subTree, and the separator is
+#          now $Rule, so neither can collide with anything.
 # =====================================================================
 
 Set-StrictMode -Off
@@ -49,7 +61,7 @@ $RootConfigs = @('package.json','tsconfig.json','middleware.ts','next.config.js'
                  'tailwind.config.ts','postcss.config.js','postcss.config.mjs')
 
 $Bar = '============================================================'
-$Sub = '------------------------------------------------------------'
+$Rule = '------------------------------------------------------------'
 
 # ------------------------------------------------------------ reporting
 function Write-Step {
@@ -78,7 +90,7 @@ function Stop-Run {
     Write-Host ('  Time   : ' + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
     Write-Host ('  Reason : ' + $Reason)
     if ($Detail.Count -gt 0) {
-        Write-Host $Sub
+        Write-Host $Rule
         foreach ($line in $Detail) {
             foreach ($piece in ($line -split "`r?`n")) {
                 $s = $piece
@@ -90,7 +102,7 @@ function Stop-Run {
             }
         }
     }
-    Write-Host $Sub
+    Write-Host $Rule
     Write-Host '  Nothing after this step was run.'
     Write-Host '  Screenshot this window and paste it into the chat.'
     Write-Host $Bar -ForegroundColor Red
@@ -162,7 +174,7 @@ function Get-FileCount {
 # =====================================================================
 Clear-Host
 Write-Host $Bar
-Write-Host '  DENTAL OS - SESSION SYNC  v1'
+Write-Host '  DENTAL OS - SESSION SYNC  v1.1'
 Write-Host ('  ' + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
 Write-Host $Bar
 
@@ -456,8 +468,8 @@ foreach ($treeName in $subTrees) {
 }
 
 $collected = New-Object System.Collections.Generic.List[string]
-foreach ($sub in $subTrees) {
-    $p = Join-Path $Root $sub
+foreach ($subTree in $subTrees) {
+    $p = Join-Path $Root $subTree
     if (Test-Path -LiteralPath $p) {
         foreach ($m in $PackMasks) {
             foreach ($f in (Get-ChildItem -LiteralPath $p -Recurse -File -Filter $m)) {
@@ -530,7 +542,7 @@ Write-Host ('  Commit    : ' + $commitSha)
 Write-Host ('  Deployed  : ' + $deployedText)
 Write-Host ('  Packed    : ' + $packedCount + ' files')
 Write-Host ('  Migrations: ' + $migCount)
-Write-Host $Sub
+Write-Host $Rule
 Write-Host '  Upload this file to the next chat:'
 Write-Host '  _sync\latest\dental-os-pack.txt'
 Write-Host $Bar -ForegroundColor Green

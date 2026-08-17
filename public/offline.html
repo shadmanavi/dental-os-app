@@ -1,0 +1,88 @@
+<!doctype html>
+<!--
+  Dental OS offline page — v1
+
+  Served by /sw.js when a page navigation fails with no network. Static and
+  self-contained on purpose: it has to render with nothing else available,
+  so no fonts, no scripts from elsewhere, no stylesheet.
+
+  Changelog:
+    v1  New.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#2C4E54" />
+    <title>Dental OS — No connection</title>
+    <style>
+      :root {
+        color-scheme: light;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: env(safe-area-inset-top) 1.5rem env(safe-area-inset-bottom);
+        background: #f7f6f3;
+        color: #1c1c1a;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .card {
+        max-width: 26rem;
+        text-align: center;
+      }
+      img {
+        width: 88px;
+        height: 88px;
+        border-radius: 20px;
+      }
+      h1 {
+        margin: 1.5rem 0 0.5rem;
+        font-size: 1.5rem;
+        font-weight: 600;
+        color: #2c4e54;
+      }
+      p {
+        margin: 0 0 1.75rem;
+        line-height: 1.55;
+        color: #5c5c57;
+      }
+      button {
+        appearance: none;
+        border: 0;
+        border-radius: 10px;
+        padding: 0.85rem 1.75rem;
+        font: inherit;
+        font-weight: 600;
+        color: #edf3f1;
+        background: #0f6e56;
+        cursor: pointer;
+      }
+      button:active {
+        background: #0b5442;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img src="/icons/icon-192.png" alt="Dental OS" />
+      <h1>No connection</h1>
+      <p>
+        This tablet is not on the network right now. Dental OS reads live from
+        OpenDental, so nothing can load until the connection is back. Check the
+        office Wi-Fi, then try again.
+      </p>
+      <button type="button" onclick="location.reload()">Try again</button>
+    </div>
+  </body>
+</html>

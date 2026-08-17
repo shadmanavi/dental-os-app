@@ -1,6 +1,6 @@
 "use client";
 
-// Top navigation — v2
+// Top navigation — v3
 // The one navigation bar for Dental OS. Rendered once in the root layout, so
 // every page gets it without owning a header of its own.
 //
@@ -13,15 +13,73 @@
 //     the next one to be built.
 //   - A second row appears inside a section that has sub-pages.
 //   - Email and sign out live here and nowhere else.
+//   - A build badge sits at the far right, showing what is actually
+//     running.
 //
 // Changelog:
 //   v1  Sections, sub-nav, session email, sign out.
 //   v2  Charting is built, so its section is live rather than greyed.
+//   v3  Adds the build badge.
+//
+//       A failed Vercel build is silent. Vercel builds the new version
+//       alongside the old one and only swaps traffic when the build
+//       succeeds, so a failure is never an outage — it just means the
+//       swap never happened. Nothing errors and nothing looks wrong,
+//       which is the problem: a push that never shipped is
+//       indistinguishable from one that did.
+//
+//       The badge shows the commit rather than a version number for
+//       two reasons. A version number describes one file and the app
+//       is dozens, so there is no single honest number to show. And a
+//       version number is typed by a person, so it is only ever as
+//       accurate as their memory. Vercel supplies the commit it built
+//       from, so this one cannot be wrong.
+//
+//       Scope, stated plainly: this covers the frontend only. Edge
+//       Functions do not deploy through Git and are not represented
+//       here at all — _session-sync.bat is what proves those.
+//
+//       Both values come through empty when a build was not triggered
+//       by a Git commit, which is the normal case for local
+//       development, so the badge reads "dev" instead of rendering
+//       blank.
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
+
+// Injected at build time. The commit comes from Vercel's own system
+// variables; the timestamp is stamped in next.config.ts, because Vercel
+// does not supply one. Both are inlined by Next at build, so reading
+// them in a client component is safe.
+const COMMIT = (process.env.NEXT_PUBLIC_VERCEL_GIT_COMMIT_SHA ?? "").slice(0, 7);
+const BUILT_AT = process.env.NEXT_PUBLIC_BUILD_TIME ?? "";
+
+function buildLabel(): string {
+  if (COMMIT === "") return "dev";
+  return COMMIT;
+}
+
+function buildTitle(): string {
+  if (COMMIT === "") {
+    return "Running locally. No Vercel build is involved.";
+  }
+
+  if (BUILT_AT === "") {
+    return `Frontend built from commit ${COMMIT}.`;
+  }
+
+  const when = new Date(BUILT_AT);
+  if (Number.isNaN(when.getTime())) {
+    return `Frontend built from commit ${COMMIT}.`;
+  }
+
+  return (
+    `Frontend built from commit ${COMMIT} on ` +
+    `${when.toLocaleString()}. Edge Functions are not covered by this.`
+  );
+}
 
 type Section = {
   href: string;
@@ -158,6 +216,13 @@ export default function TopNav() {
           >
             {signingOut ? "Signing out…" : "Sign out"}
           </button>
+
+          <span
+            title={buildTitle()}
+            className="hidden rounded border border-[#E3E1DB] bg-white px-2 py-0.5 font-mono text-[11px] whitespace-nowrap text-[#A5A49D] md:inline"
+          >
+            {buildLabel()}
+          </span>
         </div>
       </div>
 

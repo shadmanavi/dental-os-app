@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v18.4
+// Chairside charting — v18.5
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -222,6 +222,42 @@
 //       the plan the patient signs rather than written to the treatment
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
+//
+//   v18.5 The authorization control is gone, and an autho row is left
+//       alone when a plan is signed.
+//
+//       The office un-hid Auth Needed, Auth Approved and Auth Denied in
+//       OpenDental's own priority list, so authorization is recorded
+//       where the office already records it and this screen no longer
+//       needs a control of its own. The per-row dropdown and the
+//       Pre-Auth bulk button are removed. The priority dropdown picks
+//       the three values up unaided, because od-plan builds that list
+//       from whatever is not hidden — no code here names them.
+//
+//       signAndFile would otherwise have refused the whole plan. Its
+//       unpaired guard aborts a signature when a ticked row carries a
+//       priority with no Acc counterpart, and "Auth Needed" has none, so
+//       a single autho procedure blocked the signature for every
+//       ordinary row beside it. That guard was written when no autho
+//       value existed in the list; un-hiding them made it reachable at
+//       both offices on the same day. Autho labels are now exempt from
+//       it and from the flip, and pass through untouched.
+//
+//       Untouched is the point. What a carrier decided is not this
+//       screen's to overwrite, and there is no accepted counterpart to
+//       move it to. Accepting a plan that contains one files it and
+//       prints it; the priority stays exactly as the biller left it.
+//
+//       Matched by name, never by DefNum. Downey's 159 is Auth Denied
+//       and Maywood's 159 is Auth Approved — the same number, opposite
+//       answers. /^auth\b/i covers all three at both offices and takes
+//       a future "Auth Pending" along with it.
+//
+//       od-plan is unchanged and stays at v8. Its set_note action and
+//       the preauth field it returns are simply no longer called.
+//
+//       Still open, and deliberately not answered here: what accepting
+//       an autho procedure should do, especially a denied one.
 //
 //   v18.4 The letterhead no longer carries the fax.
 //
@@ -779,10 +815,6 @@ type PlanRow = {
   covered: boolean;
   no_bill_ins: boolean;
   estimated: boolean;
-  // Marked as needing a preauthorization. Not an OpenDental field —
-  // there isn't one — but a fixed token in the procedure note, written
-  // and removed by od-plan.
-  preauth: boolean;
 };
 
 // A definition list belonging to one office. Never hardcoded: the two
@@ -799,9 +831,6 @@ type DefOption = {
 type PendingAction =
   | { kind: "priority"; def_num: number; label: string }
   | { kind: "dx"; def_num: number; label: string }
-  // Add or remove, decided from what is selected: a set that is
-  // already entirely marked is asking to be unmarked.
-  | { kind: "preauth"; mode: "add" | "remove" }
   | { kind: "delete" };
 
 // What a write into OpenDental came back with. Passed through from the
@@ -954,6 +983,20 @@ const isAcceptedLabel = (label: string): boolean => {
   const trimmed = label.trim();
   return ACC_RE.test(trimmed) || ACC_SUFFIX_RE.test(trimmed);
 };
+
+// "Auth Needed", "Auth Approved", "Auth Denied" — the office's record of
+// where a preauthorization stands. A stage of the insurance conversation
+// rather than a stage of acceptance, and the two share the one priority
+// field, so a row sitting on one of these is not a Diag row waiting to
+// become an Acc row. It is left exactly as it is.
+//
+// Read off the label, like the Acc pairing above, and for the same
+// reason: Downey's DefNum 159 is Auth Denied and Maywood's 159 is Auth
+// Approved. Keying on the number would write the opposite answer at one
+// of the two offices.
+const AUTH_RE = /^auth\b/i;
+
+const isAuthLabel = (label: string): boolean => AUTH_RE.test(label.trim());
 
 const UPPER = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
 const LOWER = [32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17];
@@ -1751,41 +1794,6 @@ export default function ChartPage() {
     }
   }
 
-  // The authorization order, one row at a time. The bulk button above
-  // does the same write for every ticked row; this is the same call for
-  // one, so a coordinator changing their mind about a single procedure
-  // does not have to tick it first.
-  //
-  // It is an order, not a status. Setting it says the office wants a
-  // preauthorization for this procedure; it says nothing about what a
-  // carrier has answered, and clearing it does not withdraw anything
-  // already sent.
-  async function setRowPreauth(row: PlanRow, want: boolean) {
-    if (patient === null || want === row.preauth) return;
-
-    setSavingRow(row.od_id);
-    setPlanError("");
-
-    try {
-      await odWrite({
-        action: "set_note",
-        pat_num: patient.PatNum,
-        od_id: row.od_id,
-        note: "preauth",
-        mode: want ? "add" : "remove",
-      });
-      await loadPlan(patient.PatNum, true);
-    } catch (caught) {
-      setPlanError(
-        caught instanceof Error
-          ? caught.message
-          : "Couldn't change that authorization order.",
-      );
-    } finally {
-      setSavingRow(null);
-    }
-  }
-
   function toggleSelected(odId: number) {
     setSelected((previous) => {
       const next = new Set(previous);
@@ -1837,14 +1845,6 @@ export default function ChartPage() {
             pat_num: patient.PatNum,
             od_id: row.od_id,
             dx: pendingAction.def_num,
-          });
-        } else if (pendingAction.kind === "preauth") {
-          await odWrite({
-            action: "set_note",
-            pat_num: patient.PatNum,
-            od_id: row.od_id,
-            note: "preauth",
-            mode: pendingAction.mode,
           });
         } else {
           await odWrite({
@@ -1906,8 +1906,14 @@ export default function ChartPage() {
     // already accepted is being re-presented, not re-accepted; a ticked
     // row with no priority stays unprioritised, because a sequence
     // number nobody chose is not this screen's to invent.
+    //
+    // An autho row has no counterpart and is not looking for one. It is
+    // filed and printed with everything else and its priority is left
+    // where the biller put it.
     const toFlip = rows.filter(
-      (r) => accForLabel(r.priority_label) !== null,
+      (r) =>
+        !isAuthLabel(r.priority_label) &&
+        accForLabel(r.priority_label) !== null,
     );
 
     // toFlip is built from rows that already have a counterpart, so
@@ -1915,9 +1921,14 @@ export default function ChartPage() {
     // above is the only thing making that true, and a later change to
     // it should fail loudly here rather than silently accept work into
     // a priority that does not exist.
+    //
+    // Autho labels are exempt. Without the exemption this guard aborts
+    // the entire signature — not just the autho row, the whole plan —
+    // the moment one ticked procedure sits at Auth Needed.
     const unpaired = rows.filter(
       (r) =>
         r.priority_label.trim() !== "" &&
+        !isAuthLabel(r.priority_label) &&
         accForLabel(r.priority_label) === null &&
         !isAcceptedLabel(r.priority_label),
     );
@@ -2604,18 +2615,6 @@ export default function ChartPage() {
           selected.has(r.od_id) && accForLabel(r.priority_label) !== null,
       ).length,
     [planRows, selected, accForLabel],
-  );
-
-  // What the Pre-Auth button will do. A selection that is entirely
-  // marked is asking to be unmarked; anything else is asking to be
-  // marked, so a mixed selection ends up consistent rather than flipped
-  // row by row.
-  const preauthMode: "add" | "remove" = useMemo(
-    () =>
-      selectedRows.length > 0 && selectedRows.every((r) => r.preauth)
-        ? "remove"
-        : "add",
-    [selectedRows],
   );
 
   // The rows the filed plan covers, read back from OpenDental rather
@@ -3715,21 +3714,6 @@ export default function ChartPage() {
                 Visible always, disabled until there is something to act
                 on. */}
 
-            {/* A toggle, not a flag. OpenDental has no preauthorization
-                field anywhere, so this writes a fixed token into the
-                procedure note — and a mark that could not be taken off
-                would sit on the biller's worklist forever. */}
-            <button
-              type="button"
-              disabled={selected.size === 0}
-              onClick={() =>
-                setPendingAction({ kind: "preauth", mode: preauthMode })}
-              className="rounded-lg border border-[#2C4E54] px-3 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-30"
-              title="Mark or unmark these procedures as needing a preauthorization"
-            >
-              {preauthMode === "remove" ? "Un-Pre-Auth" : "Pre-Auth"}
-            </button>
-
             <select
               value=""
               disabled={selected.size === 0}
@@ -3888,30 +3872,14 @@ export default function ChartPage() {
                     </p>
                   </div>
 
-                  {/* The authorization order, under the bulk button
-                      that does the same thing to every ticked row. A
-                      control is easiest to understand when the bulk
-                      version sits directly above the individual one.
-
-                      Amber while set, because it is an outstanding
-                      instruction rather than a neutral field. It is
-                      deliberately not a status: what a carrier said
-                      lives on a claim, and no claim exists yet at the
-                      moment this is ticked. */}
-                  <select
-                    value={row.preauth ? "1" : "0"}
-                    disabled={busy}
-                    onChange={(e) => setRowPreauth(row, e.target.value === "1")}
-                    className={`w-24 shrink-0 rounded-lg border bg-[#193034] px-2 py-1.5 text-xs focus:border-[#F0A93B] focus:outline-none disabled:opacity-40 xl:w-32 ${
-                      row.preauth
-                        ? "border-[#F0A93B] text-[#F0A93B]"
-                        : "border-[#2C4E54] text-[#EDF3F1]"
-                    }`}
-                    title="Whether this office is asking for a preauthorization on this procedure"
-                  >
-                    <option value="0">Autho —</option>
-                    <option value="1">Autho needed</option>
-                  </select>
+                  {/* Authorization used to have a dropdown of its own
+                      here. It is recorded in OpenDental's priority list
+                      now — Auth Needed, Auth Approved, Auth Denied —
+                      which the priority control two along already
+                      offers, because that list is whatever the office
+                      has left unhidden. Two controls reporting one
+                      field is how a screen starts to disagree with
+                      itself. */}
 
                   {/* Diagnosis — the clinical finding. Entered here
                       because the coordinator types it while the doctor
@@ -4044,11 +4012,7 @@ export default function ChartPage() {
                     ? "Delete from OpenDental"
                     : pendingAction.kind === "dx"
                       ? `Set diagnosis to ${pendingAction.label}`
-                      : pendingAction.kind === "preauth"
-                        ? pendingAction.mode === "add"
-                          ? "Mark as needing authorization"
-                          : "Remove the authorization mark"
-                        : `Set priority to ${pendingAction.label}`}
+                      : `Set priority to ${pendingAction.label}`}
                 </h3>
                 <p className="mt-1 text-xs text-[#8AA6AB]">
                   {selectedRows.length} procedure
@@ -4088,14 +4052,6 @@ export default function ChartPage() {
                 </p>
               )}
 
-              {pendingAction.kind === "preauth" && (
-                <p className="border-t border-[#2C4E54] px-5 py-2.5 text-[11px] text-[#8AA6AB]">
-                  {pendingAction.mode === "add"
-                    ? "This writes a line at the top of each procedure note. It does not create a preauthorization — that is still done in OpenDental, from the Treatment Plan module."
-                    : "This takes that line back out. Anything typed by hand around it is kept."}
-                </p>
-              )}
-
               <div className="flex gap-2 border-t border-[#2C4E54] px-5 py-3">
                 <button
                   type="button"
@@ -4121,11 +4077,7 @@ export default function ChartPage() {
                       ? "Delete"
                       : pendingAction.kind === "dx"
                         ? "Set diagnosis"
-                        : pendingAction.kind === "preauth"
-                          ? pendingAction.mode === "add"
-                            ? "Mark"
-                            : "Unmark"
-                          : "Set priority"}
+                        : "Set priority"}
                 </button>
               </div>
             </div>

@@ -1,9 +1,64 @@
-// Treatment plan PDF — v4
+// Treatment plan PDF — v7
 //
 // Renders the plan the patient just agreed to, with their signature on
 // it, and hands back base64 for filing into OpenDental's Imaging module.
 //
 // Changelog:
+//   v7  One field per line, and no fax.
+//
+//       The block reads name, street, city/state/zip, phone, email —
+//       five lines, one thing on each. Phone and email shared a line
+//       with the fax in v6, separated by dots, which is how a website
+//       footer reads rather than how letterhead reads.
+//
+//       The fax is gone from the document entirely. Both practices
+//       share one fax number, patients do not fax treatment plans back,
+//       and a line nobody uses is a line that costs table height. The
+//       column stays in public.offices and od_sync_offices still fills
+//       it — dropping it from the page is not the same as throwing the
+//       data away, and putting it back is a one-line change.
+//
+//   v6  The letterhead moves to the top left.
+//
+//       It was centred under the title, stacked above the patient's
+//       name. Left is where letterhead belongs on a printed document
+//       and where an eye looks for it, and it also uses space that was
+//       already empty: the top right corner has carried the patient
+//       number, provider and presenter since v3, and the top left
+//       carried nothing at all.
+//
+//       The title stays centred and the patient's name now sits below
+//       both corner blocks rather than below a centred stack, so the
+//       header is three columns wide instead of one tall one. That
+//       bought back roughly a quarter inch of table height, which on a
+//       plan with many lines is a row.
+//
+//       Nothing about the content changed — same fields, same order,
+//       same rule that an empty field prints nothing.
+//
+//   v5  The letterhead is a full office block rather than a name and an
+//       empty phone string.
+//
+//       The two fields it replaces are gone entirely: a single office
+//       object now carries name, street, city/state/zip, phone, fax and
+//       email. The caller passes the office row, and every value in it
+//       originates in OpenDental's own preference table, so an office
+//       that moves or changes its number updates OpenDental and this
+//       document follows. Nothing on this letterhead is typed by a
+//       person.
+//
+//       The phone was being passed as an empty string at the only call
+//       site, which printed a blank line where the number belonged.
+//       That is the bug this closes.
+//
+//       Empty fields consume no vertical space. An office with no fax
+//       gets a shorter header, not a header with a gap in it.
+//
+//       The phone is formatted here rather than in the database.
+//       What OpenDental stores is ten digits; what a patient reads is
+//       (562) 803-1600. Storing the pretty version would mean the
+//       database no longer matched its source.
+//
 //   v4  The practice's acceptance wording sits above the signature, and
 //       the date line is ruled when nobody has signed.
 //
@@ -95,9 +150,23 @@ export type PlanTotals = {
   pat: number;
 };
 
+// The letterhead block. Every field comes from OpenDental's preference
+// table by way of public.offices, and every one of them is allowed to be
+// empty — an office that has not filled in its fax simply has no fax
+// line on the document.
+export type PlanOffice = {
+  name: string;
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  state: string;
+  postalCode: string;
+  phone: string;
+  email: string;
+};
+
 export type PlanInput = {
-  officeName: string;
-  officePhone: string;
+  office: PlanOffice;
   heading: string;
   patientName: string;
   patientDob: string;
@@ -144,6 +213,51 @@ const COLUMNS: Column[] = [
   { key: "pat", label: "Pat", x: 536, width: 40, align: "right" },
 ];
 
+// Ten digits become (562) 803-1600. Anything that is not ten digits is
+// printed exactly as it was stored — an extension, an international
+// number or a typo is the office's to fix in OpenDental, and quietly
+// reformatting it here would hide it.
+function formatPhone(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+
+  if (digits.length === 10) {
+    return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+  }
+
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return `(${digits.slice(1, 4)}) ${digits.slice(4, 7)}-${digits.slice(7)}`;
+  }
+
+  return raw.trim();
+}
+
+// The address as printed, under the office name: street, then
+// city/state/zip, then phone, then email — one field per line. Blank
+// fields are dropped rather than printed, so the block tightens up
+// instead of leaving holes in it.
+function officeLines(office: PlanOffice): string[] {
+  const lines: string[] = [];
+
+  const street = [office.addressLine1, office.addressLine2]
+    .map((s) => s.trim())
+    .filter((s) => s !== "")
+    .join(", ");
+  if (street !== "") lines.push(street);
+
+  const region = [office.state.trim(), office.postalCode.trim()]
+    .filter((s) => s !== "")
+    .join(" ");
+  const cityLine = [office.city.trim(), region]
+    .filter((s) => s !== "")
+    .join(", ");
+  if (cityLine !== "") lines.push(cityLine);
+
+  if (office.phone.trim() !== "") lines.push(formatPhone(office.phone));
+  if (office.email.trim() !== "") lines.push(office.email.trim());
+
+  return lines;
+}
+
 const money = (value: number) =>
   value.toLocaleString("en-US", {
     minimumFractionDigits: 2,
@@ -163,38 +277,35 @@ function drawCell(
   }
 }
 
-function header(doc: jsPDF, input: PlanInput): number {
-  let y = 48;
+// The header is three columns: the office at the left, the title
+// centred, and the patient's number, provider and presenter at the
+// right. The patient's name goes underneath all three, on whichever
+// column ran longest.
+const HEADER_TOP = 48;
 
+function header(doc: jsPDF, input: PlanInput): number {
+  // ---- Left: the letterhead ----
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text(input.office.name, MARGIN_X, HEADER_TOP);
+
+  let leftY = HEADER_TOP;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  for (const line of officeLines(input.office)) {
+    leftY += 10;
+    doc.text(line, MARGIN_X, leftY);
+  }
+
+  // ---- Centre: the title ----
   doc.setFont("helvetica", "bold");
   doc.setFontSize(13);
-  doc.text(input.heading, PAGE_W / 2, y, { align: "center" });
+  doc.text(input.heading, PAGE_W / 2, HEADER_TOP, { align: "center" });
 
-  y += 15;
-  doc.setFontSize(10);
-  doc.text(input.officeName, PAGE_W / 2, y, { align: "center" });
-
-  y += 12;
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
-  doc.text(input.officePhone, PAGE_W / 2, y, { align: "center" });
-
-  y += 12;
-  doc.setFont("helvetica", "bold");
-  doc.setFontSize(10);
-  doc.text(
-    `${input.patientName}, DOB ${input.patientDob}`,
-    PAGE_W / 2,
-    y,
-    { align: "center" },
-  );
-
-  // The date used to print here too, under the patient's name. It is
-  // in the header block now, under the presenter, and one date on a
-  // one-page document is enough.
-  doc.setFont("helvetica", "normal");
-
+  // ---- Right: who and when ----
   // Patient number and provider sit to the right, as OpenDental prints them.
+  doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
   doc.text(`PT # ${input.patientNumber}`, PAGE_W - MARGIN_X, 48, {
     align: "right",
@@ -212,6 +323,28 @@ function header(doc: jsPDF, input: PlanInput): number {
     // know which day it was.
     doc.text(input.planDate, PAGE_W - MARGIN_X, 81, { align: "right" });
   }
+
+  // ---- Under all three: the patient ----
+  // Whichever column ran longest decides where this sits, so a long
+  // letterhead pushes the name down rather than printing over it. The
+  // right column ends at 81 when a presenter is named and at 70 when
+  // one is not.
+  const rightY = input.presenterName === "" ? 70 : 81;
+  const y = Math.max(leftY, rightY, HEADER_TOP) + 20;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10);
+  doc.text(
+    `${input.patientName}, DOB ${input.patientDob}`,
+    PAGE_W / 2,
+    y,
+    { align: "center" },
+  );
+
+  // The date used to print here too, under the patient's name. It is
+  // in the right-hand block now, under the presenter, and one date on a
+  // one-page document is enough.
+  doc.setFont("helvetica", "normal");
 
   return y + 18;
 }

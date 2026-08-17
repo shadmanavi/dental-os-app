@@ -1,6 +1,6 @@
 "use client";
 
-// Chairside charting — v18.2
+// Chairside charting — v18.4
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
@@ -222,6 +222,32 @@
 //       the plan the patient signs rather than written to the treatment
 //       plan record. The list is OpenDental's own users, because that is
 //       who the office recognises.
+//
+//   v18.4 The letterhead no longer carries the fax.
+//
+//       treatmentPlanPdf v7 prints one field per line and dropped the
+//       fax, so there is nothing to pass. The column is still selected
+//       and still synced — the office row is read whole and the fax is
+//       real data — it simply is not part of the printed block.
+//
+//   v18.3 The treatment plan's letterhead comes from OpenDental.
+//
+//       The plan used to print the office's Dental OS name and a blank
+//       line where the phone number belonged, because officePhone was
+//       being passed as an empty string. It now passes the whole office
+//       row — name, street, city, state, zip, phone, fax and email —
+//       every field of which od_sync_offices() wrote from OpenDental's
+//       preference table.
+//
+//       That makes OpenDental the source of the letterhead as well as
+//       the clinical and financial data, which is the standing rule
+//       here. An office that moves, changes its number or fixes its fax
+//       does it once, in the place it already maintains, and this
+//       document follows without anybody touching the app.
+//
+//       Both practices' clinic tables came back empty when this was
+//       probed, so there is no per-location layer to read: on each
+//       server the practice is the location.
 //
 //   v18.2 The office's lists all load together, and Close says what it
 //       closes.
@@ -589,6 +615,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { buildTreatmentPlanPdf } from "@/lib/treatmentPlanPdf";
+import type { PlanOffice } from "@/lib/treatmentPlanPdf";
 import { CONSENT_TEXT } from "@/lib/treatmentPlanPdf";
 import {
   allocateBenefit,
@@ -601,7 +628,24 @@ import SignaturePad from "@/app/components/SignaturePad";
 // ---------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------
-type Office = { id: string; name: string; slug: string };
+// The office as Dental OS holds it. Everything past slug is letterhead,
+// written into public.offices by od_sync_offices() from OpenDental's own
+// preference table — never typed here. Nullable because a row that has
+// not been synced yet is a real state, and the plan should print a short
+// header rather than the word "null".
+type Office = {
+  id: string;
+  name: string;
+  slug: string;
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  state: string | null;
+  postal_code: string | null;
+  phone: string | null;
+  fax: string | null;
+  email: string | null;
+};
 
 type PatientHit = {
   PatNum: number;
@@ -1269,7 +1313,11 @@ export default function ChartPage() {
 
         const { data, error } = await supabase
           .from("offices")
-          .select("id, name, slug")
+          // One unbroken literal on purpose. supabase-js infers the row
+          // type from this string, and a concatenated one defeats the
+          // parser — the result comes back as GenericStringError[]
+          // instead of Office[].
+          .select("id, name, slug, address_line1, address_line2, city, state, postal_code, phone, fax, email")
           .eq("is_active", true)
           .order("name");
 
@@ -2653,11 +2701,27 @@ export default function ChartPage() {
     [accForLabel, priorities],
   );
 
-  // The office as it is named, for the plan's letterhead.
-  const officeLabel = useMemo(
-    () => offices.find((o) => o.slug === officeSlug)?.name ?? "",
-    [offices, officeSlug],
-  );
+  // The office block for the plan's letterhead. The whole row rather
+  // than just the name: the PDF prints address, phone, fax and email,
+  // and all of it came from OpenDental by way of od_sync_offices().
+  //
+  // Nulls become empty strings here rather than in the PDF, because the
+  // document's rule is that an empty field prints nothing — it should
+  // not also have to know what a null is.
+  const officeBlock = useMemo<PlanOffice>(() => {
+    const row = offices.find((o) => o.slug === officeSlug);
+
+    return {
+      name: row?.name ?? "",
+      addressLine1: row?.address_line1 ?? "",
+      addressLine2: row?.address_line2 ?? "",
+      city: row?.city ?? "",
+      state: row?.state ?? "",
+      postalCode: row?.postal_code ?? "",
+      phone: row?.phone ?? "",
+      email: row?.email ?? "",
+    };
+  }, [offices, officeSlug]);
 
   // The provider the coordinator is looking at in the header — the
   // override if one is set, otherwise whoever od-chart resolved. The
@@ -2723,8 +2787,7 @@ export default function ChartPage() {
         presenters.find((p) => p.user_num === presenterNum)?.name ?? "";
 
       const { base64 } = buildTreatmentPlanPdf({
-        officeName: officeLabel,
-        officePhone: "",
+        office: officeBlock,
         heading: "Treatment Plan",
         patientName: `${patient.LName}, ${patient.Preferred || patient.FName}`,
         patientDob: usDate(patient.Birthdate),
@@ -2777,7 +2840,7 @@ export default function ChartPage() {
       patient,
       presenters,
       presenterNum,
-      officeLabel,
+      officeBlock,
       shownProviderName,
       accLabelFor,
       chosenTotals,

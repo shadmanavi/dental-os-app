@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Dental OS - Session Sync  v1  (launcher)
+REM  Dental OS - Session Sync  v1.1  (launcher)
 REM
 REM  Double-click this. It runs _session-sync.ps1, which must be
 REM  sitting in the same folder.
@@ -9,7 +9,10 @@ REM  Replaces both _pack-frontend-v4.bat and
 REM  _end-session-commit.bat. Delete those once this works.
 REM
 REM  Changelog:
-REM    v1  First cut.
+REM    v1    First cut.
+REM    v1.1  No behaviour change. Version bumped so the launcher and
+REM          the script it launches can be told apart in a pack, now
+REM          that both are carried in one.
 REM ============================================================
 
 setlocal

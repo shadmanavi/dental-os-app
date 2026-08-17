@@ -1,5 +1,5 @@
 # =====================================================================
-#  Dental OS - Session Sync  v1.1
+#  Dental OS - Session Sync  v1.2
 #
 #  One command, run at the handoff moment. It proves that disk, live
 #  and GitHub all agree, then packs the result for the next chat.
@@ -13,7 +13,7 @@
 #    6  Restore the disk copies
 #    7  Compare, and classify every difference
 #    8  Deploy the functions you edited
-#    9  Fetch migration files from the history table
+#    9  Fetch migration files from the history table, guarded
 #   10  Commit and push
 #   11  Pack
 #   12  Prune old packs
@@ -25,6 +25,28 @@
 #
 #  Changelog:
 #    v1    First cut.
+#    v1.2  Two changes, both from the session where three migration
+#          files were silently blanked and committed.
+#
+#          Step 9 runs 'migration fetch', which rewrites every local
+#          migration file from the statements column of the history
+#          table. A row applied from a chat session rather than the
+#          CLI has that column empty, so the fetch wrote empty files
+#          over good ones and step 10 committed them. The script did
+#          exactly what it was told; nothing warned anyone.
+#
+#          Step 9 now snapshots the migrations folder first, runs the
+#          fetch, and compares. A file that vanished, or lost more
+#          than half its content, or came back effectively empty,
+#          stops the run and every file is restored from the
+#          snapshot. Growth and ordinary edits pass without comment.
+#
+#          The pack now also carries this script and its launcher.
+#          They sit in the project root, outside all four packed
+#          subtrees, so no pack has ever contained them - which meant
+#          every chat reasoned about this routine without being able
+#          to read it. Pack format is v6.
+#
 #    v1.1  The final banner printed 'supabase\migrations' where the
 #          separator line belonged, and dropped the separator.
 #
@@ -50,6 +72,7 @@ $SyncDir     = Join-Path $Root '_sync'
 $WorkDir     = Join-Path $SyncDir 'work'
 $DiskSnap    = Join-Path $WorkDir 'disk'
 $LiveSnap    = Join-Path $WorkDir 'live'
+$MigSnap     = Join-Path $WorkDir 'migrations-before'
 $PacksDir    = Join-Path $SyncDir 'packs'
 $LatestDir   = Join-Path $SyncDir 'latest'
 $FuncDir     = Join-Path $Root 'supabase\functions'
@@ -59,6 +82,10 @@ $PackMasks   = @('*.ts','*.tsx','*.js','*.jsx','*.css','*.sql','*.toml','*.json'
 $RootConfigs = @('package.json','tsconfig.json','middleware.ts','next.config.js',
                  'next.config.mjs','next.config.ts','tailwind.config.js',
                  'tailwind.config.ts','postcss.config.js','postcss.config.mjs')
+
+# The sync routine itself. These live in the project root, outside every
+# packed subtree, so before v1.2 no pack contained them.
+$RootScripts = @('_session-sync.bat','_session-sync.ps1')
 
 $Bar = '============================================================'
 $Rule = '------------------------------------------------------------'
@@ -174,7 +201,7 @@ function Get-FileCount {
 # =====================================================================
 Clear-Host
 Write-Host $Bar
-Write-Host '  DENTAL OS - SESSION SYNC  v1.1'
+Write-Host '  DENTAL OS - SESSION SYNC  v1.2'
 Write-Host ('  ' + (Get-Date -Format 'yyyy-MM-dd HH:mm'))
 Write-Host $Bar
 
@@ -401,17 +428,77 @@ if ($toDeploy.Count -eq 0) {
 }
 
 # -------------------------------------------------- 9. fetch migrations
-Write-Step 9 'Fetch migration files from the history table'
+Write-Step 9 'Fetch migration files from the history table, guarded'
+
+$migPath = Join-Path $Root 'supabase\migrations'
+
+# The fetch rewrites every local migration file from the statements
+# column of the history table. A row inserted by hand has that column
+# empty, and the fetch will happily write the emptiness over good SQL.
+# So: photograph the folder, fetch, then compare.
+Copy-Tree -From $migPath -To $MigSnap
+$beforeCount = Get-FileCount $MigSnap
+Write-Note ('{0} migration files photographed before the fetch.' -f $beforeCount)
 
 $mgArgs = $SupaPre + @('migration', 'fetch', '--project-ref', $ProjectRef, '--yes')
 Invoke-Checked -Exe $SupaExe -Arguments $mgArgs -StepNum 9 -StepName 'Fetch migrations' | Out-Null
 
-$migPath = Join-Path $Root 'supabase\migrations'
+$losses = @()
+if ($beforeCount -gt 0) {
+    foreach ($snap in (Get-ChildItem -LiteralPath $MigSnap -Filter '*.sql' -File | Sort-Object Name)) {
+        $nowFile = Join-Path $migPath $snap.Name
+
+        $beforeText = ([System.IO.File]::ReadAllText($snap.FullName)).Trim()
+        $beforeLen  = $beforeText.Length
+
+        if (-not (Test-Path -LiteralPath $nowFile)) {
+            $losses += ('{0}  vanished' -f $snap.Name)
+            continue
+        }
+
+        $afterText = ([System.IO.File]::ReadAllText($nowFile)).Trim()
+        $afterLen  = $afterText.Length
+
+        # A file that held real SQL and came back empty, came back as a
+        # bare semicolon, or lost more than half of itself.
+        if ($beforeLen -gt 20) {
+            if ($afterLen -le 5) {
+                $losses += ('{0}  {1} chars to {2}, effectively empty' -f $snap.Name, $beforeLen, $afterLen)
+            } elseif ($afterLen -lt [int]($beforeLen / 2)) {
+                $losses += ('{0}  {1} chars to {2}, lost over half' -f $snap.Name, $beforeLen, $afterLen)
+            }
+        }
+    }
+}
+
+if ($losses.Count -gt 0) {
+    Copy-Tree -From $MigSnap -To $migPath
+
+    $detail = @('The fetch overwrote migration files with less than', 'they held before:', '')
+    $detail += $losses
+    $detail += ''
+    $detail += 'Every migration file has been restored from the snapshot,'
+    $detail += 'so nothing was lost and nothing was committed.'
+    $detail += ''
+    $detail += 'This means a row in supabase_migrations.schema_migrations'
+    $detail += 'has an empty statements column, which happens when SQL'
+    $detail += 'was applied from a chat session instead of the CLI. Fix'
+    $detail += 'the row, do not fight the fetch:'
+    $detail += ''
+    $detail += '  update supabase_migrations.schema_migrations'
+    $detail += '  set statements = array[ ...the file text... ]'
+    $detail += '  where version = ...;'
+    $detail += ''
+    $detail += 'The snapshot is kept at:'
+    $detail += '  _sync\work\migrations-before'
+    Stop-Run -StepNum 9 -StepName 'Fetch migrations' -Reason ('{0} migration file(s) came back short.' -f $losses.Count) -Detail $detail
+}
+
 $migCount = 0
 if (Test-Path -LiteralPath $migPath) {
     $migCount = @(Get-ChildItem -LiteralPath $migPath -Filter '*.sql' -File).Count
 }
-Write-Note ('{0} migration files now on disk.' -f $migCount)
+Write-Note ('{0} migration files now on disk. None came back short.' -f $migCount)
 
 # ---------------------------------------------------- 10. commit + push
 Write-Step 10 'Commit and push'
@@ -448,7 +535,7 @@ $packFile = Join-Path $packDir 'dental-os-pack.txt'
 $subTrees = @('app', 'lib', 'supabase\functions', 'supabase\migrations')
 
 $lines = New-Object System.Collections.Generic.List[string]
-$lines.Add('===== DENTAL OS SOURCE PACK v5 =====')
+$lines.Add('===== DENTAL OS SOURCE PACK v6 =====')
 $lines.Add('===== ROOT: ' + $Root)
 $lines.Add('===== PACKED: ' + $stamp)
 $lines.Add('===== COMMIT: ' + $commitSha)
@@ -481,6 +568,10 @@ foreach ($subTree in $subTrees) {
 $cfgToml = Join-Path $Root 'supabase\config.toml'
 if (Test-Path -LiteralPath $cfgToml) { $collected.Add($cfgToml) }
 foreach ($c in $RootConfigs) {
+    $cp = Join-Path $Root $c
+    if (Test-Path -LiteralPath $cp) { $collected.Add($cp) }
+}
+foreach ($c in $RootScripts) {
     $cp = Join-Path $Root $c
     if (Test-Path -LiteralPath $cp) { $collected.Add($cp) }
 }
@@ -545,6 +636,8 @@ Write-Host ('  Migrations: ' + $migCount)
 Write-Host $Rule
 Write-Host '  Upload this file to the next chat:'
 Write-Host '  _sync\latest\dental-os-pack.txt'
+Write-Host '  It now carries the sync scripts too, so that is the'
+Write-Host '  only upload the next session needs.'
 Write-Host $Bar -ForegroundColor Green
 Write-Host ''
 exit 0

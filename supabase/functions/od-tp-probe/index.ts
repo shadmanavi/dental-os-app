@@ -12,7 +12,7 @@
 // are in the handoff.
 //
 // Deploy path: supabase/functions/od-tp-probe/index.ts
-// Version: 1
+// Version: 2
 //
 // The questions:
 //
@@ -51,6 +51,28 @@
 //
 //       14,581 of 14,585 patients have exactly one. If it is created
 //       automatically then C2 never needs to create a plan at all.
+//
+// Changelog
+//
+//   v2  The throwaway procedure is a mouth-level code, and a tooth is
+//       supplied if one is demanded anyway.
+//
+//       v1 used D0230, a periapical radiograph. OpenDental refused the
+//       POST with "A ToothNum is required for the procedure code's
+//       treatment area." and the probe stopped before it had created
+//       anything — correct behaviour, wrong code.
+//
+//       procedurecode.TreatArea decides this, and it was read rather
+//       than guessed a second time: 0 is Mouth, 2 is Tooth, 3 is Quad.
+//       D0230 is 2. D9999, unspecified adjunctive procedure by report,
+//       is 0 — mouth level, no fee attached, and unmistakably not real
+//       treatment if a human ever sees it.
+//
+//       A retry with a ToothNum was added as well. A refusal on
+//       treatment area is a setup failure, not an answer to any of the
+//       five questions, and it should never be what stops the probe.
+//
+//   v1  First build. H1-H5.
 //
 // What this writes, and how it cleans up:
 //
@@ -103,9 +125,19 @@ const TP_STATUS_SAVED = 0;
 const TP_STATUS_ACTIVE = 1;
 const TP_STATUS_INACTIVE = 2;
 
-// A $0 code so nothing this creates ever looks like money owed, and one
-// the office already uses so it cannot be mistaken for a new code.
-const PROBE_PROC_CODE = "D0230";
+// A mouth-level code, so OpenDental does not demand a tooth, and a
+// by-report one, so nothing this creates ever looks like money owed.
+//
+// procedurecode.TreatArea is what decides the first of those: 0 Mouth,
+// 2 Tooth, 3 Quad. Read from Downey rather than assumed, because
+// assuming it is what made v1 fail.
+const PROBE_PROC_CODE = "D9999";
+
+// Used only if OpenDental demands a tooth anyway — a code whose
+// treatment area differs between offices would otherwise stop the
+// probe before it asked a single question. Tooth 8 is a permanent
+// upper central incisor, present on any adult chart.
+const PROBE_FALLBACK_TOOTH = "8";
 
 // Named so a human scanning OpenDental's plan list knows immediately
 // what it is and that it can go.
@@ -336,14 +368,37 @@ Deno.serve(async (req: Request) => {
     // patient's primary provider, which is what it did last time and
     // is one less thing to be wrong about.
     // =================================================================
-    const created = record(
-      await odFetch(auth, "POST", "/procedurelogs", {
-        PatNum: patNum,
-        procCode: PROBE_PROC_CODE,
-        ProcStatus: "TP",
-        ProcDate: new Date().toISOString().slice(0, 10),
-      }),
+    const createPayload: Record<string, unknown> = {
+      PatNum: patNum,
+      procCode: PROBE_PROC_CODE,
+      ProcStatus: "TP",
+      ProcDate: new Date().toISOString().slice(0, 10),
+    };
+
+    let created = record(
+      await odFetch(auth, "POST", "/procedurelogs", createPayload),
     );
+
+    // A treatment-area refusal is a setup problem, not an answer to
+    // anything. If OpenDental wants a tooth it gets one, and the probe
+    // carries on to the questions it exists to ask.
+    if (
+      !ok2xx(created) &&
+      String(created.body ?? "").includes("ToothNum")
+    ) {
+      created = record(
+        await odFetch(auth, "POST", "/procedurelogs", {
+          ...createPayload,
+          ToothNum: PROBE_FALLBACK_TOOTH,
+        }),
+      );
+
+      findings.create_needed_tooth = {
+        note:
+          `${PROBE_PROC_CODE} was refused without a tooth. Retried with ` +
+          `ToothNum ${PROBE_FALLBACK_TOOTH}.`,
+      };
+    }
 
     if (!ok2xx(created)) {
       return json({

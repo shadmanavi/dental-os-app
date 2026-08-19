@@ -6,7 +6,7 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 11
+// Version: 12
 // Changelog:
 //   v1  patients / open / commit / undo, built on what od-chart-probe
 //       established against the live Downey database.
@@ -85,6 +85,31 @@
 //       open still returns a providers key, now empty, so a caller
 //       built against v10 gets the shape it expects rather than
 //       undefined.
+//   v12 Region entry: whole mouth, quadrant and arch.
+//
+//       Half the work done at Downey does not belong to one tooth, and
+//       until now this function had no way to record where it belongs.
+//       Worse, it was silently wrong: a tile carried whatever ToothNum
+//       the caller happened to send, so an exam charted with tooth 30
+//       lit was written onto tooth 30, and scaling and root planing was
+//       written onto a single tooth with no quadrant at all.
+//
+//       The tile's treat_area now decides the shape, and the shape
+//       decides which fields are written. Verified against live Downey
+//       data rather than assumed:
+//
+//         1, 2  tooth      ToothNum, Surf holds the surfaces
+//         4     quadrant   Surf holds UR, UL, LR or LL. No ToothNum
+//         6     arch       Surf holds U or L. No ToothNum
+//         0, 3  mouth      neither field written
+//         7     tooth range  refused for now, nothing writes ToothRange
+//
+//       A caller cannot override this. A tooth sent with a whole-mouth
+//       tile is dropped, and a region sent with a tooth tile is dropped,
+//       because the tile is the authority on what it is.
+//
+//       One region per call. Four quadrants of scaling are four
+//       procedures in OpenDental, so they are four calls.
 //
 // What the probe settled, and why this file looks the way it does:
 //
@@ -637,6 +662,33 @@ function resolveCode(
   return { ok: false, error: `Unknown code rule type: ${rule.type}.` };
 }
 
+// ---------------------------------------------------------------------
+// Treatment shape
+//
+// procedurecode.TreatArea, carried through onto the tile unchanged.
+// Confirmed against six months of live Downey procedures: quadrant work
+// stores UR/UL/LR/LL in Surf with an empty ToothNum, arch work stores
+// U/L the same way, and mouth-level work stores neither.
+// ---------------------------------------------------------------------
+type Shape = "tooth" | "quadrant" | "arch" | "mouth" | "range";
+
+const QUADRANTS = ["UR", "UL", "LR", "LL"];
+const ARCHES = ["U", "L"];
+
+function shapeOf(treatArea: number | null): Shape {
+  if (treatArea === 1 || treatArea === 2) return "tooth";
+  if (treatArea === 4) return "quadrant";
+  if (treatArea === 6) return "arch";
+  if (treatArea === 7) return "range";
+  return "mouth";
+}
+
+function normalizeRegion(input: unknown): string {
+  const r = String(input ?? "").trim().toUpperCase();
+  if (QUADRANTS.includes(r) || ARCHES.includes(r)) return r;
+  return "";
+}
+
 // Surface order OpenDental expects, so MO and OM both store as MO.
 const SURFACE_ORDER = ["M", "O", "I", "D", "B", "F", "L", "V"];
 
@@ -692,6 +744,7 @@ Deno.serve(async (req: Request) => {
     pat_num?: number;
     tile_id?: string;
     tooth_num?: string;
+    region?: string;
     surfaces?: unknown;
     addon_ids?: unknown;
     prov_num?: number;
@@ -1382,6 +1435,7 @@ Deno.serve(async (req: Request) => {
 
     const dryRun = body.dry_run === true;
     const toothNum = (body.tooth_num ?? "").trim();
+    const region = normalizeRegion(body.region);
     const surfaces = normalizeSurfaces(body.surfaces);
 
     // Read the tile through RLS, and confirm it belongs to this caller's
@@ -1486,15 +1540,59 @@ Deno.serve(async (req: Request) => {
 
     // -----------------------------------------------------------------
     // Procedure
+    //
+    // The tile decides the shape, and the shape decides which fields are
+    // written. Anything the caller sent that does not belong to this
+    // shape is dropped rather than trusted.
     // -----------------------------------------------------------------
-    if (tile.needs_surfaces === true && surfaces.length === 0) {
+    const shape = shapeOf(
+      typeof tile.treat_area === "number" ? tile.treat_area : null,
+    );
+
+    let effectiveTooth = "";
+    let effectiveRegion = "";
+    let effectiveSurfaces: string[] = [];
+
+    if (shape === "tooth") {
+      if (toothNum === "" || toothClass(toothNum) === null) {
+        return json({
+          ok: false,
+          error: `${tile.label} is charted on a tooth. Pick a tooth first.`,
+        }, 400);
+      }
+      effectiveTooth = toothNum;
+      effectiveSurfaces = surfaces;
+    } else if (shape === "quadrant") {
+      if (!QUADRANTS.includes(region)) {
+        return json({
+          ok: false,
+          error: `${tile.label} is charted by quadrant. Pick upper right, upper left, lower right or lower left.`,
+        }, 400);
+      }
+      effectiveRegion = region;
+    } else if (shape === "arch") {
+      if (!ARCHES.includes(region)) {
+        return json({
+          ok: false,
+          error: `${tile.label} is charted by arch. Pick upper or lower.`,
+        }, 400);
+      }
+      effectiveRegion = region;
+    } else if (shape === "range") {
+      return json({
+        ok: false,
+        error: `${tile.label} covers a span of teeth, which cannot be charted here yet. Enter it in OpenDental.`,
+      }, 400);
+    }
+
+    if (tile.needs_surfaces === true && effectiveSurfaces.length === 0) {
       return json({ ok: false, error: "Pick at least one surface." }, 400);
     }
 
     const resolved = resolveCode(
       tile.code_rule as CodeRule | null,
-      toothNum,
-      surfaces.length,
+      effectiveTooth,
+      effectiveSurfaces.length,
     );
 
     if (!resolved.ok) {
@@ -1537,7 +1635,8 @@ Deno.serve(async (req: Request) => {
         ProcDate: procDate,
       };
 
-      if (toothNum !== "") p.ToothNum = toothNum;
+      if (effectiveTooth !== "") p.ToothNum = effectiveTooth;
+      if (effectiveRegion !== "") p.Surf = effectiveRegion;
 
       if (typeof body.prov_num === "number" && body.prov_num > 0) {
         p.ProvNum = body.prov_num;
@@ -1605,7 +1704,7 @@ Deno.serve(async (req: Request) => {
 
     // Base. Surfaces belong to this line only.
     const base = basePayload(resolved.procCode);
-    if (surfaces.length > 0) base.Surf = surfaces.join("");
+    if (effectiveSurfaces.length > 0) base.Surf = effectiveSurfaces.join("");
 
     if (split !== null) {
       base.ProcFee = split.base;
@@ -1656,6 +1755,8 @@ Deno.serve(async (req: Request) => {
         entry_kind: "procedure",
         tile: tile.label,
         bucket: category.bucket,
+        shape,
+        region: effectiveRegion,
         resolved_code: resolved.procCode,
         resolved_because: resolved.why,
         would_post_to: `${OD_BASE_URL}/procedurelogs`,
@@ -1734,7 +1835,7 @@ Deno.serve(async (req: Request) => {
         addon_id: line.addon_id,
         od_id: procNum,
         descript: String(cb.descript ?? ""),
-        tooth_num: String(cb.ToothNum ?? toothNum),
+        tooth_num: String(cb.ToothNum ?? effectiveTooth),
         surf: String(cb.Surf ?? ""),
         status: String(cb.ProcStatus ?? procStatus),
         fee: cb.ProcFee ?? null,
@@ -1784,14 +1885,16 @@ Deno.serve(async (req: Request) => {
       od_id: baseLine?.od_id ?? null,
       proc_code: baseLine?.proc_code ?? resolved.procCode,
       descript: baseLine?.descript ?? "",
-      tooth_num: baseLine?.tooth_num ?? toothNum,
-      surf: baseLine?.surf ?? "",
+      tooth_num: baseLine?.tooth_num ?? effectiveTooth,
+      surf: baseLine?.surf ?? effectiveRegion,
       status: baseLine?.status ?? procStatus,
       undoable: baseLine?.undoable ?? false,
       fee: baseLine?.fee ?? null,
       prov_num: baseLine?.prov_num ?? null,
       prov_abbr: baseLine?.prov_abbr ?? "",
 
+      shape,
+      region: effectiveRegion,
       committed_by: userData.user.email,
       committed_at: new Date().toISOString(),
     });

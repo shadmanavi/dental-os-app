@@ -1,10 +1,39 @@
 "use client";
 
-// Chairside charting — v18.5
+// Chairside charting — v19
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19 Region charting: quadrant, arch and whole mouth.
+//
+//       Half the work done at Downey does not belong to one tooth, and
+//       none of it could be entered here. Exams, x-rays, cleanings,
+//       night guards and referrals had no way in at all, and scaling
+//       and root planing went in attached to whichever single tooth
+//       happened to be lit, with no quadrant recorded.
+//
+//       Above the arches there is now a row of region buttons: upper
+//       right, upper left, lower right, lower left, upper arch, lower
+//       arch, whole mouth. Tapping one clears the lit tooth, and
+//       tapping a tooth clears the region, so the screen is only ever
+//       in one of the two states.
+//
+//       The panels then offer only work that fits what is selected.
+//       With a tooth lit, fillings and crowns; with a quadrant,
+//       scaling and root planing; with whole mouth, exams and x-rays
+//       and cleanings. A tile is matched to a selection by the
+//       treat_area OpenDental already holds against its code, so
+//       nothing here has a list of codes in it.
+//
+//       Whole-mouth work is all diagnosed, so the existing panel says
+//       so rather than sitting empty and looking broken.
+//
+//       Partial dentures cover a span of teeth and are left out. The
+//       tiles do not appear, because od-chart v12 refuses them.
+//
+//       Needs od-chart v12 or later. Against v11 the region would be
+//       ignored without an error and the work would file wrongly.
 //   v1  Patient search, tooth chart, twin drill-down panels, surface
 //       picker, session ledger with undo. Every OpenDental call goes
 //       through the od-chart Edge Function.
@@ -714,6 +743,44 @@ type Procedure = {
   provAbbr: string;
 };
 
+// ---------------------------------------------------------------------
+// Where a procedure lives in the mouth
+//
+// treat_area is OpenDental's own procedurecode.TreatArea, carried onto
+// the tile unchanged. It decides what has to be selected before a tile
+// can be tapped, so no list of codes lives on this screen.
+// ---------------------------------------------------------------------
+type Shape = "tooth" | "quadrant" | "arch" | "mouth" | "range";
+
+const QUADRANT_KEYS = ["UR", "UL", "LR", "LL"] as const;
+const ARCH_KEYS = ["U", "L"] as const;
+
+const REGION_LABELS: Record<string, string> = {
+  UR: "Upper right",
+  UL: "Upper left",
+  LR: "Lower right",
+  LL: "Lower left",
+  U: "Upper arch",
+  L: "Lower arch",
+};
+
+// Universal numbering. 1–8 upper right, 9–16 upper left, 17–24 lower
+// left, 25–32 lower right.
+const QUADRANT_TEETH: Record<string, number[]> = {
+  UR: [1, 2, 3, 4, 5, 6, 7, 8],
+  UL: [9, 10, 11, 12, 13, 14, 15, 16],
+  LL: [17, 18, 19, 20, 21, 22, 23, 24],
+  LR: [25, 26, 27, 28, 29, 30, 31, 32],
+};
+
+function shapeOfTreatArea(treatArea: number | null): Shape {
+  if (treatArea === 1 || treatArea === 2) return "tooth";
+  if (treatArea === 4) return "quadrant";
+  if (treatArea === 6) return "arch";
+  if (treatArea === 7) return "range";
+  return "mouth";
+}
+
 type Tile = {
   id: string;
   label: string;
@@ -1320,6 +1387,9 @@ export default function ChartPage() {
   const [provOverride, setProvOverride] = useState<number | null>(null);
 
   const [tooth, setTooth] = useState<string>("");
+  // "" nothing, "MOUTH", one of UR/UL/LR/LL, or U/L. Never set at the
+  // same time as a tooth.
+  const [region, setRegion] = useState<string>("");
   const [nav, setNav] = useState<
     Record<Bucket, NavState>
   >({
@@ -2158,6 +2228,7 @@ export default function ChartPage() {
       setFeeSchedule(data.fee_schedule ?? null);
       setProvOverride(null);
       setTooth("");
+      setRegion("");
       resetNav();
       setHits([]);
       setQuery("");
@@ -2179,6 +2250,7 @@ export default function ChartPage() {
     setMenu([]);
     setFeeSchedule(null);
     setTooth("");
+    setRegion("");
     resetNav();
     // The next patient starts at the chair, not mid-presentation.
     setWorkTab("procedures");
@@ -2254,6 +2326,81 @@ export default function ChartPage() {
 
   const missingSet = useMemo(() => new Set(missingTeeth), [missingTeeth]);
 
+  // What is selected right now, as a shape. Null means nothing is.
+  const selectionShape: Shape | null = tooth !== ""
+    ? "tooth"
+    : region === "MOUTH"
+      ? "mouth"
+      : (QUADRANT_KEYS as readonly string[]).includes(region)
+        ? "quadrant"
+        : (ARCH_KEYS as readonly string[]).includes(region)
+          ? "arch"
+          : null;
+
+  // Plain words for the confirm button and the count line, so nobody
+  // has to know that LR means lower right.
+  const selectionLabel = tooth !== ""
+    ? `tooth ${tooth}`
+    : region === "MOUTH"
+      ? "whole mouth"
+      : region === ""
+        ? ""
+        : (REGION_LABELS[region] ?? region).toLowerCase();
+
+  // The teeth a region covers, lit on the chart so the selection is
+  // visible rather than only stated. Whole mouth lights nothing: every
+  // tooth outlined reads as a mistake, not a selection.
+  const regionTeeth = useMemo(() => {
+    if (QUADRANT_TEETH[region]) {
+      return new Set(QUADRANT_TEETH[region].map((n) => String(n)));
+    }
+    if (region === "U") {
+      return new Set(
+        [...QUADRANT_TEETH.UR, ...QUADRANT_TEETH.UL].map((n) => String(n)),
+      );
+    }
+    if (region === "L") {
+      return new Set(
+        [...QUADRANT_TEETH.LL, ...QUADRANT_TEETH.LR].map((n) => String(n)),
+      );
+    }
+    return new Set<string>();
+  }, [region]);
+
+  function selectTooth(key: string) {
+    setTooth((prev) => (prev === key ? "" : key));
+    setRegion("");
+    resetNav();
+    setCommitError("");
+  }
+
+  function selectRegion(key: string) {
+    setRegion((prev) => (prev === key ? "" : key));
+    setTooth("");
+    resetNav();
+    setCommitError("");
+  }
+
+  // A tile is offered only where it can actually be written. Tooth-range
+  // work never is: od-chart refuses it, so showing it would be an
+  // invitation to an error message.
+  const shapedMenu = useMemo(() => {
+    if (selectionShape === null) return [];
+
+    return menu
+      .map((c) => ({
+        ...c,
+        tiles: c.tiles.filter((t) => {
+          const shape = shapeOfTreatArea(t.treat_area);
+          if (shape === "range") return false;
+          // A missing tooth is marked on a tooth whatever its code says.
+          if (t.entry_kind === "tooth_initial") return selectionShape === "tooth";
+          return shape === selectionShape;
+        }),
+      }))
+      .filter((c) => c.tiles.length > 0);
+  }, [menu, selectionShape]);
+
   const toothProcedures = useMemo(
     () => (tooth === "" ? [] : procedures.filter((p) => p.ToothNum === tooth)),
     [procedures, tooth],
@@ -2302,8 +2449,8 @@ export default function ChartPage() {
   // Commit
   // -------------------------------------------------------------------
   async function commit(bucket: Bucket, tile: Tile, surfaces: string[]) {
-    if (tooth === "") {
-      setCommitError("Pick a tooth first.");
+    if (selectionShape === null) {
+      setCommitError("Pick a tooth or a region first.");
       return;
     }
 
@@ -2316,6 +2463,9 @@ export default function ChartPage() {
         pat_num: patient?.PatNum,
         tile_id: tile.id,
         tooth_num: tooth,
+        // Whole mouth sends nothing. od-chart drops anything that does
+        // not belong to the tile's shape either way, so the two agree.
+        region: region === "MOUTH" ? "" : region,
         surfaces,
         ...(provOverride !== null ? { prov_num: provOverride } : {}),
       });
@@ -3382,6 +3532,45 @@ export default function ChartPage() {
           <>
         {/* Tooth chart */}
         <section className="mt-3 rounded-2xl border border-[#2C4E54] bg-[#122326] p-2 xl:p-3">
+          {/* Region buttons. Everything that is not charted on a single
+              tooth is reached from here: a quadrant for scaling, an arch
+              for a denture, whole mouth for exams, x-rays and cleanings.
+              They sit above the arches because they are chosen before
+              the work, exactly as a tooth is. */}
+          <div className="mb-2 grid grid-cols-4 gap-1 xl:mb-2.5 xl:gap-1.5">
+            {["UR", "UL", "LR", "LL"].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => selectRegion(key)}
+                className={`h-10 rounded-lg border text-[12px] font-semibold transition-transform active:scale-95 xl:h-12 xl:text-[13.5px] ${
+                  region === key
+                    ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                    : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
+                }`}
+              >
+                {REGION_LABELS[key]}
+              </button>
+            ))}
+          </div>
+
+          <div className="mb-2 grid grid-cols-3 gap-1 xl:mb-2.5 xl:gap-1.5">
+            {["U", "L", "MOUTH"].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => selectRegion(key)}
+                className={`h-10 rounded-lg border text-[12px] font-semibold transition-transform active:scale-95 xl:h-12 xl:text-[13.5px] ${
+                  region === key
+                    ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                    : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
+                }`}
+              >
+                {key === "MOUTH" ? "Whole mouth" : REGION_LABELS[key]}
+              </button>
+            ))}
+          </div>
+
           {[UPPER, LOWER].map((arch, archIndex) => (
             <div
               key={archIndex}
@@ -3392,22 +3581,21 @@ export default function ChartPage() {
                 const mark = marks[key];
                 const isMissing = missingSet.has(key);
                 const selected = tooth === key;
+                const inRegion = regionTeeth.has(key);
 
                 return (
                   <button
                     key={n}
                     type="button"
-                    onClick={() => {
-                      setTooth(selected ? "" : key);
-                      resetNav();
-                      setCommitError("");
-                    }}
+                    onClick={() => selectTooth(key)}
                     className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg border font-mono text-[11.5px] font-semibold transition-transform active:scale-95 xl:h-14 xl:gap-1 xl:text-[13px] ${
                       selected
                         ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
-                        : isMissing
-                          ? "border-[#2C4E54] bg-[#0F1D20] text-[#4A6165] line-through"
-                          : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB]"
+                        : inRegion
+                          ? "border-[#EDF3F1] bg-[#204045] text-[#EDF3F1]"
+                          : isMissing
+                            ? "border-[#2C4E54] bg-[#0F1D20] text-[#4A6165] line-through"
+                            : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB]"
                     }`}
                   >
                     <span>{n}</span>
@@ -3433,9 +3621,15 @@ export default function ChartPage() {
               <i className="inline-block h-2 w-2 rounded-full bg-[#F0A93B]" /> Diagnosed
             </span>
             <span className="ml-auto">
-              {tooth === ""
-                ? "No tooth selected"
-                : `Tooth ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`}
+              {tooth !== ""
+                ? `Tooth ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`
+                : region === "MOUTH"
+                  ? "Whole mouth"
+                  : region !== ""
+                    ? `${REGION_LABELS[region] ?? region}${
+                        regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""
+                      }`
+                    : "Nothing selected"}
             </span>
           </div>
         </section>
@@ -3450,7 +3644,7 @@ export default function ChartPage() {
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           {buckets.map((bucket) => {
             const state = nav[bucket];
-            const cats = menu.filter((m) => m.bucket === bucket);
+            const cats = shapedMenu.filter((m) => m.bucket === bucket);
             const accent = bucket === "existing" ? "#79B4C4" : "#F0A93B";
             const deep = state.category !== null;
             const open = panelOpen[bucket];
@@ -3512,11 +3706,27 @@ export default function ChartPage() {
                   </button>
                 )}
 
-                {tooth === "" ? (
+                {selectionShape === null ? (
                   <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-                    <strong className="text-[15px] font-medium">Pick a tooth</strong>
+                    <strong className="text-[15px] font-medium">
+                      Pick a tooth or a region
+                    </strong>
                     <span className="max-w-[26ch] text-[13px] text-[#8AA6AB]">
-                      Tap a tooth above to start charting.
+                      Tap a tooth to chart tooth work, or a region above
+                      it for a quadrant, an arch, or the whole mouth.
+                    </span>
+                  </div>
+                ) : cats.length === 0 ? (
+                  // Nothing in this bucket is charted this way. Said
+                  // plainly, because an empty panel reads as broken.
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
+                    <strong className="text-[15px] font-medium">
+                      Nothing here is {selectionLabel} work
+                    </strong>
+                    <span className="max-w-[28ch] text-[13px] text-[#8AA6AB]">
+                      {bucket === "existing"
+                        ? "Exams, x-rays and cleanings are recorded as diagnosed, on the right."
+                        : "Pick a different tooth or region."}
                     </span>
                   </div>
                 ) : state.pending !== null ? (
@@ -3565,7 +3775,7 @@ export default function ChartPage() {
                     >
                       {committing
                         ? "Saving…"
-                        : `${state.pending.label} · tooth ${tooth}${
+                        : `${state.pending.label} · ${selectionLabel}${
                             state.surfaces.length > 0 ? ` · ${state.surfaces.join("")}` : ""
                           }`}
                     </button>

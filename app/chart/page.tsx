@@ -1,10 +1,36 @@
 "use client";
 
-// Chairside charting — v19.1
+// Chairside charting — v19.2
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19.2 One tap scales several quadrants.
+//
+//       v19.1 read a pair of lit quadrants one way only: upper right
+//       with upper left was the upper arch and nothing else, so the
+//       denture appeared and scaling disappeared. That was backwards
+//       for the commoner job — full mouth scaling is four quadrants and
+//       is done far more often than a denture is made.
+//
+//       A selection can now mean more than one thing at once, and the
+//       tile decides which reading applies. With the two upper
+//       quadrants lit, Complete denture takes it as the upper arch and
+//       writes one procedure, while Scaling takes it as two quadrants
+//       and writes two — one carrying UR, one carrying UL. All four lit
+//       offers scaling across four and the whole-mouth work beside it.
+//
+//       Any combination of quadrants is now a valid selection. Upper
+//       right with lower left is two quadrants of scaling; it is simply
+//       not an arch, so no arch tile appears. Nothing is refused for
+//       being an odd shape any more.
+//
+//       Each quadrant is a separate procedure in OpenDental, so one tap
+//       produces several rows in the session list, each with its own
+//       undo. A quadrant that OpenDental refuses is named, and the ones
+//       that succeeded stay.
+//
+//       Needs od-chart v13 or later.
 //   v19.1 Quadrants combine, and the buttons sit where the mouth is.
 //
 //       The four quadrant buttons are now multi-select, and two of them
@@ -2347,57 +2373,109 @@ export default function ChartPage() {
 
   const missingSet = useMemo(() => new Set(missingTeeth), [missingTeeth]);
 
-  // What is selected right now, as a shape, and where it should be
-  // written. Two quadrants on the same arch are that arch; all four are
-  // the whole mouth; a diagonal pair is nothing anyone charts to.
-  //
-  // "invalid" is a real answer rather than null, so the panel can say
-  // why it is empty instead of looking broken.
+  // What is selected right now. A selection can satisfy more than one
+  // shape at the same time — two upper quadrants are both "two
+  // quadrants" and "the upper arch" — and the tile that gets tapped
+  // decides which reading applies.
   const selection = useMemo((): {
-    shape: Shape | "invalid" | null;
-    region: string;
+    shapes: Shape[];
+    quads: string[];
+    archRegion: string;
     label: string;
   } => {
     if (tooth !== "") {
-      return { shape: "tooth", region: "", label: `tooth ${tooth}` };
-    }
-
-    if (wholeMouth) {
-      return { shape: "mouth", region: "", label: "whole mouth" };
-    }
-
-    if (quads.length === 0) {
-      return { shape: null, region: "", label: "" };
-    }
-
-    if (quads.length === 1) {
-      const q = quads[0];
       return {
-        shape: "quadrant",
-        region: q,
-        label: (REGION_LABELS[q] ?? q).toLowerCase(),
+        shapes: ["tooth"],
+        quads: [],
+        archRegion: "",
+        label: `tooth ${tooth}`,
       };
     }
 
-    const set = new Set(quads);
-
-    if (quads.length === 2 && set.has("UR") && set.has("UL")) {
-      return { shape: "arch", region: "U", label: "upper arch" };
+    if (wholeMouth) {
+      return {
+        shapes: ["mouth"],
+        quads: [],
+        archRegion: "",
+        label: "whole mouth",
+      };
     }
 
-    if (quads.length === 2 && set.has("LR") && set.has("LL")) {
-      return { shape: "arch", region: "L", label: "lower arch" };
+    if (quads.length === 0) {
+      return { shapes: [], quads: [], archRegion: "", label: "" };
     }
 
-    if (quads.length === 4) {
-      return { shape: "mouth", region: "", label: "whole mouth" };
+    // Kept in OpenDental's own order however the buttons were tapped, so
+    // the session list always reads upper right before lower left.
+    const ordered = ["UR", "UL", "LR", "LL"].filter((q) => quads.includes(q));
+    const set = new Set(ordered);
+
+    // Every quadrant selection can take quadrant work. Whether it is
+    // also an arch, or the whole mouth, is an extra reading on top.
+    const shapes: Shape[] = ["quadrant"];
+    let archRegion = "";
+
+    if (ordered.length === 2 && set.has("UR") && set.has("UL")) {
+      shapes.push("arch");
+      archRegion = "U";
+    } else if (ordered.length === 2 && set.has("LR") && set.has("LL")) {
+      shapes.push("arch");
+      archRegion = "L";
+    } else if (ordered.length === 4) {
+      shapes.push("mouth");
     }
 
-    return { shape: "invalid", region: "", label: "that combination" };
+    const label = ordered.length === 1
+      ? (REGION_LABELS[ordered[0]] ?? ordered[0]).toLowerCase()
+      : ordered.length === 4
+        ? "whole mouth"
+        : archRegion === "U"
+          ? "upper arch"
+          : archRegion === "L"
+            ? "lower arch"
+            : `${ordered.length} quadrants`;
+
+    return { shapes, quads: ordered, archRegion, label };
   }, [tooth, quads, wholeMouth]);
 
-  const selectionShape = selection.shape;
+  const hasSelection = selection.shapes.length > 0;
   const selectionLabel = selection.label;
+
+  // Which regions a given tile writes to, given what is lit. A quadrant
+  // tile fans out across every quadrant; an arch tile takes the one arch
+  // the pair makes; whole-mouth work carries no region at all.
+  function regionsForTile(tile: Tile): string[] {
+    const shape = shapeOfTreatArea(tile.treat_area);
+    if (shape === "quadrant") return selection.quads;
+    if (shape === "arch") {
+      return selection.archRegion === "" ? [] : [selection.archRegion];
+    }
+    return [];
+  }
+
+  // What the confirm button and the tile footnote say. A quadrant tile
+  // over several quadrants says how many, because one tap is about to
+  // create that many procedures.
+  function tileScopeLabel(tile: Tile): string {
+    const shape = shapeOfTreatArea(tile.treat_area);
+
+    if (shape === "quadrant" && selection.quads.length > 1) {
+      return `${selection.quads.length} quadrants`;
+    }
+
+    if (shape === "quadrant" && selection.quads.length === 1) {
+      return (REGION_LABELS[selection.quads[0]] ?? selection.quads[0])
+        .toLowerCase();
+    }
+
+    if (shape === "arch") {
+      return selection.archRegion === "U" ? "upper arch" : "lower arch";
+    }
+
+    if (shape === "mouth") return "whole mouth";
+
+    return selectionLabel;
+  }
 
   // The teeth the selection covers, lit on the chart so it is visible
   // rather than only stated. Whole mouth lights nothing: every tooth
@@ -2442,7 +2520,7 @@ export default function ChartPage() {
   // work never is: od-chart refuses it, so showing it would be an
   // invitation to an error message.
   const shapedMenu = useMemo(() => {
-    if (selectionShape === null || selectionShape === "invalid") return [];
+    if (selection.shapes.length === 0) return [];
 
     return menu
       .map((c) => ({
@@ -2451,12 +2529,14 @@ export default function ChartPage() {
           const shape = shapeOfTreatArea(t.treat_area);
           if (shape === "range") return false;
           // A missing tooth is marked on a tooth whatever its code says.
-          if (t.entry_kind === "tooth_initial") return selectionShape === "tooth";
-          return shape === selectionShape;
+          if (t.entry_kind === "tooth_initial") {
+            return selection.shapes.includes("tooth");
+          }
+          return selection.shapes.includes(shape);
         }),
       }))
       .filter((c) => c.tiles.length > 0);
-  }, [menu, selectionShape]);
+  }, [menu, selection]);
 
   const toothProcedures = useMemo(
     () => (tooth === "" ? [] : procedures.filter((p) => p.ToothNum === tooth)),
@@ -2506,7 +2586,7 @@ export default function ChartPage() {
   // Commit
   // -------------------------------------------------------------------
   async function commit(bucket: Bucket, tile: Tile, surfaces: string[]) {
-    if (selectionShape === null || selectionShape === "invalid") {
+    if (!hasSelection) {
       setCommitError("Pick a tooth or a region first.");
       return;
     }
@@ -2520,9 +2600,11 @@ export default function ChartPage() {
         pat_num: patient?.PatNum,
         tile_id: tile.id,
         tooth_num: tooth,
-        // Whole mouth sends nothing. od-chart drops anything that does
-        // not belong to the tile's shape either way, so the two agree.
-        region: selection.region,
+        // The tile decides how the selection is read, so a quadrant
+        // tile gets every lit quadrant and an arch tile gets the one
+        // arch they make. od-chart applies the same rule from the
+        // tile's own treat_area, so the two cannot disagree.
+        regions: regionsForTile(tile),
         surfaces,
         ...(provOverride !== null ? { prov_num: provOverride } : {}),
       });
@@ -2575,10 +2657,25 @@ export default function ChartPage() {
       // A line landed and a later one was refused. Nothing is rolled
       // back, so say what is missing rather than looking successful.
       if (data.partial === true) {
-        const failed = data.partial_failure as Record<string, unknown> | null;
-        setCommitError(
-          `${String(failed?.label ?? "A line")} was refused, so it is not in OpenDental. The rest went through.`,
-        );
+        const refused = Array.isArray(data.regions_refused)
+          ? (data.regions_refused as unknown[]).map((r) => String(r))
+          : [];
+
+        if (refused.length > 0) {
+          // Named by quadrant, because that is what has to be redone.
+          const words = refused
+            .map((r) => (REGION_LABELS[r] ?? r).toLowerCase())
+            .join(" and ");
+
+          setCommitError(
+            `OpenDental refused the ${words}. Everything else went through.`,
+          );
+        } else {
+          const failed = data.partial_failure as Record<string, unknown> | null;
+          setCommitError(
+            `${String(failed?.label ?? "A line")} was refused, so it is not in OpenDental. The rest went through.`,
+          );
+        }
       }
 
       // Light the tooth immediately. One mark per procedure, carrying
@@ -3695,14 +3792,12 @@ export default function ChartPage() {
             <span className="ml-auto">
               {tooth !== ""
                 ? `Tooth ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`
-                : selectionShape === null
+                : !hasSelection
                   ? "Nothing selected"
-                  : selectionShape === "invalid"
-                    ? `${quads.length} quadrants · not a chartable area`
-                    : `${
-                      selectionLabel.charAt(0).toUpperCase() +
-                      selectionLabel.slice(1)
-                    }${regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""}`}
+                  : `${
+                    selectionLabel.charAt(0).toUpperCase() +
+                    selectionLabel.slice(1)
+                  }${regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""}`}
             </span>
           </div>
         </section>
@@ -3779,7 +3874,7 @@ export default function ChartPage() {
                   </button>
                 )}
 
-                {selectionShape === null ? (
+                {!hasSelection ? (
                   <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
                     <strong className="text-[15px] font-medium">
                       Pick a tooth or a region
@@ -3787,17 +3882,6 @@ export default function ChartPage() {
                     <span className="max-w-[26ch] text-[13px] text-[#8AA6AB]">
                       Tap a tooth to chart tooth work, or a region above
                       it for a quadrant, an arch, or the whole mouth.
-                    </span>
-                  </div>
-                ) : selectionShape === "invalid" ? (
-                  <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
-                    <strong className="text-[15px] font-medium">
-                      Nothing is charted across those quadrants
-                    </strong>
-                    <span className="max-w-[30ch] text-[13px] text-[#8AA6AB]">
-                      Two quadrants on the same arch make that arch, and
-                      all four make the whole mouth. Anything else has to
-                      be entered a quadrant at a time.
                     </span>
                   </div>
                 ) : cats.length === 0 ? (
@@ -3859,9 +3943,13 @@ export default function ChartPage() {
                     >
                       {committing
                         ? "Saving…"
-                        : `${state.pending.label} · ${selectionLabel}${
-                            state.surfaces.length > 0 ? ` · ${state.surfaces.join("")}` : ""
-                          }`}
+                        : `${state.pending.label} · ${
+                          tileScopeLabel(state.pending)
+                        }${
+                          state.surfaces.length > 0
+                            ? ` · ${state.surfaces.join("")}`
+                            : ""
+                        }`}
                     </button>
                   </>
                 ) : (
@@ -3911,11 +3999,14 @@ export default function ChartPage() {
                             <span className="font-mono text-xs text-[#8AA6AB]">
                               {(item as Tile).entry_kind === "tooth_initial"
                                 ? "mark tooth"
-                                : (item as Tile).needs_surfaces
-                                  ? "pick surfaces"
-                                  : (item as Tile).is_paired
-                                    ? "two visits"
-                                    : "one tap"}
+                                : shapeOfTreatArea((item as Tile).treat_area) ===
+                                    "quadrant" && selection.quads.length > 1
+                                  ? `${selection.quads.length} quadrants`
+                                  : (item as Tile).needs_surfaces
+                                    ? "pick surfaces"
+                                    : (item as Tile).is_paired
+                                      ? "two visits"
+                                      : "one tap"}
                             </span>
                           )}
                         </button>

@@ -1,10 +1,31 @@
 "use client";
 
-// Chairside charting — v19
+// Chairside charting — v19.1
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19.1 Quadrants combine, and the buttons sit where the mouth is.
+//
+//       The four quadrant buttons are now multi-select, and two of them
+//       together mean what they anatomically mean: upper right plus
+//       upper left is the upper arch, lower right plus lower left is the
+//       lower arch, and all four is the whole mouth. The separate arch
+//       buttons are gone, because they said the same thing twice.
+//
+//       Quadrant work is still entered one quadrant at a time. Four
+//       quadrants of scaling are four procedures in OpenDental, and
+//       writing four in one tap needs partial-failure handling this
+//       screen does not have yet, so with more than one quadrant lit the
+//       quadrant tiles step aside and the arch tiles take their place.
+//
+//       A diagonal pair — upper right with lower left — is not a shape
+//       any procedure is charted to, and the panel says so rather than
+//       offering nothing without explanation.
+//
+//       Layout matches the mouth: the right quadrants stack on the left
+//       of the screen and the left quadrants on the right, the way the
+//       operator sees the patient, with Whole mouth between them.
 //   v19 Region charting: quadrant, arch and whole mouth.
 //
 //       Half the work done at Downey does not belong to one tooth, and
@@ -752,9 +773,6 @@ type Procedure = {
 // ---------------------------------------------------------------------
 type Shape = "tooth" | "quadrant" | "arch" | "mouth" | "range";
 
-const QUADRANT_KEYS = ["UR", "UL", "LR", "LL"] as const;
-const ARCH_KEYS = ["U", "L"] as const;
-
 const REGION_LABELS: Record<string, string> = {
   UR: "Upper right",
   UL: "Upper left",
@@ -1387,9 +1405,10 @@ export default function ChartPage() {
   const [provOverride, setProvOverride] = useState<number | null>(null);
 
   const [tooth, setTooth] = useState<string>("");
-  // "" nothing, "MOUTH", one of UR/UL/LR/LL, or U/L. Never set at the
-  // same time as a tooth.
-  const [region, setRegion] = useState<string>("");
+  // Quadrants light independently and combine. Never set at the same
+  // time as a tooth.
+  const [quads, setQuads] = useState<string[]>([]);
+  const [wholeMouth, setWholeMouth] = useState(false);
   const [nav, setNav] = useState<
     Record<Bucket, NavState>
   >({
@@ -2228,7 +2247,8 @@ export default function ChartPage() {
       setFeeSchedule(data.fee_schedule ?? null);
       setProvOverride(null);
       setTooth("");
-      setRegion("");
+      setQuads([]);
+      setWholeMouth(false);
       resetNav();
       setHits([]);
       setQuery("");
@@ -2250,7 +2270,8 @@ export default function ChartPage() {
     setMenu([]);
     setFeeSchedule(null);
     setTooth("");
-    setRegion("");
+    setQuads([]);
+    setWholeMouth(false);
     resetNav();
     // The next patient starts at the chair, not mid-presentation.
     setWorkTab("procedures");
@@ -2326,57 +2347,93 @@ export default function ChartPage() {
 
   const missingSet = useMemo(() => new Set(missingTeeth), [missingTeeth]);
 
-  // What is selected right now, as a shape. Null means nothing is.
-  const selectionShape: Shape | null = tooth !== ""
-    ? "tooth"
-    : region === "MOUTH"
-      ? "mouth"
-      : (QUADRANT_KEYS as readonly string[]).includes(region)
-        ? "quadrant"
-        : (ARCH_KEYS as readonly string[]).includes(region)
-          ? "arch"
-          : null;
+  // What is selected right now, as a shape, and where it should be
+  // written. Two quadrants on the same arch are that arch; all four are
+  // the whole mouth; a diagonal pair is nothing anyone charts to.
+  //
+  // "invalid" is a real answer rather than null, so the panel can say
+  // why it is empty instead of looking broken.
+  const selection = useMemo((): {
+    shape: Shape | "invalid" | null;
+    region: string;
+    label: string;
+  } => {
+    if (tooth !== "") {
+      return { shape: "tooth", region: "", label: `tooth ${tooth}` };
+    }
 
-  // Plain words for the confirm button and the count line, so nobody
-  // has to know that LR means lower right.
-  const selectionLabel = tooth !== ""
-    ? `tooth ${tooth}`
-    : region === "MOUTH"
-      ? "whole mouth"
-      : region === ""
-        ? ""
-        : (REGION_LABELS[region] ?? region).toLowerCase();
+    if (wholeMouth) {
+      return { shape: "mouth", region: "", label: "whole mouth" };
+    }
 
-  // The teeth a region covers, lit on the chart so the selection is
-  // visible rather than only stated. Whole mouth lights nothing: every
-  // tooth outlined reads as a mistake, not a selection.
+    if (quads.length === 0) {
+      return { shape: null, region: "", label: "" };
+    }
+
+    if (quads.length === 1) {
+      const q = quads[0];
+      return {
+        shape: "quadrant",
+        region: q,
+        label: (REGION_LABELS[q] ?? q).toLowerCase(),
+      };
+    }
+
+    const set = new Set(quads);
+
+    if (quads.length === 2 && set.has("UR") && set.has("UL")) {
+      return { shape: "arch", region: "U", label: "upper arch" };
+    }
+
+    if (quads.length === 2 && set.has("LR") && set.has("LL")) {
+      return { shape: "arch", region: "L", label: "lower arch" };
+    }
+
+    if (quads.length === 4) {
+      return { shape: "mouth", region: "", label: "whole mouth" };
+    }
+
+    return { shape: "invalid", region: "", label: "that combination" };
+  }, [tooth, quads, wholeMouth]);
+
+  const selectionShape = selection.shape;
+  const selectionLabel = selection.label;
+
+  // The teeth the selection covers, lit on the chart so it is visible
+  // rather than only stated. Whole mouth lights nothing: every tooth
+  // outlined reads as a mistake, not a selection.
   const regionTeeth = useMemo(() => {
-    if (QUADRANT_TEETH[region]) {
-      return new Set(QUADRANT_TEETH[region].map((n) => String(n)));
+    if (wholeMouth) return new Set<string>();
+
+    const out = new Set<string>();
+    for (const q of quads) {
+      for (const n of QUADRANT_TEETH[q] ?? []) out.add(String(n));
     }
-    if (region === "U") {
-      return new Set(
-        [...QUADRANT_TEETH.UR, ...QUADRANT_TEETH.UL].map((n) => String(n)),
-      );
-    }
-    if (region === "L") {
-      return new Set(
-        [...QUADRANT_TEETH.LL, ...QUADRANT_TEETH.LR].map((n) => String(n)),
-      );
-    }
-    return new Set<string>();
-  }, [region]);
+    return out;
+  }, [quads, wholeMouth]);
 
   function selectTooth(key: string) {
     setTooth((prev) => (prev === key ? "" : key));
-    setRegion("");
+    setQuads([]);
+    setWholeMouth(false);
     resetNav();
     setCommitError("");
   }
 
-  function selectRegion(key: string) {
-    setRegion((prev) => (prev === key ? "" : key));
+  function toggleQuadrant(key: string) {
+    setQuads((prev) =>
+      prev.includes(key) ? prev.filter((q) => q !== key) : [...prev, key]
+    );
     setTooth("");
+    setWholeMouth(false);
+    resetNav();
+    setCommitError("");
+  }
+
+  function toggleWholeMouth() {
+    setWholeMouth((prev) => !prev);
+    setTooth("");
+    setQuads([]);
     resetNav();
     setCommitError("");
   }
@@ -2385,7 +2442,7 @@ export default function ChartPage() {
   // work never is: od-chart refuses it, so showing it would be an
   // invitation to an error message.
   const shapedMenu = useMemo(() => {
-    if (selectionShape === null) return [];
+    if (selectionShape === null || selectionShape === "invalid") return [];
 
     return menu
       .map((c) => ({
@@ -2449,7 +2506,7 @@ export default function ChartPage() {
   // Commit
   // -------------------------------------------------------------------
   async function commit(bucket: Bucket, tile: Tile, surfaces: string[]) {
-    if (selectionShape === null) {
+    if (selectionShape === null || selectionShape === "invalid") {
       setCommitError("Pick a tooth or a region first.");
       return;
     }
@@ -2465,7 +2522,7 @@ export default function ChartPage() {
         tooth_num: tooth,
         // Whole mouth sends nothing. od-chart drops anything that does
         // not belong to the tile's shape either way, so the two agree.
-        region: region === "MOUTH" ? "" : region,
+        region: selection.region,
         surfaces,
         ...(provOverride !== null ? { prov_num: provOverride } : {}),
       });
@@ -3532,43 +3589,58 @@ export default function ChartPage() {
           <>
         {/* Tooth chart */}
         <section className="mt-3 rounded-2xl border border-[#2C4E54] bg-[#122326] p-2 xl:p-3">
-          {/* Region buttons. Everything that is not charted on a single
-              tooth is reached from here: a quadrant for scaling, an arch
-              for a denture, whole mouth for exams, x-rays and cleanings.
-              They sit above the arches because they are chosen before
-              the work, exactly as a tooth is. */}
-          <div className="mb-2 grid grid-cols-4 gap-1 xl:mb-2.5 xl:gap-1.5">
-            {["UR", "UL", "LR", "LL"].map((key) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => selectRegion(key)}
-                className={`h-10 rounded-lg border text-[12px] font-semibold transition-transform active:scale-95 xl:h-12 xl:text-[13.5px] ${
-                  region === key
-                    ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
-                    : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
-                }`}
-              >
-                {REGION_LABELS[key]}
-              </button>
-            ))}
-          </div>
+          {/* Region buttons, laid out the way the operator sees the
+              patient: the right quadrants on the left of the screen,
+              the left quadrants on the right, Whole mouth between them.
 
+              They combine. Two on the same arch mean that arch, all
+              four mean the whole mouth. */}
           <div className="mb-2 grid grid-cols-3 gap-1 xl:mb-2.5 xl:gap-1.5">
-            {["U", "L", "MOUTH"].map((key) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => selectRegion(key)}
-                className={`h-10 rounded-lg border text-[12px] font-semibold transition-transform active:scale-95 xl:h-12 xl:text-[13.5px] ${
-                  region === key
-                    ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
-                    : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
-                }`}
-              >
-                {key === "MOUTH" ? "Whole mouth" : REGION_LABELS[key]}
-              </button>
-            ))}
+            <div className="grid gap-1 xl:gap-1.5">
+              {["UR", "LR"].map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => toggleQuadrant(key)}
+                  className={`h-10 rounded-lg border text-[12px] font-semibold transition-transform active:scale-95 xl:h-12 xl:text-[13.5px] ${
+                    quads.includes(key)
+                      ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                      : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
+                  }`}
+                >
+                  {REGION_LABELS[key]}
+                </button>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleWholeMouth}
+              className={`rounded-lg border text-[13px] font-semibold transition-transform active:scale-95 xl:text-[15px] ${
+                wholeMouth
+                  ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                  : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
+              }`}
+            >
+              Whole mouth
+            </button>
+
+            <div className="grid gap-1 xl:gap-1.5">
+              {["UL", "LL"].map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => toggleQuadrant(key)}
+                  className={`h-10 rounded-lg border text-[12px] font-semibold transition-transform active:scale-95 xl:h-12 xl:text-[13.5px] ${
+                    quads.includes(key)
+                      ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                      : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
+                  }`}
+                >
+                  {REGION_LABELS[key]}
+                </button>
+              ))}
+            </div>
           </div>
 
           {[UPPER, LOWER].map((arch, archIndex) => (
@@ -3623,13 +3695,14 @@ export default function ChartPage() {
             <span className="ml-auto">
               {tooth !== ""
                 ? `Tooth ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`
-                : region === "MOUTH"
-                  ? "Whole mouth"
-                  : region !== ""
-                    ? `${REGION_LABELS[region] ?? region}${
-                        regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""
-                      }`
-                    : "Nothing selected"}
+                : selectionShape === null
+                  ? "Nothing selected"
+                  : selectionShape === "invalid"
+                    ? `${quads.length} quadrants · not a chartable area`
+                    : `${
+                      selectionLabel.charAt(0).toUpperCase() +
+                      selectionLabel.slice(1)
+                    }${regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""}`}
             </span>
           </div>
         </section>
@@ -3714,6 +3787,17 @@ export default function ChartPage() {
                     <span className="max-w-[26ch] text-[13px] text-[#8AA6AB]">
                       Tap a tooth to chart tooth work, or a region above
                       it for a quadrant, an arch, or the whole mouth.
+                    </span>
+                  </div>
+                ) : selectionShape === "invalid" ? (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2 p-8 text-center">
+                    <strong className="text-[15px] font-medium">
+                      Nothing is charted across those quadrants
+                    </strong>
+                    <span className="max-w-[30ch] text-[13px] text-[#8AA6AB]">
+                      Two quadrants on the same arch make that arch, and
+                      all four make the whole mouth. Anything else has to
+                      be entered a quadrant at a time.
                     </span>
                   </div>
                 ) : cats.length === 0 ? (

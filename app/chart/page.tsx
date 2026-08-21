@@ -1,10 +1,52 @@
 "use client";
 
-// Chairside charting — v19.4
+// Chairside charting — v19.6
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19.6 Tapping a tooth-state tile again takes it off.
+//
+//       od-chart v15 made those tiles toggles, so the same button
+//       marks a tooth primary and unmarks it. This is the screen
+//       catching up: a cleared state has to leave the chart, not
+//       join it.
+//
+//       Marking a tooth missing and then unmarking it previously
+//       left the tooth struck through until the patient was closed
+//       and reopened, because the missing list was only ever added
+//       to. It is now removed from on a clear.
+//
+//       The session list says "removed" rather than listing a
+//       deletion as though something had been entered, and offers
+//       no undo — there is no id to undo, and the tile itself is
+//       the way back.
+//
+//   v19.5 A refused write says what actually happened.
+//
+//       "OpenDental would not change D2950 #20" was every failure,
+//       worded identically, with nothing to act on. The row it named
+//       turned out to be holding the requested values when the
+//       database was read afterwards, so the message was not even
+//       reliably true — and there was no way to tell that from the
+//       screen.
+//
+//       The information existed the whole time. od-plan reports the
+//       field, what was asked for and what it read back, precisely
+//       so a write that was accepted and quietly ignored can be told
+//       apart from one that worked. Two places threw it away:
+//       describeFailure only ever looked at error and detail, and
+//       the bulk loop caught the exception and discarded the message
+//       with it.
+//
+//       Both now carry it through, so the same failure reads
+//       "Priority: asked for 742, OpenDental kept 146". Reasons are
+//       deduplicated — twenty rows refused for one reason is one
+//       sentence, not twenty.
+//
+//       Nothing about when a write is judged to have failed has
+//       changed. This only makes the failure legible.
+//
 //   v19.4 The plan reads in plain English.
 //
 //       Every list showed OpenDental's Descript, which on a
@@ -1299,6 +1341,25 @@ function describeFailure(payload: unknown): string {
   const code = String(p.resolved_code ?? "").trim();
   if (code !== "") parts.push(`(code ${code})`);
 
+  // What was asked for against what the database actually holds.
+  // od-plan sends these on every field write and they are the whole
+  // point of reading the row back — without them, a write OpenDental
+  // accepted and ignored is indistinguishable from one that worked,
+  // which is the failure this app exists to catch.
+  const field = String(p.field ?? "").trim();
+  const requested = p.requested;
+  const stored = p.stored;
+
+  if (
+    field !== "" && requested !== undefined && requested !== null &&
+    stored !== undefined && stored !== null
+  ) {
+    parts.push(
+      `${field}: asked for ${String(requested)}, ` +
+        `OpenDental kept ${String(stored)}`,
+    );
+  }
+
   return parts.length > 0 ? parts.join(" — ") : "That didn't work.";
 }
 
@@ -2024,6 +2085,7 @@ export default function ChartPage() {
     setPlanError("");
 
     const failed: string[] = [];
+    const reasons: string[] = [];
     const removed: PlanRow[] = [];
 
     for (const row of rows) {
@@ -2050,10 +2112,15 @@ export default function ChartPage() {
             priority: pendingAction.def_num,
           });
         }
-      } catch {
+      } catch (caught) {
         failed.push(
           `${row.proc_code}${row.tooth === "" ? "" : ` #${row.tooth}`}`,
         );
+        // The reason, not just the row. Kept separately and
+        // deduplicated: twenty rows refused for the same reason is
+        // one sentence worth reading, not twenty worth scrolling.
+        const why = caught instanceof Error ? caught.message.trim() : "";
+        if (why !== "" && !reasons.includes(why)) reasons.push(why);
       }
     }
 
@@ -2062,9 +2129,13 @@ export default function ChartPage() {
     setSelected(new Set());
 
     if (failed.length > 0) {
-      setPlanError(
-        `OpenDental would not change ${failed.join(", ")}. Everything else went through.`,
-      );
+      const named = `OpenDental would not change ${failed.join(", ")}.`;
+      const why = reasons.length > 0 ? ` ${reasons.join(" ")}` : "";
+      const rest = rows.length > failed.length
+        ? " Everything else went through."
+        : "";
+
+      setPlanError(`${named}${why}${rest}`);
     }
 
     // A delete is settled here rather than by re-reading. The rows hold
@@ -2759,12 +2830,20 @@ export default function ChartPage() {
 
       const stamp = Date.now();
 
+      // A tooth state that was taken off rather than put on. Said
+      // plainly in the session list, because "Primary / Permanent"
+      // sitting there on its own reads as though a tooth had just
+      // been marked when the opposite happened.
+      const wasCleared = data.cleared === true;
+
       const entries: LedgerEntry[] = returned.map((line, index) => ({
         key: `${data.entry_kind}-${line.od_id ?? "none"}-${stamp}-${index}`,
         bucket,
         entry_kind: data.entry_kind,
         od_id: typeof line.od_id === "number" ? line.od_id : null,
-        label: String(line.label ?? tile.label),
+        label: wasCleared
+          ? `${String(line.label ?? tile.label)} — removed`
+          : String(line.label ?? tile.label),
         code: String(line.proc_code ?? ""),
         descript: String(line.descript ?? ""),
         tooth: String(line.tooth_num ?? tooth),
@@ -2774,7 +2853,9 @@ export default function ChartPage() {
           : String(line.fee),
         provAbbr: String(line.prov_abbr ?? ""),
         removing: false,
-        undoable: line.undoable !== false,
+        // Nothing was created, so there is nothing to undo. The tile
+        // is the way back.
+        undoable: !wasCleared && line.undoable !== false,
       }));
 
       if (data.entry_kind === "tooth_initial") {
@@ -2790,6 +2871,11 @@ export default function ChartPage() {
           // rare action, and the chart cannot end up showing a letter
           // the server would not have given it.
           void refreshToothState();
+        } else if (wasCleared) {
+          // Unmarked. Without this the tooth stayed struck through
+          // until the patient was closed and opened again, which
+          // reads as the removal having failed.
+          setMissingTeeth((prev) => prev.filter((t) => t !== marked));
         } else {
           setMissingTeeth((prev) =>
             prev.includes(marked) ? prev : [...prev, marked]

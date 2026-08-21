@@ -6,8 +6,38 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 14
+// Version: 15
 // Changelog:
+//   v15 A tooth-state tile is a toggle.
+//
+//       Marking a tooth primary could not be undone. The tile only
+//       ever posted, so tapping it a second time filed a duplicate
+//       row and there was no way back to permanent from the tablet
+//       at all — OpenDental has a Permanent button beside its
+//       Primary one, and this had the first without the second.
+//
+//       The existing rows are now read first. A row of the same
+//       type already on that tooth is deleted; anything else is
+//       posted as before. So the same tile marks and unmarks, which
+//       is how the tooth reads on screen: it is primary or it is
+//       not.
+//
+//       This applies to Missing and Hidden too, deliberately. One
+//       tile behaving two different ways depending on which state it
+//       writes would be harder to explain than a tile that always
+//       toggles, and OpenDental offers Not Missing for the same
+//       reason.
+//
+//       cleared says which happened, so the screen can say "removed"
+//       rather than reporting a deletion as an entry. A cleared row
+//       is not undoable: there is no id left to undo, and tapping
+//       the tile again puts it back.
+//
+//       The delete is read back like every other write here. This
+//       API has been seen accepting a call and keeping its own
+//       state, and a tooth that still says primary after being
+//       cleared is exactly the kind of thing nobody notices.
+//
 //   v14 Primary teeth.
 //
 //       A baby tooth is a letter, A to T, and until now this
@@ -1708,17 +1738,103 @@ Deno.serve(async (req: Request) => {
         InitialType: tile.initial_type,
       };
 
+      // What this tooth already carries. The tile marks and unmarks,
+      // so which of the two this tap is depends on what is there —
+      // and posting a second row rather than removing the first is
+      // how you end up with a tooth marked primary twice.
+      const existing = await odFetch(
+        auth,
+        "GET",
+        `/toothinitials?PatNum=${patNum}`,
+      );
+
+      const existingRows = Array.isArray(existing.body)
+        ? (existing.body as Record<string, unknown>[])
+        : [];
+
+      const already = existingRows.find((r) =>
+        String(r.ToothNum ?? "").trim() === toothNum &&
+        String(r.InitialType ?? "") === String(tile.initial_type ?? "")
+      );
+
+      const alreadyNum = already === undefined
+        ? 0
+        : Number(already.ToothInitialNum ?? 0);
+
       if (dryRun) {
         return json({
           ok: true,
           dry_run: true,
           entry_kind: "tooth_initial",
           tile: tile.label,
-          would_post_to: `${OD_BASE_URL}/toothinitials`,
-          would_post: payload,
+          initial_type: tile.initial_type,
+          tooth_num: toothNum,
+          would_clear: alreadyNum > 0,
+          would_post_to: alreadyNum > 0
+            ? `${OD_BASE_URL}/toothinitials/${alreadyNum}`
+            : `${OD_BASE_URL}/toothinitials`,
+          would_post: alreadyNum > 0 ? null : payload,
         });
       }
 
+      // ---------------------------------------------------------------
+      // Already marked: take it off.
+      // ---------------------------------------------------------------
+      if (alreadyNum > 0) {
+        const removed = await odFetch(
+          auth,
+          "DELETE",
+          `/toothinitials/${alreadyNum}`,
+        );
+
+        if (removed.http_status < 200 || removed.http_status >= 300) {
+          return json({
+            ok: false,
+            error: `OpenDental would not take ${tile.label} off that tooth.`,
+            detail: removed.body,
+          }, 502);
+        }
+
+        // Proof, not the response code. A state that survives its own
+        // deletion is the kind of thing that is only noticed weeks
+        // later, on a chart that says the wrong thing.
+        const after = await odFetch(
+          auth,
+          "GET",
+          `/toothinitials?PatNum=${patNum}`,
+        );
+
+        const afterRows = Array.isArray(after.body)
+          ? (after.body as Record<string, unknown>[])
+          : [];
+
+        const stillThere = afterRows.some((r) =>
+          Number(r.ToothInitialNum ?? 0) === alreadyNum
+        );
+
+        return json({
+          ok: !stillThere,
+          dry_run: false,
+          entry_kind: "tooth_initial",
+          tile: tile.label,
+          // Nothing was created, so there is no id and nothing to
+          // undo. Tapping the tile again puts the state back.
+          od_id: null,
+          tooth_num: toothNum,
+          initial_type: tile.initial_type,
+          cleared: !stillThere,
+          undoable: false,
+          error: stillThere
+            ? "OpenDental accepted the removal and kept the tooth as it was."
+            : undefined,
+          committed_by: userData.user.email,
+          committed_at: new Date().toISOString(),
+        });
+      }
+
+      // ---------------------------------------------------------------
+      // Not marked: put it on.
+      // ---------------------------------------------------------------
       const created = await odFetch(auth, "POST", "/toothinitials", payload);
 
       if (created.http_status < 200 || created.http_status >= 300) {
@@ -1739,6 +1855,7 @@ Deno.serve(async (req: Request) => {
         od_id: createdBody.ToothInitialNum ?? null,
         tooth_num: toothNum,
         initial_type: tile.initial_type,
+        cleared: false,
         undoable: true,
         committed_by: userData.user.email,
         committed_at: new Date().toISOString(),

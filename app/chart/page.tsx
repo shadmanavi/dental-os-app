@@ -1,10 +1,64 @@
 "use client";
 
-// Chairside charting — v19.2
+// Chairside charting — v19.4
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19.4 The plan reads in plain English.
+//
+//       Every list showed OpenDental's Descript, which on a
+//       standard code is the official ADA wording. "Resin-based
+//       composite - one surface, anterior" is correct on a claim
+//       and unreadable across a desk, and the patient is looking at
+//       this screen while the coordinator talks.
+//
+//       od-plan v11 returns the layman's term the office wrote
+//       during the code cleanup, so the same row now reads "Front
+//       Filling 1". Four places change together, because they are
+//       all the same plan rows: the Diags list, the treatment plan
+//       tab, the confirmation dialog before a bulk change, and the
+//       not-accepted list after signing. The printed plan follows,
+//       since it is built from these rows.
+//
+//       The ADA description is still sent and still there. Nothing
+//       that bills reads from this.
+//
+//       Roughly 350 codes were never named, so nameOf falls back to
+//       the description rather than leaving a blank line.
+//
+//       The session list at the bottom is deliberately unchanged.
+//       It reads from od-chart, which would need another OpenDental
+//       call on every patient open to say the same thing.
+//
+//   v19.3 Baby teeth.
+//
+//       A slot marked primary in OpenDental offers two teeth, not
+//       one: the permanent number and the baby letter, both live at
+//       once. Patient 37139 at Downey has a crown and a buildup on
+//       tooth 4 while A carries two fillings, so this is not a
+//       tooth changing identity and the number must not be replaced.
+//
+//       The letter is drawn directly beneath its number as its own
+//       tap target, matching where OpenDental puts it. Tapping 4
+//       charts the adult tooth, tapping A charts the baby one, and
+//       every tile behaves the same either way. Dots light per
+//       tooth, so the adult and the baby tooth carry their own.
+//
+//       Only the twenty slots with a baby predecessor can show a
+//       letter. od-chart decides which, and the letter arrives with
+//       the patient rather than being worked out here — the mapping
+//       lives in one place so the two cannot disagree.
+//
+//       A patient with no baby teeth sees no change at all, which
+//       is most of them. The rows only grow taller where a letter
+//       actually exists.
+//
+//       Fixed on the way past: every tooth-state entry was being
+//       added to the missing list, so marking a tooth primary would
+//       have struck it through as if it had been extracted. The two
+//       are now told apart by what was actually written.
+//
 //   v19.2 One tap scales several quadrants.
 //
 //       v19.1 read a pair of lit quadrants one way only: upper right
@@ -857,6 +911,16 @@ type Category = {
   tiles: Tile[];
 };
 
+// A slot offering a baby tooth as well as the permanent one.
+// od-chart reads the flag from OpenDental and derives the letter;
+// has_letter is false for the twelve positions that have no baby
+// predecessor, where the flag exists but there is nothing to draw.
+type PrimaryTooth = {
+  tooth_num: string;
+  letter: string;
+  has_letter: boolean;
+};
+
 type ResolvedProvider = {
   source: string;
   ProvNum: number | null;
@@ -881,6 +945,18 @@ type LedgerEntry = {
   undoable: boolean;
 };
 
+// What to call a procedure on screen. The office's plain-English
+// name where there is one, the ADA description where there is not.
+//
+// One place rather than the same conditional in five render blocks:
+// the confirmation dialog and the printed plan have to agree with
+// the list the coordinator ticked from, or a patient signs for
+// something worded differently to what they were shown.
+function nameOf(row: { layman?: string; descript: string }): string {
+  const layman = (row.layman ?? "").trim();
+  return layman === "" ? row.descript : layman;
+}
+
 // A planned procedure as od-plan returns it. Every money field came
 // from OpenDental; none of it is worked out here.
 type PlanRow = {
@@ -889,6 +965,10 @@ type PlanRow = {
   surf: string;
   proc_code: string;
   descript: string;
+  // The office's own plain-English name, written during the code
+  // cleanup. Absent when talking to od-plan v10 or earlier, and
+  // empty on the codes nobody named — nameOf covers both.
+  layman?: string;
   prov_abbr: string;
   proc_date: string;
   priority_num: number;
@@ -1424,6 +1504,7 @@ export default function ChartPage() {
 
   const [procedures, setProcedures] = useState<Procedure[]>([]);
   const [missingTeeth, setMissingTeeth] = useState<string[]>([]);
+  const [primaryTeeth, setPrimaryTeeth] = useState<PrimaryTooth[]>([]);
   const [menu, setMenu] = useState<Category[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [resolvedProv, setResolvedProv] = useState<ResolvedProvider | null>(null);
@@ -2264,6 +2345,9 @@ export default function ChartPage() {
         ),
       );
       setMissingTeeth(data.missing_teeth ?? []);
+      setPrimaryTeeth(
+        (data.primary_teeth ?? []) as PrimaryTooth[],
+      );
       setMenu(data.menu ?? []);
       // The provider list is not read here any more — it is the
       // office's, loaded once when the office was chosen. The provider
@@ -2289,10 +2373,30 @@ export default function ChartPage() {
     }
   }
 
+  // Re-read only which teeth are missing and which carry a baby
+  // tooth. Deliberately narrow: the selection, the tile panels and
+  // the session list all stay exactly as they were, so nothing the
+  // person was in the middle of is disturbed.
+  async function refreshToothState() {
+    const patNum = patient?.PatNum;
+    if (typeof patNum !== "number" || patNum <= 0) return;
+
+    try {
+      const data = await callChart({ action: "open", pat_num: patNum });
+      setMissingTeeth(data.missing_teeth ?? []);
+      setPrimaryTeeth((data.primary_teeth ?? []) as PrimaryTooth[]);
+    } catch {
+      // The write already succeeded and was read back by od-chart.
+      // Failing to redraw is not worth an error over the top of a
+      // successful entry; the next patient open will show it.
+    }
+  }
+
   function closePatient() {
     setPatient(null);
     setProcedures([]);
     setMissingTeeth([]);
+    setPrimaryTeeth([]);
     setMenu([]);
     setFeeSchedule(null);
     setTooth("");
@@ -2372,6 +2476,32 @@ export default function ChartPage() {
   }, [procedures, sessionMarks, removedIds]);
 
   const missingSet = useMemo(() => new Set(missingTeeth), [missingTeeth]);
+
+  // Permanent tooth number to the baby letter sitting under it. Only
+  // the slots that actually have one: a Primary flag on a permanent
+  // molar is legal in OpenDental and draws nothing, so it is left
+  // out here rather than drawn as an empty box.
+  const letterByTooth = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const p of primaryTeeth) {
+      if (p.has_letter && p.letter !== "") map[p.tooth_num] = p.letter;
+    }
+    return map;
+  }, [primaryTeeth]);
+
+  // Whether any letter is on screen at all. A patient with none —
+  // most adults — gets exactly the chart they had before.
+  const hasPrimary = useMemo(
+    () => Object.keys(letterByTooth).length > 0,
+    [letterByTooth],
+  );
+
+  // The letters themselves, for telling a tapped baby tooth from a
+  // tapped permanent one when only the label is in hand.
+  const letterSet = useMemo(
+    () => new Set(Object.values(letterByTooth)),
+    [letterByTooth],
+  );
 
   // What is selected right now. A selection can satisfy more than one
   // shape at the same time — two upper quadrants are both "two
@@ -2649,9 +2779,22 @@ export default function ChartPage() {
 
       if (data.entry_kind === "tooth_initial") {
         const marked = entries[0]?.tooth ?? tooth;
-        setMissingTeeth((prev) =>
-          prev.includes(marked) ? prev : [...prev, marked]
-        );
+        const kind = String(data.initial_type ?? "");
+
+        // Missing and Primary both write a tooth-state row, and
+        // until now both landed in the missing list — so marking a
+        // tooth primary struck it through as if it had come out.
+        if (kind === "Primary") {
+          // The letter is od-chart's to decide, so the tooth state is
+          // re-read rather than guessed at here. One extra call on a
+          // rare action, and the chart cannot end up showing a letter
+          // the server would not have given it.
+          void refreshToothState();
+        } else {
+          setMissingTeeth((prev) =>
+            prev.includes(marked) ? prev : [...prev, marked]
+          );
+        }
       }
 
       // A line landed and a later one was refused. Nothing is rolled
@@ -3106,7 +3249,10 @@ export default function ChartPage() {
             tooth: r.tooth,
             surf: r.surf,
             code: r.proc_code,
-            description: r.descript,
+            // The printed plan says what the screen said. Signing a
+            // document worded differently to the one on screen is a
+            // consent problem, not a cosmetic one.
+            description: nameOf(r),
             fee: r.fee,
             allowed: r.allowed,
             priIns: figures.pri_ins,
@@ -3747,36 +3893,58 @@ export default function ChartPage() {
             >
               {arch.map((n) => {
                 const key = String(n);
-                const mark = marks[key];
-                const isMissing = missingSet.has(key);
-                const selected = tooth === key;
-                const inRegion = regionTeeth.has(key);
+                const letter = letterByTooth[key] ?? "";
 
+                // One cell, one or two teeth. The permanent number
+                // always sits on top; the baby letter appears beneath
+                // it only where OpenDental says there is one, and
+                // each is its own tap target.
                 return (
-                  <button
-                    key={n}
-                    type="button"
-                    onClick={() => selectTooth(key)}
-                    className={`flex h-11 flex-col items-center justify-center gap-0.5 rounded-lg border font-mono text-[11.5px] font-semibold transition-transform active:scale-95 xl:h-14 xl:gap-1 xl:text-[13px] ${
-                      selected
-                        ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
-                        : inRegion
-                          ? "border-[#EDF3F1] bg-[#204045] text-[#EDF3F1]"
-                          : isMissing
-                            ? "border-[#2C4E54] bg-[#0F1D20] text-[#4A6165] line-through"
-                            : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB]"
-                    }`}
-                  >
-                    <span>{n}</span>
-                    <span className="flex h-1.5 gap-1">
-                      {mark?.existing && (
-                        <span className="h-1.5 w-1.5 rounded-full bg-[#79B4C4]" />
-                      )}
-                      {mark?.diagnosed && (
-                        <span className="h-1.5 w-1.5 rounded-full bg-[#F0A93B]" />
-                      )}
-                    </span>
-                  </button>
+                  <div key={n} className="flex flex-col gap-1">
+                    {[key, letter].filter((t) => t !== "").map((t) => {
+                      const isLetter = t === letter;
+                      const mark = marks[t];
+                      // Missing is recorded against the permanent
+                      // slot, so it never strikes through a letter.
+                      const isMissing = !isLetter && missingSet.has(t);
+                      const selected = tooth === t;
+                      const inRegion = !isLetter && regionTeeth.has(t);
+
+                      return (
+                        <button
+                          key={t}
+                          type="button"
+                          onClick={() => selectTooth(t)}
+                          title={isLetter
+                            ? `Baby tooth ${t}`
+                            : `Tooth ${t}`}
+                          className={`flex flex-col items-center justify-center gap-0.5 rounded-lg border font-mono text-[11.5px] font-semibold transition-transform active:scale-95 xl:gap-1 xl:text-[13px] ${
+                            isLetter ? "h-9 xl:h-11" : "h-11 xl:h-14"
+                          } ${
+                            selected
+                              ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                              : inRegion
+                                ? "border-[#EDF3F1] bg-[#204045] text-[#EDF3F1]"
+                                : isMissing
+                                  ? "border-[#2C4E54] bg-[#0F1D20] text-[#4A6165] line-through"
+                                  : isLetter
+                                    ? "border-[#3C6A5A] bg-[#16292B] text-[#9FC4A8]"
+                                    : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB]"
+                          }`}
+                        >
+                          <span>{t}</span>
+                          <span className="flex h-1.5 gap-1">
+                            {mark?.existing && (
+                              <span className="h-1.5 w-1.5 rounded-full bg-[#79B4C4]" />
+                            )}
+                            {mark?.diagnosed && (
+                              <span className="h-1.5 w-1.5 rounded-full bg-[#F0A93B]" />
+                            )}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 );
               })}
             </div>
@@ -3789,9 +3957,17 @@ export default function ChartPage() {
             <span className="flex items-center gap-1.5">
               <i className="inline-block h-2 w-2 rounded-full bg-[#F0A93B]" /> Diagnosed
             </span>
+            {hasPrimary && (
+              <span className="flex items-center gap-1.5">
+                <i className="inline-block h-2 w-2 rounded-sm border border-[#3C6A5A] bg-[#16292B]" />
+                {" "}Baby tooth
+              </span>
+            )}
             <span className="ml-auto">
               {tooth !== ""
-                ? `Tooth ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`
+                ? `${
+                  letterSet.has(tooth) ? "Baby tooth" : "Tooth"
+                } ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`
                 : !hasSelection
                   ? "Nothing selected"
                   : `${
@@ -4227,7 +4403,7 @@ export default function ChartPage() {
                         </span>
                       )}
                       <span className="truncate text-[#EDF3F1]">
-                        {row.descript}
+                        {nameOf(row)}
                       </span>
                       {fromThisVisit && !deleted && (
                         <span
@@ -4423,7 +4599,7 @@ export default function ChartPage() {
                       </span>
                     )}
                     <span className="truncate text-[#EDF3F1]">
-                      {row.descript}
+                      {nameOf(row)}
                     </span>
                   </li>
                 ))}
@@ -4550,7 +4726,7 @@ export default function ChartPage() {
                         return (
                           <tr key={row.od_id}>
                             <td className="px-4 py-2.5">
-                              <div className="text-[#EDF3F1]">{row.descript}</div>
+                              <div className="text-[#EDF3F1]">{nameOf(row)}</div>
                               <div className="mt-0.5 font-mono text-[11px] text-[#8AA6AB]">
                                 {row.proc_code}
                                 {row.tooth !== "" && ` · tooth ${row.tooth}`}
@@ -4640,7 +4816,7 @@ export default function ChartPage() {
                               #{row.tooth}
                             </span>
                           )}
-                          <span className="truncate">{row.descript}</span>
+                          <span className="truncate">{nameOf(row)}</span>
                           <span className="ml-auto font-mono text-xs">
                             {money(row.pat)}
                           </span>

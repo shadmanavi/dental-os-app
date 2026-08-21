@@ -6,8 +6,47 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 13
+// Version: 14
 // Changelog:
+//   v14 Primary teeth.
+//
+//       A baby tooth is a letter, A to T, and until now this
+//       function refused one. resolveCode and the tooth guard both
+//       ran Number() over whatever arrived and rejected anything
+//       that was not 1 to 32, so a filling on tooth A could not be
+//       charted at all — it was turned away here, before
+//       OpenDental ever saw it. Downey holds roughly 9,000
+//       procedures on lettered teeth, so this was work the tablet
+//       simply could not do.
+//
+//       Verified against live Downey data rather than assumed. A
+//       toothinitial row of type Primary sits on the permanent
+//       tooth number, not the letter, and it is what makes
+//       OpenDental offer the letter alongside the number. Patient
+//       37139 carries Primary on 3, 4, 5, 9, 12, 13, 14 and 15,
+//       and the letters that appear are A, B, F, I and J — so 4 is
+//       A, 5 is B, 9 is F, 12 is I and 13 is J. The flags on 3, 14
+//       and 15 show nothing, because a permanent molar has no baby
+//       predecessor. Marking one is harmless and draws no letter.
+//
+//       Both stay chartable at once. That same patient has a crown
+//       and a buildup on 4 while A carries two fillings, so this is
+//       not a tooth changing identity — it is one slot offering two
+//       teeth, and the person charting picks which they mean.
+//
+//       open now returns primary_teeth: the permanent number, its
+//       letter, and whether that position has a letter at all. The
+//       mapping lives here rather than in the browser so the two
+//       cannot drift.
+//
+//       Classification follows the baby dentition, which has no
+//       premolars: C, D, E, F, G, H, M, N, O, P, Q and R are
+//       anterior, and A, B, I, J, K, L, S and T are molars. A
+//       tooth_class rule therefore never resolves to a bicuspid on
+//       a lettered tooth, and a rule offering only a bicuspid code
+//       is refused by name rather than writing the wrong one.
+//
+//       Nothing about permanent teeth changed shape.
 //   v1  patients / open / commit / undo, built on what od-chart-probe
 //       established against the live Downey database.
 //   v2  OpenDental refused ProcStatus 'EC' on both POST and PUT, so the
@@ -215,10 +254,72 @@ function json(body: unknown, status = 200): Response {
 const ANTERIOR = new Set([6, 7, 8, 9, 10, 11, 22, 23, 24, 25, 26, 27]);
 const BICUSPID = new Set([4, 5, 12, 13, 20, 21, 28, 29]);
 
+// The baby dentition, A to T. Which permanent slot each letter sits
+// in was read off live Downey data, not assumed: patient 37139's
+// Primary flags on 4, 5, 9, 12 and 13 produced A, B, F, I and J.
+//
+// The twelve positions absent from this map — the permanent molars
+// and third molars — have no baby predecessor. OpenDental still
+// accepts a Primary flag on them; it simply draws no letter.
+const PRIMARY_LETTER: Record<number, string> = {
+  4: "A",
+  5: "B",
+  6: "C",
+  7: "D",
+  8: "E",
+  9: "F",
+  10: "G",
+  11: "H",
+  12: "I",
+  13: "J",
+  20: "K",
+  21: "L",
+  22: "M",
+  23: "N",
+  24: "O",
+  25: "P",
+  26: "Q",
+  27: "R",
+  28: "S",
+  29: "T",
+};
+
+// A baby tooth has no premolars, so a lettered tooth is either an
+// incisor, a canine or a molar. Never a bicuspid.
+const PRIMARY_ANTERIOR = new Set([
+  "C",
+  "D",
+  "E",
+  "F",
+  "G",
+  "H",
+  "M",
+  "N",
+  "O",
+  "P",
+  "Q",
+  "R",
+]);
+
+const PRIMARY_MOLAR = new Set(["A", "B", "I", "J", "K", "L", "S", "T"]);
+
+// Letters only, and only the twenty that exist. Supernumerary teeth
+// (AS to TS) are deliberately not accepted: OpenDental does not draw
+// them on the chart, so there would be nothing to tap.
+function isPrimaryTooth(toothNum: string): boolean {
+  const t = toothNum.trim().toUpperCase();
+  return PRIMARY_ANTERIOR.has(t) || PRIMARY_MOLAR.has(t);
+}
+
 type ToothClass = "anterior" | "bicuspid" | "molar";
 
 function toothClass(toothNum: string): ToothClass | null {
-  const n = Number(toothNum);
+  const t = toothNum.trim().toUpperCase();
+
+  if (PRIMARY_ANTERIOR.has(t)) return "anterior";
+  if (PRIMARY_MOLAR.has(t)) return "molar";
+
+  const n = Number(t);
   if (!Number.isInteger(n) || n < 1 || n > 32) return null;
   if (ANTERIOR.has(n)) return "anterior";
   if (BICUSPID.has(n)) return "bicuspid";
@@ -671,12 +772,25 @@ function resolveCode(
 
     const klass = toothClass(toothNum);
     if (klass === null) {
-      return { ok: false, error: `Tooth ${toothNum} is not 1-32.` };
+      return {
+        ok: false,
+        error: `Tooth ${toothNum} is not 1-32 or A-T.`,
+      };
     }
 
     const code = rule[klass];
     if (typeof code !== "string" || code === "") {
-      return { ok: false, error: `No code set for a ${klass} tooth.` };
+      // A baby tooth is never a bicuspid, so a rule written only for
+      // permanent teeth can have no answer here. Saying so beats
+      // writing a code that fits a different tooth.
+      return isPrimaryTooth(toothNum)
+        ? {
+          ok: false,
+          error:
+            `This tile has no code for baby tooth ${toothNum.toUpperCase()}. ` +
+            `Enter it in OpenDental.`,
+        }
+        : { ok: false, error: `No code set for a ${klass} tooth.` };
     }
 
     return { ok: true, procCode: code, why: klass };
@@ -1327,6 +1441,27 @@ Deno.serve(async (req: Request) => {
       .filter((r) => String(r.InitialType ?? "") === "Hidden")
       .map((r) => String(r.ToothNum ?? ""));
 
+    // Which slots are offering a baby tooth as well as the permanent
+    // one. The flag sits on the permanent number; the letter is
+    // derived here so the browser never has to know the mapping.
+    //
+    // has_letter is false for the twelve positions with no baby
+    // predecessor. The flag is still reported, because OpenDental
+    // stores it and hiding it would make the two screens disagree,
+    // but there is no second tooth to draw.
+    const primaryTeeth = initialRows
+      .filter((r) => String(r.InitialType ?? "") === "Primary")
+      .map((r) => {
+        const toothNum = String(r.ToothNum ?? "").trim();
+        const letter = PRIMARY_LETTER[Number(toothNum)] ?? "";
+        return {
+          tooth_num: toothNum,
+          letter,
+          has_letter: letter !== "",
+        };
+      })
+      .filter((t) => t.tooth_num !== "");
+
     const apptRows = Array.isArray(appts.body)
       ? (appts.body as Record<string, unknown>[])
       : [];
@@ -1467,6 +1602,9 @@ Deno.serve(async (req: Request) => {
       procedures,
       missing_teeth: missingTeeth,
       hidden_teeth: hiddenTeeth,
+      // Empty for a patient with no baby teeth, which is most of
+      // them. A caller built against v13 ignores the key.
+      primary_teeth: primaryTeeth,
       menu: menu.map((c) => ({
         ...c,
         tiles: c.tiles.map((t) => {
@@ -1552,6 +1690,18 @@ Deno.serve(async (req: Request) => {
         return json({ ok: false, error: "Pick a tooth first." }, 400);
       }
 
+      // Missing, Hidden and Primary are all recorded against the
+      // permanent slot in OpenDental, never against the letter. A
+      // baby tooth arriving here would write a row nothing can read.
+      if (isPrimaryTooth(toothNum)) {
+        return json({
+          ok: false,
+          error:
+            `${tile.label} is recorded against the permanent tooth, ` +
+            `not the baby one. Pick the number rather than the letter.`,
+        }, 400);
+      }
+
       const payload = {
         PatNum: patNum,
         ToothNum: toothNum,
@@ -1621,7 +1771,15 @@ Deno.serve(async (req: Request) => {
           error: `${tile.label} is charted on a tooth. Pick a tooth first.`,
         }, 400);
       }
-      effectiveTooth = toothNum;
+
+      // A letter goes to OpenDental as a letter. procedurelog holds
+      // A-T in the same ToothNum column as a permanent number, so
+      // nothing downstream changes — but the casing is normalised
+      // here so a lower-case a from the browser is not written as a
+      // tooth OpenDental will not recognise.
+      effectiveTooth = isPrimaryTooth(toothNum)
+        ? toothNum.trim().toUpperCase()
+        : toothNum;
       effectiveSurfaces = surfaces;
     } else if (shape === "quadrant") {
       const quads = regions.filter((r) => QUADRANTS.includes(r));

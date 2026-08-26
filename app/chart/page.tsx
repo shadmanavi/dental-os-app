@@ -1,10 +1,26 @@
 "use client";
 
-// Chairside charting — v19.7
+// Chairside charting — v19.8
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19.8 The payment type is a dropdown of the office's own list.
+//
+//       v19.7 sent one fixed tender name for both offices, and there
+//       is no such thing. Downey spells it "[.025] Credit Card - M1",
+//       with a trailing space nobody can see, and Maywood spells it
+//       "[.025]Credit Card". Neither is "Credit Card (Clover)", which
+//       exists at neither, so the first live test was refused.
+//
+//       The list is now read from the office through od-payment and
+//       shown as a dropdown, so the coordinator picks a name that is
+//       certain to exist. It lands on the first entry that reads as a
+//       credit card, and on the top of the list if there is none.
+//
+//       Nothing here needs changing when an office renames a payment
+//       type, which is the point.
+//
 //   v19.7 The Financing tab takes a payment.
 //
 //       The coordinator runs the card on the Clover terminal as she
@@ -1084,19 +1100,28 @@ type DefOption = {
   order: number;
 };
 
-// The tender the tablet records against. The card is run on the Clover
-// terminal; this is only the name of the OpenDental payment type the
-// entry is filed under, and od-payment looks the number up by this
-// name in the office's own list on every call. If an office does not
-// have a payment type by this name the call fails and says so, naming
-// the office and listing what that office does have.
-const CLOVER_TENDER = "Credit Card (Clover)";
+// Which payment type the picker lands on when the screen opens.
+//
+// The two offices spell the same tender differently — Downey has
+// "[.025] Credit Card - M1" and Maywood has "[.025]Credit Card" — so
+// the default cannot be one fixed name. It is the first entry in that
+// office's own list that reads as a credit card, and the top of the
+// list if there is none. The coordinator can change it either way.
+const DEFAULT_TENDER_MATCH = "credit card";
+
+function defaultTender(list: { label: string }[]): string {
+  const card = list.find((t) =>
+    t.label.toLowerCase().includes(DEFAULT_TENDER_MATCH),
+  );
+  return card?.label ?? list[0]?.label ?? "";
+}
 
 // What a payment will be, held while the confirmation is on screen.
 // Nothing reaches OpenDental until the second tap.
 type PendingPayment = {
   amount: number;
   presenter: string;
+  tender: string;
   terminal_ref: string;
   note: string;
 };
@@ -1538,6 +1563,12 @@ export default function ChartPage() {
   const [payAmount, setPayAmount] = useState("");
   const [payRef, setPayRef] = useState("");
   const [payNote, setPayNote] = useState("");
+  // The office's own payment types. Read once per office, like the
+  // priority and diagnosis lists, because they belong to the office
+  // and not to the patient.
+  const [tenders, setTenders] = useState<{ def_num: number; label: string }[]>([]);
+  const [tenderError, setTenderError] = useState("");
+  const [tender, setTender] = useState("");
   const [pendingPayment, setPendingPayment] = useState<PendingPayment | null>(null);
   const [payBusy, setPayBusy] = useState(false);
   const [payResult, setPayResult] = useState<PaymentResult | null>(null);
@@ -1910,13 +1941,19 @@ export default function ChartPage() {
       return;
     }
 
+    if (tender === "") {
+      setPayError("Choose a payment type.");
+      return;
+    }
+
     setPendingPayment({
       amount: Math.round(amount * 100) / 100,
       presenter: activePresenter,
+      tender,
       terminal_ref: payRef.trim(),
       note: payNote.trim(),
     });
-  }, [patient, activePresenter, payAmount, payRef, payNote]);
+  }, [patient, activePresenter, tender, payAmount, payRef, payNote]);
 
   const runPayment = useCallback(async () => {
     if (pendingPayment === null || patient === null) return;
@@ -1928,7 +1965,7 @@ export default function ChartPage() {
       action: "create",
       pat_num: patient.PatNum,
       amount: pendingPayment.amount,
-      tender: CLOVER_TENDER,
+      tender: pendingPayment.tender,
       presenter: pendingPayment.presenter,
       terminal_ref: pendingPayment.terminal_ref,
       note: pendingPayment.note,
@@ -2079,12 +2116,38 @@ export default function ChartPage() {
         // resolved for this patient, which is the right one nearly
         // always.
       }
+
+      // The payment types this office offers. Read from the office
+      // rather than listed in the app, because the 2 offices spell the
+      // same tender differently and a list written here would go stale
+      // the first time somebody edits one.
+      try {
+        const data = await callPayment({ action: "tenders" });
+        if (!active) return;
+
+        if (data.ok === true) {
+          const list = (data.tenders ?? []) as { def_num: number; label: string }[];
+          setTenders(list);
+          setTender(defaultTender(list));
+          setTenderError("");
+        } else {
+          setTenders([]);
+          setTenderError(
+            String(data.error ?? "This office's payment types could not be read."),
+          );
+        }
+      } catch {
+        if (active) {
+          setTenders([]);
+          setTenderError("This office's payment types could not be read.");
+        }
+      }
     })();
 
     return () => {
       active = false;
     };
-  }, [officeSlug, callPlan, callChart]);
+  }, [officeSlug, callPlan, callChart, callPayment]);
 
   // A row that OpenDental has just deleted leaves this screen in two
   // different speeds, on purpose.
@@ -5324,7 +5387,7 @@ export default function ChartPage() {
             <div className="overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
               <div className="border-b border-[#2C4E54] px-5 py-3">
                 <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase text-[#EDF3F1]">
-                  {CLOVER_TENDER}
+                  Take a payment
                 </h2>
                 <p className="mt-1 text-xs text-[#8AA6AB]">
                   Run the card on the terminal first. This records the
@@ -5353,6 +5416,41 @@ export default function ChartPage() {
                       className="w-40 rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 font-mono text-lg text-[#EDF3F1] placeholder:text-[#4A6165] focus:border-[#79B4C4] focus:outline-none"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="pay-tender"
+                    className="text-[11px] font-bold tracking-[0.06em] uppercase text-[#8AA6AB]"
+                  >
+                    Payment type
+                  </label>
+                  {/* This office's own list, read from OpenDental. The
+                      2 offices spell the same tender differently, so
+                      there is nothing to hard-code here. */}
+                  <select
+                    id="pay-tender"
+                    value={tender}
+                    onChange={(e) => setTender(e.target.value)}
+                    disabled={tenders.length === 0}
+                    className="mt-1 w-full rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 text-sm text-[#EDF3F1] focus:border-[#79B4C4] focus:outline-none disabled:opacity-40"
+                  >
+                    {tenders.length === 0 && (
+                      <option value="">
+                        {tenderError === ""
+                          ? "Loading…"
+                          : "No payment types available"}
+                      </option>
+                    )}
+                    {tenders.map((t) => (
+                      <option key={t.def_num} value={t.label}>
+                        {t.label}
+                      </option>
+                    ))}
+                  </select>
+                  {tenderError !== "" && (
+                    <p className="mt-1 text-xs text-[#F3B0A2]">{tenderError}</p>
+                  )}
                 </div>
 
                 <div>
@@ -5439,7 +5537,7 @@ export default function ChartPage() {
                       ${(payResult.amount ?? 0).toFixed(2)}
                     </p>
                     <p className="mt-1 text-xs text-[#8AA6AB]">
-                      {payResult.tender ?? CLOVER_TENDER}
+                      {payResult.tender ?? ""}
                       {payResult.presenter
                         ? `, presented by ${payResult.presenter}`
                         : ""}
@@ -5537,7 +5635,7 @@ export default function ChartPage() {
                 </div>
                 <div className="flex items-baseline justify-between px-5 py-2.5">
                   <dt className="text-xs text-[#8AA6AB]">Tender</dt>
-                  <dd className="text-sm text-[#EDF3F1]">{CLOVER_TENDER}</dd>
+                  <dd className="text-sm text-[#EDF3F1]">{pendingPayment.tender}</dd>
                 </div>
                 {pendingPayment.terminal_ref !== "" && (
                   <div className="flex items-baseline justify-between px-5 py-2.5">

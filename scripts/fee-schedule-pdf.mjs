@@ -6,7 +6,7 @@
 // point it at and writes nothing but the CSV you name.
 //
 // Path: scripts/fee-schedule-pdf.mjs
-// Version: 4
+// Version: 5
 // Changelog:
 //   v1  Initial: coordinate-based reader, one engine for every layout seen
 //       so far - Cigna, Delta Dental, MetLife and United Concordia.
@@ -29,6 +29,12 @@
 //       D8210 from being called ambiguous by its ortho neighbours. The
 //       last code on a page is given 3 rows and no more, so the page
 //       footer stops landing in its description.
+//   v5  The thousands separator is optional. United Health Care writes
+//       $1029.00 with no comma, and the pattern insisted on one, so
+//       every 4-figure amount on that schedule read as not-money and
+//       its code came out unpriced - 144 of them, crowns, bridges and
+//       implants among them. The 5 schedules read before this change
+//       regenerate byte-identical, so nothing already pushed moved.
 //
 // Why coordinates rather than extracted text: the text layer of these
 // PDFs is not in reading order. On the Cigna schedule the plain text
@@ -62,8 +68,13 @@ import { pathToFileURL } from "node:url";
 // Payer schedules carry no custom office codes, so this stays strict.
 const CODE = /^D\d{4}[A-Za-z]?$/;
 
-// Money as one piece: $1,234.56, $34, 1234.56
-const MONEY = /^\$?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?$/;
+// Money as one piece: $1,234.56, $1029.00, $34, 8.00
+//
+// The thousands separator is optional because payers disagree about
+// it. Delta and MetLife write $4,700.00; United Health Care writes
+// $1029.00 with no comma at all, and a pattern that insisted on one
+// silently dropped every crown on that schedule.
+const MONEY = /^\$?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?$/;
 
 // Codes belong to the same column when their left edges are this close.
 // United Concordia prints its 2 code columns at x 37.5 and x 301, so

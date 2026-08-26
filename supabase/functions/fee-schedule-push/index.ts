@@ -6,11 +6,27 @@
 // that do not are created. Every attempt is written to fee_push_log.
 //
 // Deploy path: supabase/functions/fee-schedule-push/index.ts
-// Version: 2
+// Version: 3
 // Changelog:
 //   v1  Initial: batched push, add vs update, audit logging.
 //   v2  Verifies the audit log write. If a log row cannot be saved the push
 //       stops rather than writing fees with no trail.
+//   v3  A create refused as already existing becomes an update.
+//
+//       A schedule created fresh is staged as empty, because at staging
+//       time it does not exist and there is nothing to read. OpenDental
+//       can still hold a fee row against that schedule number, and the
+//       create then comes back "A fee with that information already
+//       exists in the database." The row was marked failed and the fee
+//       never changed, so the schedule quietly kept an old amount —
+//       D1556 at Maywood, and re-running could not clear it because the
+//       second run made the same create.
+//
+//       The push now looks the fee up on that schedule for that code
+//       and updates it. Both attempts are written to fee_push_log. If
+//       the fee cannot be found after all, the row still fails, but it
+//       says the fee was not there to find rather than repeating
+//       OpenDental's message.
 //
 // Runs in batches. OpenDental has no bulk fee endpoint, so each fee is
 // one HTTP call and a large schedule cannot finish inside a single
@@ -63,6 +79,62 @@ function isTrue(value: unknown): boolean {
   if (value === true) return true;
   if (typeof value === "string") return value.trim().toLowerCase() === "true";
   return false;
+}
+
+// How many fee rows to ask for at a time when hunting for one that
+// OpenDental says already exists.
+const FEE_PAGE_SIZE = 1000;
+const FEE_MAX_PAGES = 20;
+
+// OpenDental's refusal when a fee for this schedule and code is already
+// in the table. Matched on the wording because the API returns 400 with
+// a bare string and no code to test.
+function saysAlreadyExists(responseText: string): boolean {
+  return responseText.toLowerCase().includes("already exists");
+}
+
+// The FeeNum of the fee already sitting on this schedule for this code.
+//
+// Only called when a create was refused as a duplicate. A new schedule
+// is staged as empty, because at staging time it does not exist yet and
+// has nothing to read — but OpenDental can still hold a fee row against
+// that schedule number, and then the create is refused and the fee is
+// never written. This finds the row so it can be updated instead.
+async function findExistingFeeNum(
+  headers: Record<string, string>,
+  feeSchedNum: number,
+  codeNum: number,
+): Promise<number | null> {
+  for (let page = 0; page < FEE_MAX_PAGES; page++) {
+    const url =
+      `${OD_BASE_URL}/fees?FeeSched=${feeSchedNum}` +
+      `&Limit=${FEE_PAGE_SIZE}&Offset=${page * FEE_PAGE_SIZE}`;
+
+    const res = await fetch(url, { method: "GET", headers });
+    if (!res.ok) return null;
+
+    let rows: unknown;
+    try {
+      rows = JSON.parse(await res.text());
+    } catch {
+      return null;
+    }
+    if (!Array.isArray(rows)) return null;
+
+    for (const row of rows as Record<string, unknown>[]) {
+      // FeeSched is checked as well as filtered on: passing the filter
+      // under the wrong name returns every fee in the database, and
+      // that has happened here before.
+      if (Number(row.FeeSched) !== feeSchedNum) continue;
+      if (Number(row.CodeNum) !== codeNum) continue;
+      const feeNum = Number(row.FeeNum);
+      if (Number.isFinite(feeNum) && feeNum > 0) return feeNum;
+    }
+
+    if ((rows as unknown[]).length < FEE_PAGE_SIZE) break;
+  }
+
+  return null;
 }
 
 type PendingItem = {
@@ -367,10 +439,10 @@ Deno.serve(async (req: Request) => {
       continue;
     }
 
-    const isUpdate = item.od_fee_num !== null;
-    const endpoint = isUpdate ? `/fees/${item.od_fee_num}` : "/fees";
-    const method = isUpdate ? "PUT" : "POST";
-    const requestBody = isUpdate
+    let isUpdate = item.od_fee_num !== null;
+    let endpoint = isUpdate ? `/fees/${item.od_fee_num}` : "/fees";
+    let method = isUpdate ? "PUT" : "POST";
+    let requestBody: Record<string, unknown> = isUpdate
       ? { Amount: String(amount) }
       : { Amount: String(amount), FeeSched: feeSchedNum, CodeNum: codeNum };
 
@@ -378,22 +450,102 @@ Deno.serve(async (req: Request) => {
     let responseText = "";
     let networkError: string | null = null;
 
-    try {
-      const res = await fetch(`${OD_BASE_URL}${endpoint}`, {
-        method,
-        headers: odHeaders,
-        body: JSON.stringify(requestBody),
+    // Set only when a refused create turned into an update of a fee
+    // that was already there, so the row remembers which one it is.
+    let recoveredFeeNum: number | null = null;
+
+    const send = async () => {
+      status = 0;
+      responseText = "";
+      networkError = null;
+      try {
+        const res = await fetch(`${OD_BASE_URL}${endpoint}`, {
+          method,
+          headers: odHeaders,
+          body: JSON.stringify(requestBody),
+        });
+        status = res.status;
+        responseText = await res.text();
+      } catch (err) {
+        networkError = String(err);
+      }
+    };
+
+    await send();
+
+    let succeeded = networkError === null && status >= 200 && status < 300;
+
+    // ---- The fee is already there. Update it rather than give up ----
+    //
+    // A schedule created fresh is staged as empty, because at staging
+    // time it does not exist and has nothing to read. OpenDental can
+    // still be holding a fee row against that schedule number, and then
+    // the create comes back refused and the fee never lands — which is
+    // how D1556 at Maywood ended up with the old amount and a failure
+    // on the screen.
+    //
+    // Both attempts are logged. The first one happened and the audit
+    // trail does not get to skip it.
+    if (!succeeded && !isUpdate && saysAlreadyExists(responseText)) {
+      const { error: firstLogError } = await supabase.from("fee_push_log").insert({
+        fee_schedule_id: schedule.id,
+        fee_schedule_item_id: item.id,
+        office_id: officeRow.id,
+        attempted_by: userData.user.id,
+        http_method: method,
+        endpoint,
+        request_body: requestBody,
+        response_status: status,
+        response_body: { raw: responseText.slice(0, 1000) },
+        succeeded: false,
+        error_message: responseText.slice(0, 300),
       });
-      status = res.status;
-      responseText = await res.text();
-    } catch (err) {
-      networkError = String(err);
+
+      if (firstLogError) {
+        await supabase
+          .from("fee_schedules")
+          .update({
+            status: "failed",
+            error_message: `Audit log write failed: ${firstLogError.message}`,
+          })
+          .eq("id", schedule.id);
+
+        return json({
+          ok: false,
+          schedule: schedule.name,
+          error: "Stopped: the audit log could not be written.",
+          detail: firstLogError.message,
+        }, 500);
+      }
+
+      const existingFeeNum = await findExistingFeeNum(
+        odHeaders,
+        feeSchedNum,
+        codeNum,
+      );
+
+      if (existingFeeNum !== null) {
+        isUpdate = true;
+        recoveredFeeNum = existingFeeNum;
+        endpoint = `/fees/${existingFeeNum}`;
+        method = "PUT";
+        requestBody = { Amount: String(amount) };
+
+        await send();
+        succeeded = networkError === null && status >= 200 && status < 300;
+      } else {
+        // Refused as a duplicate and yet not findable. Saying so beats
+        // repeating OpenDental's message, which sends whoever reads it
+        // looking for a fee that the schedule does not appear to hold.
+        responseText =
+          `OpenDental refused this as already existing, but no fee for ` +
+          `code ${item.proc_code ?? codeNum} was found on schedule ` +
+          `${feeSchedNum}. Set it by hand in OpenDental.`;
+      }
     }
 
-    const succeeded = networkError === null && status >= 200 && status < 300;
-
     // Capture the new FeeNum so a re-run updates instead of duplicating.
-    let newFeeNum: number | null = null;
+    let newFeeNum: number | null = recoveredFeeNum;
     if (succeeded && !isUpdate) {
       try {
         const created = JSON.parse(responseText);

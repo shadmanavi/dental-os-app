@@ -1,10 +1,35 @@
 "use client";
 
-// Chairside charting — v19.6
+// Chairside charting — v19.7
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v19.7 The Financing tab takes a payment.
+//
+//       The coordinator runs the card on the Clover terminal as she
+//       always has. What she had to walk to the front desk for was the
+//       ledger entry afterwards. The Financing tab was a placeholder
+//       reading "Not built yet"; it now holds an amount, an optional
+//       terminal reference and an optional note, and records the
+//       payment through od-payment.
+//
+//       Nothing here moves money and nothing here can take a payment
+//       back. That is why it asks twice: the first tap puts the
+//       patient's name, the amount and the presenter on screen, and
+//       only the second one sends it.
+//
+//       The presenter is the one already chosen on the Procedures tab.
+//       Without one the payment does not start, because the presenter
+//       is the whole reason the note exists.
+//
+//       The tender is fixed at "Credit Card (Clover)" — the number
+//       behind that name differs between the offices, so od-payment
+//       looks it up by name in the office's own list every time.
+//
+//       A payment OpenDental records and then alters is shown field by
+//       field, asked against kept, rather than as a success.
+//
 //   v19.6 Tapping a tooth-state tile again takes it off.
 //
 //       od-chart v15 made those tiles toggles, so the same button
@@ -1059,6 +1084,40 @@ type DefOption = {
   order: number;
 };
 
+// The tender the tablet records against. The card is run on the Clover
+// terminal; this is only the name of the OpenDental payment type the
+// entry is filed under, and od-payment looks the number up by this
+// name in the office's own list on every call. If an office does not
+// have a payment type by this name the call fails and says so, naming
+// the office and listing what that office does have.
+const CLOVER_TENDER = "Credit Card (Clover)";
+
+// What a payment will be, held while the confirmation is on screen.
+// Nothing reaches OpenDental until the second tap.
+type PendingPayment = {
+  amount: number;
+  presenter: string;
+  terminal_ref: string;
+  note: string;
+};
+
+// What came back from od-payment. Kept whole rather than reduced to a
+// boolean, because a payment OpenDental recorded and then altered is
+// the case the coordinator has to be told about precisely.
+type PaymentResult = {
+  ok?: boolean;
+  already_recorded?: boolean;
+  pay_num?: number;
+  amount?: number;
+  tender?: string;
+  presenter?: string;
+  splits?: number;
+  message?: string;
+  error?: string;
+  mismatches?: { field: string; requested: unknown; stored: unknown }[];
+  tenders_available?: string[];
+};
+
 // What a bulk action will do, held while the confirmation is on screen.
 // Nothing is written until it is confirmed.
 type PendingAction =
@@ -1472,6 +1531,17 @@ export default function ChartPage() {
 
   // The bulk action awaiting confirmation, and whether it is running.
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
+
+  // Taking a payment. The amount is held as typed rather than as a
+  // number, so a half-entered "12." does not become 12 under the
+  // coordinator's fingers while she is still typing.
+  const [payAmount, setPayAmount] = useState("");
+  const [payRef, setPayRef] = useState("");
+  const [payNote, setPayNote] = useState("");
+  const [pendingPayment, setPendingPayment] = useState<PendingPayment | null>(null);
+  const [payBusy, setPayBusy] = useState(false);
+  const [payResult, setPayResult] = useState<PaymentResult | null>(null);
+  const [payError, setPayError] = useState("");
   const [bulkBusy, setBulkBusy] = useState(false);
 
   // Signing: flip Diag to Acc, then file the PDF. One button, both
@@ -1710,6 +1780,43 @@ export default function ChartPage() {
     [officeSlug],
   );
 
+  // -------------------------------------------------------------------
+  // Money has its own door, and it does not throw
+  //
+  // Every other call here throws when ok is false, which is right for a
+  // procedure: there is nothing to show. A payment is different. When
+  // OpenDental records the payment and then keeps a value of its own,
+  // the reply carries the payment number and which field it changed,
+  // and that is exactly what the coordinator needs to read. Throwing
+  // would turn the one answer worth having into a red line of text.
+  //
+  // So this returns the body either way and the screen decides.
+  // -------------------------------------------------------------------
+  const callPayment = useCallback(
+    async (payload: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const supabase = createClient();
+      const { data, error } = await supabase.functions.invoke("od-payment", {
+        body: { office: officeSlug, ...payload },
+      });
+
+      if (error) {
+        const ctx = (error as { context?: Response }).context;
+        if (ctx && typeof ctx.json === "function") {
+          try {
+            return (await ctx.json()) as Record<string, unknown>;
+          } catch {
+            // Fall through to the generic message below.
+          }
+        }
+        return { ok: false, error: "The server didn't respond as expected." };
+      }
+
+      return (data ?? { ok: false, error: "The server sent nothing back." }) as
+        Record<string, unknown>;
+    },
+    [officeSlug],
+  );
+
   // Filing the signed plan is its own function, because it takes a
   // document rather than a procedure and has nothing to say about
   // treatment.
@@ -1760,6 +1867,86 @@ export default function ChartPage() {
     },
     [callPlan],
   );
+
+  // -------------------------------------------------------------------
+  // Taking a payment
+  //
+  // The card has already been run on the Clover terminal. Nothing here
+  // moves money; it writes the ledger entry OpenDental would otherwise
+  // get from somebody at the front desk, and stamps who presented.
+  //
+  // Two taps, always. The first builds what is about to happen and puts
+  // it on screen with the patient's name, the amount and the presenter.
+  // The second sends it. There is no way back from this screen once it
+  // is sent — a payment is unwound in OpenDental, not here.
+  // -------------------------------------------------------------------
+  const activePresenter = useMemo(
+    () => presenters.find((p) => p.user_num === presenterNum)?.name ?? "",
+    [presenters, presenterNum],
+  );
+
+  const startPayment = useCallback(() => {
+    setPayError("");
+    setPayResult(null);
+
+    if (patient === null) {
+      setPayError("Open a patient first.");
+      return;
+    }
+
+    // The presenter is the whole point of the note. Without one there
+    // is nothing to stamp, so the payment does not start.
+    if (activePresenter === "") {
+      setPayError(
+        "Choose who is presenting on the Procedures tab before taking a payment.",
+      );
+      return;
+    }
+
+    const amount = Number(payAmount.replace(/[$,\s]/g, ""));
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setPayError("Enter an amount greater than zero.");
+      return;
+    }
+
+    setPendingPayment({
+      amount: Math.round(amount * 100) / 100,
+      presenter: activePresenter,
+      terminal_ref: payRef.trim(),
+      note: payNote.trim(),
+    });
+  }, [patient, activePresenter, payAmount, payRef, payNote]);
+
+  const runPayment = useCallback(async () => {
+    if (pendingPayment === null || patient === null) return;
+
+    setPayBusy(true);
+    setPayError("");
+
+    const result = await callPayment({
+      action: "create",
+      pat_num: patient.PatNum,
+      amount: pendingPayment.amount,
+      tender: CLOVER_TENDER,
+      presenter: pendingPayment.presenter,
+      terminal_ref: pendingPayment.terminal_ref,
+      note: pendingPayment.note,
+    }) as PaymentResult;
+
+    setPayBusy(false);
+    setPendingPayment(null);
+    setPayResult(result);
+
+    // Only a clean result clears the form. Anything else leaves what
+    // was typed on screen, because the coordinator may need to read it
+    // back to somebody or try again with it.
+    if (result.ok === true) {
+      setPayAmount("");
+      setPayRef("");
+      setPayNote("");
+    }
+  }, [pendingPayment, patient, callPayment]);
 
   // -------------------------------------------------------------------
   // Pending work
@@ -2480,6 +2667,15 @@ export default function ChartPage() {
     setPlanError("");
     setSelected(new Set());
     setPendingAction(null);
+    // A typed amount, a terminal reference and a recorded payment all
+    // belong to the patient who just left. None of it follows the next
+    // one onto the screen.
+    setPayAmount("");
+    setPayRef("");
+    setPayNote("");
+    setPendingPayment(null);
+    setPayResult(null);
+    setPayError("");
     // The priority and diagnosis lists are the office's and stay. They
     // are cleared when the office changes, which is the only time they
     // can be wrong.
@@ -5120,19 +5316,259 @@ export default function ChartPage() {
           </section>
         )}
 
+        {/* Financing — how the patient portion gets paid. Today that is
+            one thing: recording a card already run on the Clover
+            terminal. Splitting across visits is not built. */}
         {workTab === "financing" && (
-          <section className="mt-3 rounded-2xl border border-dashed border-[#2C4E54] bg-[#122326] px-6 py-16 text-center">
-            <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase text-[#EDF3F1]">
-              Financing
-            </h2>
-            <p className="mx-auto mt-2 max-w-md text-sm text-[#8AA6AB]">
-              How the patient portion gets paid — in full today, or split
-              across visits.
-            </p>
-            <p className="mt-4 font-mono text-[11px] text-[#4A6165]">
-              Not built yet
+          <section className="mt-3 space-y-3">
+            <div className="overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="border-b border-[#2C4E54] px-5 py-3">
+                <h2 className="text-[13px] font-bold tracking-[0.06em] uppercase text-[#EDF3F1]">
+                  {CLOVER_TENDER}
+                </h2>
+                <p className="mt-1 text-xs text-[#8AA6AB]">
+                  Run the card on the terminal first. This records the
+                  payment onto the patient&rsquo;s account in OpenDental
+                  and stamps who presented.
+                </p>
+              </div>
+
+              <div className="space-y-4 px-5 py-4">
+                <div>
+                  <label
+                    htmlFor="pay-amount"
+                    className="text-[11px] font-bold tracking-[0.06em] uppercase text-[#8AA6AB]"
+                  >
+                    Amount
+                  </label>
+                  <div className="mt-1 flex items-center gap-2">
+                    <span className="font-mono text-lg text-[#8AA6AB]">$</span>
+                    <input
+                      id="pay-amount"
+                      type="text"
+                      inputMode="decimal"
+                      value={payAmount}
+                      onChange={(e) => setPayAmount(e.target.value)}
+                      placeholder="0.00"
+                      className="w-40 rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 font-mono text-lg text-[#EDF3F1] placeholder:text-[#4A6165] focus:border-[#79B4C4] focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="pay-ref"
+                    className="text-[11px] font-bold tracking-[0.06em] uppercase text-[#8AA6AB]"
+                  >
+                    Terminal reference{" "}
+                    <span className="font-normal normal-case tracking-normal">
+                      (optional)
+                    </span>
+                  </label>
+                  <input
+                    id="pay-ref"
+                    type="text"
+                    value={payRef}
+                    onChange={(e) => setPayRef(e.target.value)}
+                    placeholder="From the Clover receipt"
+                    className="mt-1 w-full rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 font-mono text-sm text-[#EDF3F1] placeholder:text-[#4A6165] focus:border-[#79B4C4] focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="pay-note"
+                    className="text-[11px] font-bold tracking-[0.06em] uppercase text-[#8AA6AB]"
+                  >
+                    Note{" "}
+                    <span className="font-normal normal-case tracking-normal">
+                      (optional)
+                    </span>
+                  </label>
+                  <textarea
+                    id="pay-note"
+                    rows={2}
+                    value={payNote}
+                    onChange={(e) => setPayNote(e.target.value)}
+                    className="mt-1 w-full resize-none rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 text-sm text-[#EDF3F1] focus:border-[#79B4C4] focus:outline-none"
+                  />
+                </div>
+
+                <p className="text-xs text-[#8AA6AB]">
+                  Presented by{" "}
+                  <span className="text-[#EDF3F1]">
+                    {activePresenter === ""
+                      ? "— nobody chosen yet"
+                      : activePresenter}
+                  </span>
+                </p>
+
+                {payError !== "" && (
+                  <p className="rounded-lg border border-[#E4674F] bg-[#2A1714] px-3 py-2 text-sm text-[#F3B0A2]">
+                    {payError}
+                  </p>
+                )}
+
+                <button
+                  type="button"
+                  onClick={startPayment}
+                  disabled={payBusy}
+                  className="w-full rounded-lg bg-[#F0A93B] px-4 py-3 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
+                >
+                  Record payment
+                </button>
+              </div>
+            </div>
+
+            {payResult !== null && (
+              <div
+                className={`overflow-hidden rounded-2xl border px-5 py-4 ${
+                  payResult.ok === true
+                    ? "border-[#2C4E54] bg-[#122326]"
+                    : "border-[#E4674F] bg-[#2A1714]"
+                }`}
+              >
+                {payResult.ok === true ? (
+                  <>
+                    <p className="text-sm text-[#EDF3F1]">
+                      {payResult.already_recorded === true
+                        ? "Already recorded — nothing new was created."
+                        : "Recorded in OpenDental."}
+                    </p>
+                    <p className="mt-2 font-mono text-2xl text-[#EDF3F1]">
+                      ${(payResult.amount ?? 0).toFixed(2)}
+                    </p>
+                    <p className="mt-1 text-xs text-[#8AA6AB]">
+                      {payResult.tender ?? CLOVER_TENDER}
+                      {payResult.presenter
+                        ? `, presented by ${payResult.presenter}`
+                        : ""}
+                      {typeof payResult.pay_num === "number"
+                        ? ` — payment ${payResult.pay_num}`
+                        : ""}
+                    </p>
+                    {typeof payResult.splits === "number" && (
+                      <p className="mt-1 text-xs text-[#8AA6AB]">
+                        {payResult.splits === 0
+                          ? "OpenDental created no splits for it."
+                          : `${payResult.splits} split${
+                              payResult.splits === 1 ? "" : "s"
+                            } created.`}
+                      </p>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-semibold text-[#F3B0A2]">
+                      {payResult.error ?? "The payment did not go through."}
+                    </p>
+
+                    {/* What OpenDental refused, asked against kept. A
+                        write it accepted and altered looks exactly like
+                        one that worked unless this is shown. */}
+                    {(payResult.mismatches ?? []).map((m) => (
+                      <p key={m.field} className="mt-2 text-xs text-[#F3B0A2]">
+                        <span className="font-mono">{m.field}</span> — asked for{" "}
+                        <span className="font-mono">{String(m.requested)}</span>,
+                        kept{" "}
+                        <span className="font-mono">{String(m.stored)}</span>
+                      </p>
+                    ))}
+
+                    {(payResult.tenders_available ?? []).length > 0 && (
+                      <p className="mt-2 text-xs text-[#F3B0A2]">
+                        This office has:{" "}
+                        {(payResult.tenders_available ?? []).join(", ")}
+                      </p>
+                    )}
+
+                    {typeof payResult.pay_num === "number" &&
+                      payResult.pay_num > 0 && (
+                        <p className="mt-2 text-xs text-[#F3B0A2]">
+                          Payment {payResult.pay_num} exists on the account.
+                          Check it in OpenDental before trying again.
+                        </p>
+                      )}
+                  </>
+                )}
+              </div>
+            )}
+
+            <p className="px-1 text-[11px] text-[#4A6165]">
+              Splitting the patient portion across visits is not built.
             </p>
           </section>
+        )}
+
+        {/* The second tap. Money does not come back from this screen. */}
+        {pendingPayment !== null && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+            <div className="w-full max-w-md overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="border-b border-[#2C4E54] px-5 py-3">
+                <h3 className="text-[13px] font-bold tracking-[0.06em] uppercase">
+                  Record this payment
+                </h3>
+                <p className="mt-1 text-xs text-[#8AA6AB]">
+                  It goes onto the patient&rsquo;s account in OpenDental
+                  and cannot be undone from this screen.
+                </p>
+              </div>
+
+              <dl className="divide-y divide-[#2C4E54]">
+                <div className="flex items-baseline justify-between px-5 py-2.5">
+                  <dt className="text-xs text-[#8AA6AB]">Patient</dt>
+                  <dd className="text-sm text-[#EDF3F1]">
+                    {patient === null
+                      ? ""
+                      : `${patient.FName} ${patient.LName}`.trim()}
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between px-5 py-2.5">
+                  <dt className="text-xs text-[#8AA6AB]">Amount</dt>
+                  <dd className="font-mono text-lg text-[#EDF3F1]">
+                    ${pendingPayment.amount.toFixed(2)}
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between px-5 py-2.5">
+                  <dt className="text-xs text-[#8AA6AB]">Presented by</dt>
+                  <dd className="text-sm text-[#EDF3F1]">
+                    {pendingPayment.presenter}
+                  </dd>
+                </div>
+                <div className="flex items-baseline justify-between px-5 py-2.5">
+                  <dt className="text-xs text-[#8AA6AB]">Tender</dt>
+                  <dd className="text-sm text-[#EDF3F1]">{CLOVER_TENDER}</dd>
+                </div>
+                {pendingPayment.terminal_ref !== "" && (
+                  <div className="flex items-baseline justify-between px-5 py-2.5">
+                    <dt className="text-xs text-[#8AA6AB]">Terminal ref</dt>
+                    <dd className="font-mono text-sm text-[#EDF3F1]">
+                      {pendingPayment.terminal_ref}
+                    </dd>
+                  </div>
+                )}
+              </dl>
+
+              <div className="flex gap-2 border-t border-[#2C4E54] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setPendingPayment(null)}
+                  disabled={payBusy}
+                  className="flex-1 rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034] disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={runPayment}
+                  disabled={payBusy}
+                  className="flex-1 rounded-lg bg-[#F0A93B] px-4 py-2 text-sm font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
+                >
+                  {payBusy ? "Recording…" : "Record payment"}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </main>

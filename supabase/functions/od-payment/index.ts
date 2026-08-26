@@ -11,17 +11,33 @@
 // totalled by the person who presented.
 //
 // Deploy path: supabase/functions/od-payment/index.ts
-// Version: 1
+// Version: 2
 //
 // Actions:
 //   { "office":"downey", "action":"tenders" }
 //   { "office":"downey", "action":"create", "pat_num":17,
-//     "amount":25.00, "tender":"Credit Card",
+//     "amount":25.00, "tender":"[.025] Credit Card - M1",
 //     "presenter":"Maria Lopez", "terminal_ref":"A1B2C3",
 //     "note":"paid at chair" }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v2  A note that came back with different line breaks is the same
+//       note.
+//
+//       The first live payment, 59586 at Downey, was recorded
+//       correctly — $1.01, the right payment type, one split, the
+//       right words — and the screen still reported it as a failure,
+//       because OpenDental stores a note with Windows line endings
+//       whatever it is sent. The note went in with \n and came back
+//       with \r\n, so a straight comparison would have called every
+//       payment ever taken a mismatch.
+//
+//       The read-back is unchanged in every other respect. It is the
+//       comparison that was too literal, not the check that was wrong.
+//
+//       Also dropped sqlString, which was written and never called.
 //
 //   v1  First build.
 //
@@ -196,10 +212,14 @@ function oneLine(value: string): string {
   return value.replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-// MySQL 5.5 has no JSON and no parameter binding here, so anything that
-// reaches a query is either a number or is quoted and escaped.
-function sqlString(value: string): string {
-  return `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+// Two notes that differ only in how the line breaks are written are the
+// same note. OpenDental stores what it is sent as Windows line endings
+// whatever went in, so a note sent with \n comes back with \r\n and a
+// straight comparison calls every payment a mismatch. Proved on
+// payment 59586 at Downey: identical text, different line breaks.
+function sameNote(a: string, b: string): boolean {
+  const flatten = (s: string) => s.replace(/\r\n?/g, "\n");
+  return flatten(a) === flatten(b);
 }
 
 // OpenDental hands datetimes back as "2026-08-26 00:12:31". Treating
@@ -564,7 +584,7 @@ Deno.serve(async (req: Request) => {
       stored: `${String(stored.PayTypeName ?? "").trim()} (${storedType})`,
     });
   }
-  if (storedNote !== note) {
+  if (!sameNote(storedNote, note)) {
     mismatches.push({ field: "PayNote", requested: note, stored: storedNote });
   }
 

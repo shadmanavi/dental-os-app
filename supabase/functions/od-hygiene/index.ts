@@ -8,13 +8,20 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 1
+// Version: 2
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v2  Missed is no longer counted; it is what the day held at midnight
+//       less what happened. Counting it directly was wrong: a parked
+//       appointment is re-dated on its way into the Cancelled column,
+//       so Saturday 8 August read 39 misses against 28 slots. Booked
+//       for a day gone now comes from the history snapshot, and for a
+//       day ahead from the schedule as it stands.
 //
 //   v1  First build.
 //
@@ -47,18 +54,27 @@
 //     Not the arrival clock. Downey stamps a real arrival time on
 //     nearly every appointment; Maywood has never used it once.
 //
-//   Missed is a hygiene appointment that was broken.
+//   Missed is never counted. It is booked less showed.
 //
-//     Neither office marks appointments broken in place. They move
-//     them into a column called Cancelled at Downey and BROKEN at
-//     Maywood, and the move clears the appointment's hygiene flag, so
-//     nothing in today's schedule remembers it was hygiene. The
-//     appointment history does, and that is what this reads.
+//     Counting it directly does not work. Neither office marks an
+//     appointment broken in place; they move it into a column called
+//     Cancelled at Downey and BROKEN at Maywood, and on the way in
+//     OpenDental rewrites its date and time. Saturday 8 August's are
+//     all 10 minutes long and stacked from 06:40 to 18:30, hours past
+//     closing, so the row no longer says which day it was ever for.
 //
-//     Known gap: an appointment moved to a different day is not yet
-//     counted as missed on the day it was booked for. Caught here are
-//     the ones that keep their date and turn broken, which is what
-//     both offices do.
+//   Booked is what the day was holding at midnight.
+//
+//     For a day gone, from the history. Not the end of the day: the
+//     cancellations are moved out as the day runs, logged at 07:49,
+//     09:11, 12:04 and 15:00 on that Saturday, so by closing time the
+//     hygiene columns look almost untouched.
+//
+//     For a day still ahead, simply what stands in the columns now.
+//
+//     It never reads below showed. Somebody walks in and is seen on a
+//     day the snapshot knew nothing about - 15 August held 26 at
+//     midnight and saw 31 - and negative misses would be nonsense.
 //
 // Required secrets:
 //   OD_DEVELOPER_KEY
@@ -89,7 +105,6 @@ const HYGIENIST = "hygienist";
 // appointment.AptStatus, confirmed against live data.
 const APT_SCHEDULED = 1;
 const APT_COMPLETE = 2;
-const APT_BROKEN = 5;
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -410,59 +425,82 @@ Deno.serve(async (req: Request) => {
 
   if (kept.failed) return fail("Could not read this month's hygiene appointments.", kept.failed);
 
+  // Held now: what stands in those columns today. This is the right
+  // answer for a day still ahead, and the wrong one for a day gone,
+  // because the missed appointments have been moved out of it.
+  const heldNow = new Map<number, number>();
+
   for (const r of kept.rows) {
     const d = dayOf(r.D);
     const row = byDay.get(d);
     if (!row || !rosteredThatDay(d, num(r.Op))) continue;
     const n = num(r.N);
-    row.booked += n;
+    heldNow.set(d, (heldNow.get(d) ?? 0) + n);
     if (num(r.AptStatus) === APT_COMPLETE) row.showed += n;
   }
 
-  // ---- 4. What was booked and did not happen ----
+  // ---- 4. What the day was holding when it began ----
   //
-  // The appointment has been moved into the Cancelled column by now, so
-  // the only thing that still says it was hygiene is its history. Each
-  // one comes back with every column it ever sat in, and it counts only
-  // if one of those was rostered for hygiene on its own day.
-  const broken = await shortQueryAll(
+  // Missed is never counted directly. It is what the day was holding at
+  // midnight less what actually happened, and that avoids the trap the
+  // direct count fell into: a missed appointment gets parked in the
+  // Cancelled column and OpenDental rewrites its date and time on the
+  // way, so its own row no longer says which day it was for.
+  //
+  // Midnight, not the end of the day, because the cancellations are
+  // moved out as the day runs - Saturday 8 August's were logged at
+  // 07:49, 09:11, 12:04 and 15:00. By closing time they have gone from
+  // the hygiene columns, and an end-of-day snapshot would report almost
+  // nothing missed.
+  const snapshot = await shortQueryAll(
     auth,
-    `SELECT DATE(a.AptDateTime) AS D, a.AptNum, ` +
-      `GROUP_CONCAT(DISTINCT h.Op) AS HistOps ` +
-      `FROM appointment a ` +
-      `JOIN histappointment h ON h.AptNum = a.AptNum ` +
-      `WHERE a.AptStatus = ${APT_BROKEN} ` +
-      `AND a.AptDateTime >= '${first}' AND a.AptDateTime < '${afterLast}' ` +
-      `AND h.Op IN (${colList}) ` +
-      `GROUP BY a.AptNum`,
-    60,
+    `SELECT DATE(h.AptDateTime) AS D, COUNT(DISTINCT h.AptNum) AS N ` +
+      `FROM histappointment h ` +
+      `WHERE h.Op IN (${colList}) ` +
+      `AND h.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+      `AND h.AptDateTime >= '${first}' AND h.AptDateTime < '${afterLast}' ` +
+      `AND h.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
+      `                     WHERE h2.AptNum = h.AptNum ` +
+      `                       AND h2.HistDateTStamp < DATE(h.AptDateTime)) ` +
+      `GROUP BY DATE(h.AptDateTime)`,
   );
 
-  if (broken.failed) {
-    return fail("Could not read the appointment history for missed appointments.", broken.failed);
+  if (snapshot.failed) {
+    return fail("Could not read what each day was holding when it began.", snapshot.failed);
   }
 
-  for (const r of broken.rows) {
-    const d = dayOf(r.D);
-    const row = byDay.get(d);
-    if (!row) continue;
-
-    const ops = String(r.HistOps ?? "")
-      .split(",")
-      .map((s) => Number(s.trim()))
-      .filter((n) => Number.isFinite(n));
-
-    if (!ops.some((op) => rosteredThatDay(d, op))) continue;
-
-    row.missed += 1;
-    row.booked += 1;
+  const heldAtMidnight = new Map<number, number>();
+  for (const r of snapshot.rows) {
+    heldAtMidnight.set(dayOf(r.D), num(r.N));
   }
 
   // ---- 5. Finish each day and total the month ----
+  //
+  // A day that has been, or is running, is judged on what it held at
+  // midnight. A day still ahead is judged on what stands in it now.
+  //
+  // Booked never reads below showed. Somebody walked in and was seen on
+  // a day the snapshot did not know about - 15 August had 26 booked at
+  // midnight and 31 seen - and reporting 5 negative misses would be
+  // nonsense.
+  const todayKey = new Date().toISOString().slice(0, 10);
+  const monthKey = `${year}-${pad(month)}`;
+  const todayIsThisMonth = todayKey.slice(0, 7) === monthKey;
+  const todayDay = todayIsThisMonth ? Number(todayKey.slice(8, 10)) : 0;
+  const monthIsPast = monthKey < todayKey.slice(0, 7);
+
   const out: DayRow[] = [];
   for (let d = 1; d <= days; d++) {
     const row = byDay.get(d);
     if (!row) continue;
+
+    const been = monthIsPast || (todayIsThisMonth && d <= todayDay);
+
+    row.booked = been
+      ? Math.max(heldAtMidnight.get(d) ?? 0, row.showed)
+      : heldNow.get(d) ?? 0;
+
+    row.missed = been ? Math.max(0, row.booked - row.showed) : 0;
     row.open = Math.max(0, row.slots - row.booked);
     out.push(row);
   }

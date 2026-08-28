@@ -475,8 +475,9 @@ export default function HygienePage() {
 
         <p className="px-1 text-[11px] text-[#4A6165]">
           Slots come from the hygienists rostered that day and the columns they
-          sit in. Missed counts a hygiene appointment that was booked and turned
-          broken; one moved to another day is not counted yet.
+          sit in. For a day that has been, booked is what stood in those columns
+          at midnight; for a day ahead it is what stands there now. Missed is
+          booked less showed, never counted on its own.
         </p>
       </div>
     </main>

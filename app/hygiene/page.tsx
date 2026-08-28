@@ -1,10 +1,15 @@
 "use client";
 
-// Hygiene Dashboard — v3
+// Hygiene Dashboard — v4
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v4  Booked lists the whole day - what happened, what did not, and
+//       what is still to come - each tagged. It was filtered to the
+//       appointments still marked scheduled, which is nothing at all on
+//       a day gone, so Monday the 3rd read "nothing to show" under 8.
+//
 //   v3  The numbers open the day behind them. Booked, showed, missed
 //       and the RDH count are links; the panel lists the patients, the
 //       column and what was done, read from OpenDental when opened and
@@ -78,6 +83,15 @@ type DayDetail = {
 
 // Which figure was clicked, so the panel opens on the right list.
 type Focus = "showed" | "booked" | "missed" | "rdh";
+
+// Booked means everything the day held — the ones that happened, the
+// ones that did not, and on a day still ahead the ones yet to come.
+// Filtering it to appointments still marked scheduled showed an empty
+// list on every past day.
+function inFocus(focus: Focus): (v: Visit) => boolean {
+  if (focus === "booked") return () => true;
+  return (v) => v.state === focus;
+}
 
 const MONTHS = [
   "January", "February", "March", "April", "May", "June",
@@ -615,7 +629,7 @@ export default function HygienePage() {
                   {panel.focus !== "rdh" && (
                     <ul className="max-h-[26rem] divide-y divide-[#2C4E54]/50 overflow-y-auto">
                       {detail.appointments
-                        .filter((v) => v.state === panel.focus)
+                        .filter(inFocus(panel.focus))
                         .map((v) => (
                           <li key={v.apt_num} className="flex gap-3 px-5 py-2 text-sm">
                             <span className="w-12 shrink-0 font-mono text-xs text-[#8AA6AB]">
@@ -629,10 +643,25 @@ export default function HygienePage() {
                                 {v.codes !== "" ? ` · ${v.codes}` : ""}
                               </span>
                             </span>
+                            {/* On the Booked list the three states sit
+                                together, so each says which it is. */}
+                            {panel.focus === "booked" && (
+                              <span
+                                className={`shrink-0 self-start rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.06em] ${
+                                  v.state === "showed"
+                                    ? "text-[#79B4C4]"
+                                    : v.state === "missed"
+                                      ? "text-[#F3B0A2]"
+                                      : "text-[#8AA6AB]"
+                                }`}
+                              >
+                                {v.state}
+                              </span>
+                            )}
                           </li>
                         ))}
 
-                      {detail.appointments.filter((v) => v.state === panel.focus).length === 0 && (
+                      {detail.appointments.filter(inFocus(panel.focus)).length === 0 && (
                         <li className="px-5 py-6 text-center text-sm text-[#4A6165]">
                           Nothing to show.
                         </li>

@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 5
+// Version: 6
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,13 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v6  Missed is what the day held at midnight and did not do, rather
+//       than booked less showed. A day gains appointments after midnight
+//       and those extras were hiding the misses: 5 August held 16, did
+//       11, and took 4 more - 5 missed, not 1. Booked is now showed plus
+//       missed. The day panel lists only hygiene codes, and SRP is not
+//       among them.
 //
 //   v5  Showed follows the appointment, not the column. Work gets moved
 //       between columns during the day, and judging by the column called
@@ -125,6 +132,22 @@ const CORS_HEADERS = {
 // definition.Category 35 is the provider specialty list.
 const CATEGORY_SPECIALTY = 35;
 const HYGIENIST = "hygienist";
+
+// What counts as hygiene work on the day panel.
+//
+// Scaling and root planing is deliberately absent. The offices do not
+// count it as hygiene for marketing, so D4341 and D4342 never appear
+// here. Everything else a hygienist does on a recall visit is.
+const HYGIENE_CODES = [
+  "D1110", // cleaning, adult
+  "D1120", // cleaning, child
+  "D1206", // fluoride varnish
+  "D1208", // fluoride
+  "D1351", // sealant
+  "D4346", // scaling for gingival inflammation
+  "D4355", // full mouth debridement
+  "D4910", // perio maintenance
+];
 
 // appointment.AptStatus, confirmed against live data.
 const APT_SCHEDULED = 1;
@@ -408,10 +431,16 @@ Deno.serve(async (req: Request) => {
     const dayColList = [...dayCols].join(",");
 
     const patientName = `TRIM(CONCAT(pt.LName, ', ', pt.FName))`;
+    // Only the hygiene codes. The exams and x-rays that ride along on a
+    // recall visit are not what this screen is about, and SRP is not
+    // counted as hygiene at all.
+    const hygList = HYGIENE_CODES.map((c) => `'${c}'`).join(",");
+
     const codes =
       `(SELECT GROUP_CONCAT(pc.ProcCode ORDER BY pc.ProcCode SEPARATOR ' ') ` +
       ` FROM procedurelog pl JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
-      ` WHERE pl.AptNum = a.AptNum AND pl.ProcStatus = ${APT_COMPLETE})`;
+      ` WHERE pl.AptNum = a.AptNum AND pl.ProcStatus = ${APT_COMPLETE} ` +
+      `   AND pc.ProcCode IN (${hygList}))`;
 
     // What stands in those columns now: the ones that happened, and the
     // ones still to come.
@@ -758,18 +787,27 @@ Deno.serve(async (req: Request) => {
     const been = monthIsPast || (todayIsThisMonth && d <= todayDay);
 
     if (been) {
+      const held = heldAtMidnight.get(d) ?? 0;
+      const heldDone = heldAndDone.get(d) ?? 0;
+
+      // Missed is what the day was holding at midnight and did not do.
+      // Taking booked less showed instead was wrong: a day can gain
+      // appointments after midnight, and those extras hid the misses.
+      // 5 August held 16, did 11 of them, and took 4 more that were
+      // never in the snapshot - 5 missed, not 1.
+      row.missed = Math.max(0, held - heldDone);
+
       // Showed follows the appointment, not the column it ended up in.
       // Work gets moved between columns during the day - on 1 August
       // several completed in a column nobody was rostered in - and
       // counting only what sits in the day's columns now would call
       // every one of those a no-show.
-      row.showed = Math.max(row.showed, heldAndDone.get(d) ?? 0);
-      row.booked = Math.max(heldAtMidnight.get(d) ?? 0, row.showed);
+      row.showed = Math.max(row.showed, heldDone);
+      row.booked = row.showed + row.missed;
     } else {
       row.booked = heldNow.get(d) ?? 0;
+      row.missed = 0;
     }
-
-    row.missed = been ? Math.max(0, row.booked - row.showed) : 0;
     row.open = Math.max(0, row.slots - row.booked);
     out.push(row);
   }

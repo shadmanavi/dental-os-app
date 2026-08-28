@@ -1,10 +1,14 @@
 "use client";
 
-// Hygiene Dashboard — v1
+// Hygiene Dashboard — v2
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v2  Month totals moved into the table header so each sits above the
+//       column it totals. Hygienist-days under the Day column. A month
+//       still ahead no longer strikes its capacity through.
+//
 //   v1  First build. Office switch, month paging, and the day table.
 //       Reads od-hygiene; writes nothing anywhere.
 //
@@ -15,10 +19,10 @@
 //   hygienist sits in. Going by the hygiene tick on the operatory would
 //   have missed HG-PN, who works out of two production columns.
 //
-//   Showed is Complete. Missed is a hygiene appointment that turned
-//   broken, found through the appointment history, because both offices
-//   move a missed appointment into a Cancelled column and the move
-//   clears its hygiene flag.
+//   Showed is Complete. Missed is booked less showed, never counted on
+//   its own, because a missed appointment is re-dated on its way into
+//   the Cancelled column. Booked for a day gone is what stood in those
+//   columns at midnight; for a day ahead, what stands there now.
 //
 //   A past day's open slots are struck through. That hour is gone; it
 //   cannot be sold twice.
@@ -281,26 +285,6 @@ export default function HygienePage() {
           </div>
         </div>
 
-        {/* The month in a line: how many hygienists worked at all, and
-            over how many days. The column figures sit in the table
-            itself so they line up with what they are totalling. */}
-        {totals !== null && (
-          <p className="px-1 text-xs text-[#8AA6AB]">
-            <span className="font-mono text-[15px] text-[#EDF3F1]">
-              {totals.hygienists ?? 0}
-            </span>{" "}
-            {(totals.hygienists ?? 0) === 1 ? "hygienist" : "hygienists"} across{" "}
-            <span className="font-mono text-[15px] text-[#EDF3F1]">
-              {totals.rdh_days ?? 0}
-            </span>{" "}
-            hygienist-days, over{" "}
-            <span className="font-mono text-[15px] text-[#EDF3F1]">
-              {totals.days_open}
-            </span>{" "}
-            {totals.days_open === 1 ? "day open" : "days open"}.
-          </p>
-        )}
-
         {error !== "" && (
           <p className="rounded-xl border border-[#E4674F] bg-[#2A1714] px-4 py-3 text-sm text-[#F3B0A2]">
             {error}
@@ -330,10 +314,24 @@ export default function HygienePage() {
                 {/* The month's figures, each under the column it totals. */}
                 {totals !== null && !loading && (
                   <tr className="border-b border-[#2C4E54] font-mono text-[17px] tabular-nums">
-                    <th className="px-3.5 pb-2 pt-0.5 text-left font-sans text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
-                      {MONTHS[month - 1]} {year}
+                    {/* Under the Day column, where every row says how
+                        many hygienists worked: the month's total. */}
+                    <th className="whitespace-nowrap px-3.5 pb-2 pt-0.5 text-left align-top">
+                      <span className="block font-sans text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
+                        {MONTHS[month - 1]} {year}
+                      </span>
+                      <span className="block font-sans text-[11px] font-normal text-[#4A6165]">
+                        <span className="font-mono text-[#8AA6AB]">
+                          {totals.rdh_days ?? 0}
+                        </span>{" "}
+                        RDH days over{" "}
+                        <span className="font-mono text-[#8AA6AB]">
+                          {totals.days_open}
+                        </span>{" "}
+                        open
+                      </span>
                     </th>
-                    <Total value={totals.slots} note={`${totals.days_open} days`} />
+                    <Total value={totals.slots} note="slot hours" />
                     <Total value={totals.booked} note={`${fillRate}% filled`} />
                     <Total value={unsold} note="gone for good" struck={unsold > 0} />
                     <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">

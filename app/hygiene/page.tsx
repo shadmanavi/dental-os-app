@@ -478,8 +478,10 @@ export default function HygienePage() {
 
         <p className="px-1 text-[11px] text-[#4A6165]">
           Slots come from the hygienists rostered that day and the columns they
-          sit in. For a day that has been, booked is what stood in those columns
-          at midnight; for a day ahead it is what stands there now. Missed is
+          sit in. A day with nobody rostered shows 0 slots and still counts what
+          was booked and seen — the doctors see hygiene patients on those days.
+          For a day that has been, booked is what stood in those columns at
+          midnight; for a day ahead it is what stands there now. Missed is
           booked less showed, never counted on its own.
         </p>
       </div>

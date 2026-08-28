@@ -8,13 +8,18 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 2
+// Version: 3
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v3  A day with no hygienist rostered is no longer closed. The
+//       doctors see hygiene patients on those days; the day reads 0
+//       slots and still counts what was booked and seen, taken from the
+//       office's own hygiene-ticked columns.
 //
 //   v2  Missed is no longer counted; it is what the day held at midnight
 //       less what happened. Counting it directly was wrong: a parked
@@ -40,6 +45,12 @@
 //     HG-PN sat in OP 9 and OP 10, which are ticked Production. The
 //     tick would have found 2 of the 3 and counted 28 slots where
 //     there were 42.
+//
+//     The tick earns its place in one spot only: a day with nobody
+//     rostered. The doctors still see hygiene patients then, in the
+//     office's own hygiene columns. Such a day reads 0 slots and still
+//     counts what was booked and seen, so the work is never lost and
+//     the capacity is never invented.
 //
 //   A hygienist is a provider whose specialty is Hygienist.
 //
@@ -390,7 +401,29 @@ Deno.serve(async (req: Request) => {
     row.columns = colsByDay.get(d)?.size ?? 0;
   }
 
-  // Nobody rostered all month is a real answer, not an error.
+  // ---- 2b. The office's own hygiene columns ----
+  //
+  // Only used on a day with no hygienist rostered. The doctors still see
+  // hygiene patients on those days, and that work counts - it simply has
+  // no hygiene slots behind it, so the day reads 0 slots and whatever
+  // was booked and seen.
+  const ticked = await shortQueryAll(
+    auth,
+    `SELECT OperatoryNum FROM operatory WHERE IsHygiene = 1 AND IsHidden = 0`,
+  );
+
+  if (ticked.failed) return fail("Could not read this office's hygiene columns.", ticked.failed);
+
+  const tickedCols = new Set<number>();
+  for (const r of ticked.rows) {
+    const n = num(r.OperatoryNum);
+    if (n > 0) {
+      tickedCols.add(n);
+      allCols.add(n);
+    }
+  }
+
+  // Nobody rostered all month and no hygiene column either.
   if (allCols.size === 0) {
     return json({
       ok: true,
@@ -405,13 +438,19 @@ Deno.serve(async (req: Request) => {
 
   const colList = [...allCols].join(",");
 
-  // A column only counts on a day the roster put somebody in it.
+  // Which columns count on a given day.
   //
-  // Without this, HG-PN's two production columns would keep counting
-  // on the days she is not in, and the ortho work sitting in them
-  // would be read as hygiene.
-  const rosteredThatDay = (day: number, op: number): boolean =>
-    colsByDay.get(day)?.has(op) === true;
+  // With a hygienist rostered, hers and only hers - otherwise HG-PN's
+  // two production columns would keep counting on the days she is not
+  // in, and the ortho work sitting in them would read as hygiene.
+  //
+  // With nobody rostered, the office's own hygiene columns, because a
+  // doctor still sees hygiene patients in them.
+  const countsThatDay = (day: number, op: number): boolean => {
+    const rostered = colsByDay.get(day);
+    if (rostered && rostered.size > 0) return rostered.has(op);
+    return tickedCols.has(op);
+  };
 
   // ---- 3. What is on the books, day by day ----
   const kept = await shortQueryAll(
@@ -425,6 +464,21 @@ Deno.serve(async (req: Request) => {
 
   if (kept.failed) return fail("Could not read this month's hygiene appointments.", kept.failed);
 
+  // A day with no hygienist rostered still gets a row if hygiene work
+  // happened on it. The doctors see those patients; the day simply had
+  // no hygiene slots behind it.
+  const rowFor = (d: number): DayRow => {
+    let row = byDay.get(d);
+    if (!row) {
+      row = {
+        day: d, hygienists: 0, columns: 0, slots: 0,
+        booked: 0, showed: 0, missed: 0, open: 0,
+      };
+      byDay.set(d, row);
+    }
+    return row;
+  };
+
   // Held now: what stands in those columns today. This is the right
   // answer for a day still ahead, and the wrong one for a day gone,
   // because the missed appointments have been moved out of it.
@@ -432,8 +486,8 @@ Deno.serve(async (req: Request) => {
 
   for (const r of kept.rows) {
     const d = dayOf(r.D);
-    const row = byDay.get(d);
-    if (!row || !rosteredThatDay(d, num(r.Op))) continue;
+    if (d < 1 || d > days || !countsThatDay(d, num(r.Op))) continue;
+    const row = rowFor(d);
     const n = num(r.N);
     heldNow.set(d, (heldNow.get(d) ?? 0) + n);
     if (num(r.AptStatus) === APT_COMPLETE) row.showed += n;
@@ -454,7 +508,7 @@ Deno.serve(async (req: Request) => {
   // nothing missed.
   const snapshot = await shortQueryAll(
     auth,
-    `SELECT DATE(h.AptDateTime) AS D, COUNT(DISTINCT h.AptNum) AS N ` +
+    `SELECT DATE(h.AptDateTime) AS D, h.Op, COUNT(DISTINCT h.AptNum) AS N ` +
       `FROM histappointment h ` +
       `WHERE h.Op IN (${colList}) ` +
       `AND h.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
@@ -462,7 +516,7 @@ Deno.serve(async (req: Request) => {
       `AND h.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
       `                     WHERE h2.AptNum = h.AptNum ` +
       `                       AND h2.HistDateTStamp < DATE(h.AptDateTime)) ` +
-      `GROUP BY DATE(h.AptDateTime)`,
+      `GROUP BY DATE(h.AptDateTime), h.Op`,
   );
 
   if (snapshot.failed) {
@@ -471,7 +525,10 @@ Deno.serve(async (req: Request) => {
 
   const heldAtMidnight = new Map<number, number>();
   for (const r of snapshot.rows) {
-    heldAtMidnight.set(dayOf(r.D), num(r.N));
+    const d = dayOf(r.D);
+    if (d < 1 || d > days || !countsThatDay(d, num(r.Op))) continue;
+    rowFor(d);
+    heldAtMidnight.set(d, (heldAtMidnight.get(d) ?? 0) + num(r.N));
   }
 
   // ---- 5. Finish each day and total the month ----
@@ -527,6 +584,9 @@ Deno.serve(async (req: Request) => {
   // Hygienist-days: one hygienist working one day. This is the sum, so
   // 3 of them on a Saturday counts 3.
   const rdhDays = out.reduce((sum, r) => sum + r.hygienists, 0);
+
+  // Days open counts a day the office worked hygiene at all, whether or
+  // not a hygienist was rostered for it.
 
   return json({
     ok: true,

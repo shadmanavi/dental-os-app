@@ -1,10 +1,15 @@
 "use client";
 
-// Hygiene Dashboard — v2
+// Hygiene Dashboard — v3
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v3  The numbers open the day behind them. Booked, showed, missed
+//       and the RDH count are links; the panel lists the patients, the
+//       column and what was done, read from OpenDental when opened and
+//       stored nowhere. Missed names the patients who did not come.
+//
 //   v2  Month totals moved into the table header so each sits above the
 //       column it totals. Hygienist-days under the Day column. A month
 //       still ahead no longer strikes its capacity through.
@@ -55,6 +60,25 @@ type MonthTotals = {
   days_open: number;
 };
 
+type Visit = {
+  apt_num: number;
+  time: string;
+  column: string;
+  patient: string;
+  hygienist: string;
+  codes: string;
+  state: "showed" | "booked" | "missed";
+};
+
+type DayDetail = {
+  date: string;
+  hygienists: { name: string; from: string; to: string; columns: string }[];
+  appointments: Visit[];
+};
+
+// Which figure was clicked, so the panel opens on the right list.
+type Focus = "showed" | "booked" | "missed" | "rdh";
+
 const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -96,6 +120,13 @@ export default function HygienePage() {
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+
+  // The day panel: which day and which figure was clicked, and what
+  // came back. Read on demand, never with the month.
+  const [panel, setPanel] = useState<{ day: number; focus: Focus } | null>(null);
+  const [detail, setDetail] = useState<DayDetail | null>(null);
+  const [detailBusy, setDetailBusy] = useState(false);
+  const [detailError, setDetailError] = useState("");
 
   // ---- Session and offices ----
   useEffect(() => {
@@ -189,6 +220,37 @@ export default function HygienePage() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // ---- One day, named ----
+  const openDay = useCallback(
+    async (day: number, focus: Focus) => {
+      setPanel({ day, focus });
+      setDetail(null);
+      setDetailError("");
+      setDetailBusy(true);
+
+      try {
+        const supabase = createClient();
+        const { data, error: fnError } = await supabase.functions.invoke("od-hygiene", {
+          body: { office: officeSlug, action: "day", year, month, day },
+        });
+
+        if (fnError || !data?.ok) {
+          setDetailError(String(data?.error ?? "That day could not be read."));
+          return;
+        }
+
+        setDetail(data as DayDetail);
+      } catch (caught) {
+        setDetailError(
+          caught instanceof Error ? caught.message : "That day could not be read.",
+        );
+      } finally {
+        setDetailBusy(false);
+      }
+    },
+    [officeSlug, year, month],
+  );
 
   const byDay = useMemo(() => new Map(days.map((d) => [d.day, d])), [days]);
 
@@ -396,9 +458,17 @@ export default function HygienePage() {
                           {d}
                         </span>
                         <span className="text-xs text-[#8AA6AB]">{weekday}</span>
-                        <span className="text-xs text-[#8AA6AB]">
-                          {row.hygienists} RDH
-                        </span>
+                        {row.hygienists > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => openDay(d, "rdh")}
+                            className="text-xs text-[#79B4C4] underline decoration-dotted underline-offset-2 hover:text-[#EDF3F1]"
+                          >
+                            {row.hygienists} RDH
+                          </button>
+                        ) : (
+                          <span className="text-xs text-[#4A6165]">no RDH</span>
+                        )}
                       </td>
 
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
@@ -407,7 +477,7 @@ export default function HygienePage() {
                       <td className={`border-b border-[#2C4E54]/45 px-3.5 py-2 text-right ${
                         ahead ? "text-[#EDF3F1]" : ""
                       }`}>
-                        {row.booked}
+                        <Figure value={row.booked} onClick={() => openDay(d, "booked")} />
                       </td>
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {row.open === 0 ? (
@@ -433,7 +503,11 @@ export default function HygienePage() {
 
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {past || isToday ? (
-                          <span className="text-[#79B4C4]">{row.showed}</span>
+                          <Figure
+                            value={row.showed}
+                            onClick={() => openDay(d, "showed")}
+                            tone="text-[#79B4C4]"
+                          />
                         ) : (
                           <span className="text-[#4A6165]">—</span>
                         )}
@@ -444,7 +518,11 @@ export default function HygienePage() {
                         ) : row.missed === 0 ? (
                           <span className="text-[#4A6165]">0</span>
                         ) : (
-                          <b className="font-bold text-[#F3B0A2]">{row.missed}</b>
+                          <Figure
+                            value={row.missed}
+                            onClick={() => openDay(d, "missed")}
+                            tone="font-bold text-[#F3B0A2]"
+                          />
                         )}
                       </td>
                     </tr>
@@ -476,6 +554,103 @@ export default function HygienePage() {
           </div>
         </div>
 
+        {/* The day behind a number: who was on, who came, who did not.
+            Read from OpenDental when opened; nothing is stored. */}
+        {panel !== null && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 px-4 py-8">
+            <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="flex items-baseline gap-3 border-b border-[#2C4E54] px-5 py-3">
+                <h3 className="text-[13px] font-bold uppercase tracking-[0.06em]">
+                  {MONTHS[month - 1]} {panel.day}
+                </h3>
+                <span className="text-xs text-[#8AA6AB]">
+                  {weekdayOf(year, month, panel.day)}
+                </span>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setPanel(null)}
+                  className="rounded-lg border border-[#2C4E54] px-3 py-1 text-xs text-[#8AA6AB] hover:bg-[#193034]"
+                >
+                  Close
+                </button>
+              </div>
+
+              {detailBusy && (
+                <p className="px-5 py-8 text-center text-sm text-[#8AA6AB]">Reading the day…</p>
+              )}
+
+              {detailError !== "" && (
+                <p className="m-5 rounded-lg border border-[#E4674F] bg-[#2A1714] px-3 py-2 text-sm text-[#F3B0A2]">
+                  {detailError}
+                </p>
+              )}
+
+              {detail !== null && !detailBusy && (
+                <>
+                  <div className="border-b border-[#2C4E54] px-5 py-3">
+                    <h4 className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
+                      Rostered
+                    </h4>
+                    {detail.hygienists.length === 0 ? (
+                      <p className="mt-1 text-sm text-[#4A6165]">
+                        Nobody rostered. Anything below was seen in the hygiene
+                        columns by a doctor.
+                      </p>
+                    ) : (
+                      <ul className="mt-1 space-y-0.5">
+                        {detail.hygienists.map((h, i) => (
+                          <li key={`${h.name}-${i}`} className="text-sm text-[#EDF3F1]">
+                            {h.name}{" "}
+                            <span className="font-mono text-xs text-[#8AA6AB]">
+                              {h.from.slice(0, 5)}–{h.to.slice(0, 5)}
+                            </span>{" "}
+                            <span className="text-xs text-[#8AA6AB]">{h.columns}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+
+                  {panel.focus !== "rdh" && (
+                    <ul className="max-h-[26rem] divide-y divide-[#2C4E54]/50 overflow-y-auto">
+                      {detail.appointments
+                        .filter((v) => v.state === panel.focus)
+                        .map((v) => (
+                          <li key={v.apt_num} className="flex gap-3 px-5 py-2 text-sm">
+                            <span className="w-12 shrink-0 font-mono text-xs text-[#8AA6AB]">
+                              {v.time.slice(0, 5)}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-[#EDF3F1]">{v.patient}</span>
+                              <span className="block truncate text-xs text-[#8AA6AB]">
+                                {v.column}
+                                {v.hygienist !== "" ? ` · ${v.hygienist}` : ""}
+                                {v.codes !== "" ? ` · ${v.codes}` : ""}
+                              </span>
+                            </span>
+                          </li>
+                        ))}
+
+                      {detail.appointments.filter((v) => v.state === panel.focus).length === 0 && (
+                        <li className="px-5 py-6 text-center text-sm text-[#4A6165]">
+                          Nothing to show.
+                        </li>
+                      )}
+                    </ul>
+                  )}
+
+                  <p className="border-t border-[#2C4E54] px-5 py-2.5 text-[11px] text-[#4A6165]">
+                    {panel.focus === "missed"
+                      ? "Booked at midnight and not completed. Read from OpenDental now; nothing is stored here."
+                      : "Read from OpenDental now; nothing is stored here."}
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         <p className="px-1 text-[11px] text-[#4A6165]">
           Slots come from the hygienists rostered that day and the columns they
           sit in. A day with nobody rostered shows 0 slots and still counts what
@@ -486,6 +661,27 @@ export default function HygienePage() {
         </p>
       </div>
     </main>
+  );
+}
+
+// A number in the table that opens the day behind it.
+function Figure({
+  value,
+  onClick,
+  tone,
+}: {
+  value: number;
+  onClick: () => void;
+  tone?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`font-mono tabular-nums underline decoration-dotted underline-offset-4 decoration-[#4A6165] hover:decoration-[#EDF3F1] ${tone ?? ""}`}
+    >
+      {value}
+    </button>
   );
 }
 

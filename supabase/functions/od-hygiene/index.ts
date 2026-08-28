@@ -8,13 +8,20 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 3
+// Version: 4
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
+//   { "office":"downey", "action":"day", "year":2026, "month":8, "day":12 }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v4  New action "day": one day, named. Returns who was rostered and
+//       every appointment with its patient, column and completed codes,
+//       marked showed, booked or missed. The missed ones take their time
+//       and column from the history, because the live row has been
+//       re-dated. Reads only; nothing is stored.
 //
 //   v3  A day with no hygienist rostered is no longer closed. The
 //       doctors see hygiene patients on those days; the day reads 0
@@ -235,6 +242,7 @@ Deno.serve(async (req: Request) => {
     office?: string;
     action?: string;
     year?: number;
+    day?: number;
     month?: number;
   };
 
@@ -245,8 +253,8 @@ Deno.serve(async (req: Request) => {
   }
 
   const action = (body.action ?? "").toLowerCase().trim();
-  if (action !== "month") {
-    return json({ ok: false, error: "action must be month." }, 400);
+  if (action !== "month" && action !== "day") {
+    return json({ ok: false, error: "action must be month or day." }, 400);
   }
 
   const year = num(body.year);
@@ -254,6 +262,11 @@ Deno.serve(async (req: Request) => {
 
   if (year < 2000 || year > 2100 || month < 1 || month > 12) {
     return json({ ok: false, error: "Give a year and a month from 1 to 12." }, 400);
+  }
+
+  const dayAsked = num(body.day);
+  if (action === "day" && (dayAsked < 1 || dayAsked > 31)) {
+    return json({ ok: false, error: "Give a day of the month." }, 400);
   }
 
   const officeId = (body.office_id ?? "").trim();
@@ -327,6 +340,178 @@ Deno.serve(async (req: Request) => {
   }
 
   const hygSpecialty = num(hygDef.DefNum);
+
+  // ===================================================================
+  // day — one day, named
+  //
+  // The month screen shows counts. This turns a count back into people:
+  // who was rostered, who came, and who did not.
+  //
+  // Nothing is stored. Patient names are read from OpenDental and sent
+  // to the screen, the same as the chart does, and go no further.
+  // ===================================================================
+  if (action === "day") {
+    const date = `${year}-${pad(month)}-${pad(dayAsked)}`;
+
+    // Who was on, and in which columns.
+    const shift = await shortQueryAll(
+      auth,
+      `SELECT p.Abbr, TIME(s.StartTime) AS St, TIME(s.StopTime) AS Sp, ` +
+        `(SELECT GROUP_CONCAT(o.OpName ORDER BY o.OperatoryNum SEPARATOR ' + ') ` +
+        ` FROM scheduleop so JOIN operatory o ON o.OperatoryNum = so.OperatoryNum ` +
+        ` WHERE so.ScheduleNum = s.ScheduleNum) AS Cols, ` +
+        `(SELECT GROUP_CONCAT(so2.OperatoryNum) FROM scheduleop so2 ` +
+        ` WHERE so2.ScheduleNum = s.ScheduleNum) AS OpNums ` +
+        `FROM schedule s JOIN provider p ON p.ProvNum = s.ProvNum ` +
+        `WHERE s.SchedType = 1 AND p.Specialty = ${hygSpecialty} ` +
+        `AND s.SchedDate = '${date}' ORDER BY p.Abbr, s.StartTime`,
+    );
+
+    if (shift.failed) return fail("Could not read that day's roster.", shift.failed);
+
+    const dayCols = new Set<number>();
+    for (const r of shift.rows) {
+      for (const op of String(r.OpNums ?? "").split(",")) {
+        const n = Number(op.trim());
+        if (Number.isFinite(n) && n > 0) dayCols.add(n);
+      }
+    }
+
+    // Nobody rostered: fall back to the office's own hygiene columns,
+    // because a doctor still sees hygiene patients on those days.
+    if (dayCols.size === 0) {
+      const ticked = await shortQueryAll(
+        auth,
+        `SELECT OperatoryNum FROM operatory WHERE IsHygiene = 1 AND IsHidden = 0`,
+      );
+      if (ticked.failed) return fail("Could not read this office's hygiene columns.", ticked.failed);
+      for (const r of ticked.rows) {
+        const n = num(r.OperatoryNum);
+        if (n > 0) dayCols.add(n);
+      }
+    }
+
+    if (dayCols.size === 0) {
+      return json({
+        ok: true, office: officeRow.slug, date,
+        hygienists: [], appointments: [],
+        note: "This office has no hygiene columns and nobody was rostered.",
+      });
+    }
+
+    const dayColList = [...dayCols].join(",");
+
+    const patientName = `TRIM(CONCAT(pt.LName, ', ', pt.FName))`;
+    const codes =
+      `(SELECT GROUP_CONCAT(pc.ProcCode ORDER BY pc.ProcCode SEPARATOR ' ') ` +
+      ` FROM procedurelog pl JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
+      ` WHERE pl.AptNum = a.AptNum AND pl.ProcStatus = ${APT_COMPLETE})`;
+
+    // What stands in those columns now: the ones that happened, and the
+    // ones still to come.
+    const standing = await shortQueryAll(
+      auth,
+      `SELECT a.AptNum, TIME(a.AptDateTime) AS T, o.OpName, a.AptStatus, ` +
+        `${patientName} AS Patient, pr.Abbr AS Hyg, ${codes} AS Codes ` +
+        `FROM appointment a ` +
+        `JOIN patient pt ON pt.PatNum = a.PatNum ` +
+        `LEFT JOIN operatory o ON o.OperatoryNum = a.Op ` +
+        `LEFT JOIN provider pr ON pr.ProvNum = a.ProvHyg ` +
+        `WHERE a.Op IN (${dayColList}) ` +
+        `AND a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+        `AND DATE(a.AptDateTime) = '${date}' ORDER BY a.AptDateTime`,
+    );
+
+    if (standing.failed) return fail("Could not read that day's appointments.", standing.failed);
+
+    // What the day was holding at midnight. The ones here that are not
+    // above are the misses - and this is where their real time and
+    // column come from, because the live row has been re-dated.
+    const held = await shortQueryAll(
+      auth,
+      `SELECT h.AptNum, TIME(h.AptDateTime) AS T, o.OpName, ` +
+        `${patientName} AS Patient, pr.Abbr AS Hyg ` +
+        `FROM histappointment h ` +
+        `JOIN appointment a ON a.AptNum = h.AptNum ` +
+        `JOIN patient pt ON pt.PatNum = h.PatNum ` +
+        `LEFT JOIN operatory o ON o.OperatoryNum = h.Op ` +
+        `LEFT JOIN provider pr ON pr.ProvNum = h.ProvHyg ` +
+        `WHERE h.Op IN (${dayColList}) ` +
+        `AND h.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+        `AND DATE(h.AptDateTime) = '${date}' ` +
+        `AND h.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
+        `                     WHERE h2.AptNum = h.AptNum ` +
+        `                       AND h2.HistDateTStamp < '${date}') ` +
+        `ORDER BY h.AptDateTime`,
+    );
+
+    if (held.failed) return fail("Could not read what that day was holding.", held.failed);
+
+    type Visit = {
+      apt_num: number;
+      time: string;
+      column: string;
+      patient: string;
+      hygienist: string;
+      codes: string;
+      state: "showed" | "booked" | "missed";
+    };
+
+    const visits: Visit[] = [];
+    const seen = new Set<number>();
+
+    for (const r of standing.rows) {
+      const aptNum = num(r.AptNum);
+      if (seen.has(aptNum)) continue;
+      seen.add(aptNum);
+      visits.push({
+        apt_num: aptNum,
+        time: String(r.T ?? ""),
+        column: String(r.OpName ?? "").trim(),
+        patient: String(r.Patient ?? "").trim(),
+        hygienist: String(r.Hyg ?? "").trim(),
+        codes: String(r.Codes ?? "").trim(),
+        state: num(r.AptStatus) === APT_COMPLETE ? "showed" : "booked",
+      });
+    }
+
+    for (const r of held.rows) {
+      const aptNum = num(r.AptNum);
+      if (seen.has(aptNum)) continue;
+      seen.add(aptNum);
+      visits.push({
+        apt_num: aptNum,
+        time: String(r.T ?? ""),
+        column: String(r.OpName ?? "").trim(),
+        patient: String(r.Patient ?? "").trim(),
+        hygienist: String(r.Hyg ?? "").trim(),
+        codes: "",
+        state: "missed",
+      });
+    }
+
+    visits.sort((a, b) => a.time.localeCompare(b.time));
+
+    return json({
+      ok: true,
+      office: officeRow.slug,
+      office_name: officeRow.name,
+      date,
+      hygienists: shift.rows.map((r) => ({
+        name: String(r.Abbr ?? "").trim(),
+        from: String(r.St ?? ""),
+        to: String(r.Sp ?? ""),
+        columns: String(r.Cols ?? "").trim(),
+      })),
+      appointments: visits,
+      counts: {
+        showed: visits.filter((v) => v.state === "showed").length,
+        missed: visits.filter((v) => v.state === "missed").length,
+        booked: visits.filter((v) => v.state === "booked").length,
+      },
+      read_at: new Date().toISOString(),
+    });
+  }
 
   // ---- 2. The roster: who works, how long, and in how many columns ----
   //

@@ -41,6 +41,7 @@ type DayRow = {
 };
 
 type MonthTotals = {
+  hygienists?: number;
   slots: number;
   booked: number;
   showed: number;
@@ -209,12 +210,26 @@ export default function HygienePage() {
   const missRate = seen > 0 ? Math.round(((totals?.missed ?? 0) / seen) * 100) : 0;
 
   // Slots on a day already gone that nobody ever booked.
-  const unsold = useMemo(
-    () => days.filter((d) => today === 0 || d.day <= today)
-      .reduce((sum, d) => sum + d.open, 0),
-    [days, today],
-  );
-  const stillOpen = (totals?.open ?? 0) - unsold;
+  //
+  // Which days count depends on where the month sits. A month behind us
+  // is all spent; a month ahead of us has spent nothing yet, and showing
+  // its whole capacity struck through read as though September had
+  // already been lost.
+  const monthPosition: "past" | "current" | "future" =
+    year < now.year || (year === now.year && month < now.month)
+      ? "past"
+      : isThisMonth
+        ? "current"
+        : "future";
+
+  const unsold = useMemo(() => {
+    if (monthPosition === "future") return 0;
+    return days
+      .filter((d) => monthPosition === "past" || d.day <= today)
+      .reduce((sum, d) => sum + d.open, 0);
+  }, [days, monthPosition, today]);
+
+  const stillOpen = Math.max(0, (totals?.open ?? 0) - unsold);
 
   return (
     <main className="min-h-screen bg-[#0B1719] px-4 py-4 text-[#EDF3F1] sm:px-6">
@@ -265,16 +280,20 @@ export default function HygienePage() {
           </div>
         </div>
 
-        {/* Figures on one line, their detail beneath. */}
+        {/* The month in a line: how many hygienists worked at all, and
+            over how many days. The column figures sit in the table
+            itself so they line up with what they are totalling. */}
         {totals !== null && (
-          <div className="flex flex-wrap items-center rounded-xl border border-[#2C4E54] bg-[#122326] px-1 py-2">
-            <Stat label="Slots" value={totals.slots} note={`${totals.days_open} days open`} />
-            <Stat label="Booked" value={totals.booked} note={`${fillRate}% filled`} />
-            <Stat label="Unsold" value={unsold} note="gone for good" struck />
-            <Stat label="Open" value={Math.max(0, stillOpen)} note="still bookable" />
-            <Stat label="Showed" value={totals.showed} note={`of ${seen} seen`} tone="good" />
-            <Stat label="Missed" value={totals.missed} note={`${missRate}% of them`} tone="warn" />
-          </div>
+          <p className="px-1 text-xs text-[#8AA6AB]">
+            <span className="font-mono text-[15px] text-[#EDF3F1]">
+              {totals.hygienists ?? 0}
+            </span>{" "}
+            {(totals.hygienists ?? 0) === 1 ? "hygienist" : "hygienists"} worked{" "}
+            <span className="font-mono text-[15px] text-[#EDF3F1]">
+              {totals.days_open}
+            </span>{" "}
+            {totals.days_open === 1 ? "day" : "days"} this month.
+          </p>
         )}
 
         {error !== "" && (
@@ -294,14 +313,31 @@ export default function HygienePage() {
             <table className="w-full min-w-[720px] border-collapse">
               <thead>
                 <tr className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
-                  <th className="border-b border-[#2C4E54] px-3.5 py-2.5 text-left">Day</th>
-                  <th className="border-b border-[#2C4E54] px-3.5 py-2.5 text-right">Slots</th>
-                  <th className="border-b border-[#2C4E54] px-3.5 py-2.5 text-right">Booked</th>
-                  <th className="border-b border-[#2C4E54] px-3.5 py-2.5 text-right">Open</th>
-                  <th className="w-32 border-b border-[#2C4E54] px-3.5 py-2.5 text-left">Filled</th>
-                  <th className="border-b border-[#2C4E54] px-3.5 py-2.5 text-right">Showed</th>
-                  <th className="border-b border-[#2C4E54] px-3.5 py-2.5 text-right">Missed</th>
+                  <th className="px-3.5 pt-2.5 text-left">Day</th>
+                  <th className="px-3.5 pt-2.5 text-right">Slots</th>
+                  <th className="px-3.5 pt-2.5 text-right">Booked</th>
+                  <th className="px-3.5 pt-2.5 text-right">Open</th>
+                  <th className="w-32 px-3.5 pt-2.5 text-left">Filled</th>
+                  <th className="px-3.5 pt-2.5 text-right">Showed</th>
+                  <th className="px-3.5 pt-2.5 text-right">Missed</th>
                 </tr>
+
+                {/* The month's figures, each under the column it totals. */}
+                {totals !== null && !loading && (
+                  <tr className="border-b border-[#2C4E54] font-mono text-[17px] tabular-nums">
+                    <th className="px-3.5 pb-2 pt-0.5 text-left font-sans text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
+                      {MONTHS[month - 1]} {year}
+                    </th>
+                    <Total value={totals.slots} note={`${totals.days_open} days`} />
+                    <Total value={totals.booked} note={`${fillRate}% filled`} />
+                    <Total value={unsold} note="gone for good" struck={unsold > 0} />
+                    <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">
+                      {stillOpen > 0 ? `${stillOpen} still bookable` : "nothing left open"}
+                    </th>
+                    <Total value={totals.showed} note={`of ${seen} seen`} tone="good" />
+                    <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" />
+                  </tr>
+                )}
               </thead>
 
               <tbody>
@@ -447,37 +483,31 @@ export default function HygienePage() {
   );
 }
 
-function Stat({
-  label,
+// One month figure, sitting in the header above the column it totals.
+function Total({
   value,
   note,
   tone,
   struck,
 }: {
-  label: string;
   value: number;
   note: string;
   tone?: "good" | "warn";
   struck?: boolean;
 }) {
   const colour =
-    tone === "good" ? "text-[#79B4C4]" : tone === "warn" ? "text-[#E4674F]" : "";
+    tone === "good" ? "text-[#79B4C4]" : tone === "warn" ? "text-[#E4674F]" : "text-[#EDF3F1]";
 
   return (
-    <div className="flex flex-col gap-px whitespace-nowrap border-r border-[#2C4E54]/60 px-3.5 py-0.5 last:border-r-0">
-      <span className="flex items-baseline gap-1.5">
-        <span className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
-          {label}
-        </span>
-        <span className={`font-mono text-[17px] tabular-nums ${colour}`}>
-          {struck ? (
-            <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{value}</s>
-          ) : (
-            value
-          )}
-        </span>
+    <th className="whitespace-nowrap px-3.5 pb-2 pt-0.5 text-right align-top">
+      <span className={`block font-mono text-[17px] font-bold tabular-nums ${colour}`}>
+        {struck ? (
+          <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{value}</s>
+        ) : (
+          value
+        )}
       </span>
-      <span className="text-[11px] text-[#4A6165]">{note}</span>
-    </div>
+      <span className="block font-sans text-[11px] font-normal text-[#4A6165]">{note}</span>
+    </th>
   );
 }

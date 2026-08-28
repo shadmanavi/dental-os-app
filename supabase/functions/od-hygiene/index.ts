@@ -479,6 +479,13 @@ Deno.serve(async (req: Request) => {
     { slots: 0, booked: 0, showed: 0, missed: 0, open: 0, days_open: 0 },
   );
 
+  // How many different hygienists worked at all this month, which is not
+  // the sum of the daily counts - the same person works many days.
+  const hygienists = new Set<number>();
+  for (const set of provsByDay.values()) {
+    for (const p of set) hygienists.add(p);
+  }
+
   return json({
     ok: true,
     office: officeRow.slug,
@@ -487,7 +494,7 @@ Deno.serve(async (req: Request) => {
     month,
     days_in_month: days,
     days: out,
-    totals,
+    totals: { ...totals, hygienists: hygienists.size },
     // Worth surfacing rather than hiding: a roster entry with no
     // columns on it contributes no slots, so the day reads light.
     roster_rows_without_columns: rosterRowsWithoutColumns,

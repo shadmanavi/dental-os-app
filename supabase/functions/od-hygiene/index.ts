@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 4
+// Version: 5
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v5  Showed follows the appointment, not the column. Work gets moved
+//       between columns during the day, and judging by the column called
+//       every one of those a no-show - the 1 August panel listed most of
+//       a full day as missed. Both the month and the day panel now read
+//       the appointment's own status.
 //
 //   v4  New action "day": one day, named. Returns who was rostered and
 //       every appointment with its patient, column and completed codes,
@@ -430,7 +436,8 @@ Deno.serve(async (req: Request) => {
     const held = await shortQueryAll(
       auth,
       `SELECT h.AptNum, TIME(h.AptDateTime) AS T, o.OpName, ` +
-        `${patientName} AS Patient, pr.Abbr AS Hyg ` +
+        `${patientName} AS Patient, pr.Abbr AS Hyg, ` +
+        `a.AptStatus AS LiveStatus, ${codes} AS Codes ` +
         `FROM histappointment h ` +
         `JOIN appointment a ON a.AptNum = h.AptNum ` +
         `JOIN patient pt ON pt.PatNum = h.PatNum ` +
@@ -475,18 +482,25 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // An appointment held at midnight that is now Complete happened,
+    // wherever it ended up. On 1 August several were moved into a column
+    // nobody was rostered in and completed there; judging by the column
+    // rather than the appointment called every one of them a no-show.
     for (const r of held.rows) {
       const aptNum = num(r.AptNum);
       if (seen.has(aptNum)) continue;
       seen.add(aptNum);
+
+      const done = num(r.LiveStatus) === APT_COMPLETE;
+
       visits.push({
         apt_num: aptNum,
         time: String(r.T ?? ""),
         column: String(r.OpName ?? "").trim(),
         patient: String(r.Patient ?? "").trim(),
         hygienist: String(r.Hyg ?? "").trim(),
-        codes: "",
-        state: "missed",
+        codes: done ? String(r.Codes ?? "").trim() : "",
+        state: done ? "showed" : "missed",
       });
     }
 
@@ -693,8 +707,10 @@ Deno.serve(async (req: Request) => {
   // nothing missed.
   const snapshot = await shortQueryAll(
     auth,
-    `SELECT DATE(h.AptDateTime) AS D, h.Op, COUNT(DISTINCT h.AptNum) AS N ` +
+    `SELECT DATE(h.AptDateTime) AS D, h.Op, COUNT(DISTINCT h.AptNum) AS N, ` +
+      `COUNT(DISTINCT CASE WHEN a.AptStatus = ${APT_COMPLETE} THEN h.AptNum END) AS Done ` +
       `FROM histappointment h ` +
+      `JOIN appointment a ON a.AptNum = h.AptNum ` +
       `WHERE h.Op IN (${colList}) ` +
       `AND h.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
       `AND h.AptDateTime >= '${first}' AND h.AptDateTime < '${afterLast}' ` +
@@ -709,11 +725,14 @@ Deno.serve(async (req: Request) => {
   }
 
   const heldAtMidnight = new Map<number, number>();
+  const heldAndDone = new Map<number, number>();
+
   for (const r of snapshot.rows) {
     const d = dayOf(r.D);
     if (d < 1 || d > days || !countsThatDay(d, num(r.Op))) continue;
     rowFor(d);
     heldAtMidnight.set(d, (heldAtMidnight.get(d) ?? 0) + num(r.N));
+    heldAndDone.set(d, (heldAndDone.get(d) ?? 0) + num(r.Done));
   }
 
   // ---- 5. Finish each day and total the month ----
@@ -738,9 +757,17 @@ Deno.serve(async (req: Request) => {
 
     const been = monthIsPast || (todayIsThisMonth && d <= todayDay);
 
-    row.booked = been
-      ? Math.max(heldAtMidnight.get(d) ?? 0, row.showed)
-      : heldNow.get(d) ?? 0;
+    if (been) {
+      // Showed follows the appointment, not the column it ended up in.
+      // Work gets moved between columns during the day - on 1 August
+      // several completed in a column nobody was rostered in - and
+      // counting only what sits in the day's columns now would call
+      // every one of those a no-show.
+      row.showed = Math.max(row.showed, heldAndDone.get(d) ?? 0);
+      row.booked = Math.max(heldAtMidnight.get(d) ?? 0, row.showed);
+    } else {
+      row.booked = heldNow.get(d) ?? 0;
+    }
 
     row.missed = been ? Math.max(0, row.booked - row.showed) : 0;
     row.open = Math.max(0, row.slots - row.booked);

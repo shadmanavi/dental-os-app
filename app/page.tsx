@@ -45,6 +45,14 @@ const TOOLS: Tool[] = [
       "Tap through categories to record existing conditions and diagnosed treatment from the operatory. Writes straight to OpenDental.",
     ready: true,
   },
+  {
+    href: "/hygiene",
+    eyebrow: "Front desk",
+    title: "Hygiene Dashboard",
+    blurb:
+      "A month of hygiene, a day to a row. Slots the roster put on offer, what got booked, what is still open, and once the day has been, who showed and who did not.",
+    ready: true,
+  },
 ];
 
 export default function HomePage() {

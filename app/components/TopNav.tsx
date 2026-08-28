@@ -109,6 +109,11 @@ const SECTIONS: Section[] = [
     label: "Charting",
     ready: true,
   },
+  {
+    href: "/hygiene",
+    label: "Hygiene",
+    ready: true,
+  },
 ];
 
 function isActive(pathname: string, href: string): boolean {

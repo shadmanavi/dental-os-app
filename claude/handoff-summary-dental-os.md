@@ -1,8 +1,8 @@
 # Handoff Summary — Dental OS / TC Charting
 
 **Owner:** Shad
-**Last updated:** 25 August 2026
-**Session focus:** Confirmed the 23 August builds are live, wrote the migration that had been missing, and moved the project onto Claude Code.
+**Last updated:** 28 August 2026
+**Session focus:** Moved onto Claude Code. Wrote the missing migration, built a PDF reader for payer fee schedules and loaded 6 of them into both offices, added payment recording from the tablet, and built the Hygiene Dashboard.
 
 **Working from the repo now.** Claude Code runs inside
 `C:\Users\shadm\dental-os-app\dental-os-app`, so it reads the real files
@@ -45,13 +45,18 @@ the last one.
 |---|---|---|
 | **Deployed** | `od-plan` **v11** (function version 12) | Dead `set_note` stripped, layman's term added |
 | **Deployed** | `od-chart` **v15** (function version 17) | Tooth-state tiles toggle. Confirmed on 25 August by fetching the deployed source, not the version header |
-| **Deployed** | `app/chart/page.tsx` **v19.6** | Baby teeth on the chart, layman's term, better failure messages, clear handling. Commit `463a8fa`, pushed, so Vercel has it |
+| **Deployed** | `app/chart/page.tsx` **v19.8** | Baby teeth, the plain-English plan, and the Financing tab that takes a payment |
 | **Live in database** | 70 tile renames to the layman's terms | No deploy needed; anyone opening the chart sees them |
 | **Live in database** | Socket Bone Graft tile | Oral Surgery, Diagnosed, both offices |
 | **Live in database** | Silver Filling tiles | Fillings, Diagnosed and Existing, both offices |
 | **Live in database** | Primary / Permanent tile | Missing & Other, Existing, both offices. Write proved on patient 17 |
 | **Live in database** | `chart_tiles.initial_type` widened to allow Primary | Schema change, applied by hand |
 | **Live in database** | Row-level security enabled on `dos_code_names`, `dos_codenum_map`, `dos_write_log` | Closed a Supabase critical security alert. No table in `public` is open now |
+| **Deployed** | `od-hygiene` **v3** and the Hygiene Dashboard at `/hygiene` | Third tile on the home page. A month of hygiene, a day to a row |
+| **Deployed** | `od-payment` **v2** and chart page **v19.8** | Records a card already taken on the Clover terminal, stamped with the presenter. Proved on patient 17 |
+| **Deployed** | `fee-schedule-push` **v3** | A create refused as already existing becomes an update |
+| **In the repo** | `scripts/fee-schedule-pdf.mjs` **v5** | Turns a payer's PDF into the CSV the upload screen takes |
+| **Live in OpenDental** | 6 payer fee schedules at both offices | Cigna, Delta, MetLife, TriCare TDP, United Concordia Advantage Plus, United Healthcare |
 | Complete | Both probe functions deleted | `od-tp-probe`, `od-benefit-probe`, plus their local folders and `od-chart-probe` |
 | **Recorded in repo** | Migration `021_tile_names_tooth_state_and_rls` | Written 25 August, commit `ff56f3d`. The repo and the live database agree again |
 | Blocked | Declined work, autho, TPi fresh start | Waits on the OpenDental upgrade |
@@ -63,14 +68,21 @@ the last one.
 
 ## 3. Next steps (prioritized)
 
-1. **Test the Primary / Permanent toggle** on patient 17 tooth 4. Both halves are live and this has never been tried end to end from the tablet. One tap should take the A away, a second should put it back
-2. **Clear the 8 stray Primary flags off Patricia Ruiz** — teeth 3, 4, 5, 9, 12, 13, 14 and 15 were marked during testing. Needs OpenDental
+1. **Delete the 2 test payments on patient 17 at Downey** — 59587 and 59588, $1.02 each. Shad can remove them in OpenDental
+2. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
 3. **Send the email to Maria and Manuel** about D9630 and D0350. Two drafts were written on 23 August and never saved to file, so they need writing again
 4. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
 5. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced
 6. **Clear the stale Flouridex fees off Maywood M9955** — about 15 insurance schedules at $20, one Denti-Cal at $550, UCR Prior 2022 at $45
-7. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
-8. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
+7. **Tidy the trailing space on Downey's `[.025] Credit Card - M1`** — invisible, harmless, but there
+8. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
+9. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
+
+**Known gaps, deliberately left:**
+
+- A staged fee upload has no lock. Two browsers pushing the same upload would both claim the same rows. Different offices in different tabs is safe and is how it is used
+- A failed row on a staged upload cannot be retried from the review screen. It has to be set back to pending in the database
+- The Hygiene Dashboard does not count an appointment moved to a different day as missed on the day it was booked for
 
 ---
 
@@ -147,6 +159,13 @@ decided. Do not proceed on posting until he does.**
 | **The migration writes the 59 tile names out word for word** | Reading them back out of `dos_code_names` would tie a rebuild to a table that keeps moving as the CDT cleanup continues. The migration should reproduce today's screen, not next year's snapshot |
 | **Where the tile and `dos_code_names` disagree, the tile wins** | The Perio pair reads "Gum Treatment 4+" and "Gum Treatment 1-3" on screen while the table still says "Deep Cleaning". The tile is what the patient and the coordinator actually see |
 | **A migration is checked by running it against the live database and rolling it back** | It proves the file parses and every join resolves against the real schema, and leaves nothing behind |
+| **Hygiene slots come from the roster, not the hygiene tick** | The provider schedule names the columns each hygienist sits in, always 2, so a day with 1 hygienist and a day with 3 both come out right. The tick would have missed HG-PN, who works out of 2 Production columns, and read 28 slots on 29 August where there were 42 |
+| **A hygienist is a provider whose specialty is Hygienist** | Definition category 35. DefNum 543 at Downey, 466 at Maywood, so it is resolved by name. The "HG" abbreviation is not reliable — a dentist appears as the hygienist on 5 Downey appointments |
+| **Missed is booked less showed, never counted** | A missed appointment is re-dated on its way into the Cancelled column, so its own row no longer says which day it was for |
+| **Booked for a past day is the midnight snapshot, from the appointment history** | Not the end of the day: the cancellations are moved out as the day runs, so by closing time the hygiene columns look untouched. Not today's schedule either, for the same reason |
+| **A day with no hygienist rostered is not closed** | The doctors see hygiene patients on those days. The day reads 0 slots and still counts what was booked and seen, taken from the hygiene-ticked columns. This is the one place the tick is used |
+| **The payment type is a dropdown of the office's own list** | Downey and Maywood spelled the same tender differently until they were made to match. Reading the list live means the name on screen is certain to exist |
+| **A payer PDF is read by coordinates, not by extracted text** | The text layer of these PDFs is not in reading order. On Cigna, plain text extractors pair D0145 with $31.00 or $21.00 depending which one you ask |
 
 ### Carried forward
 
@@ -225,6 +244,11 @@ decided. Do not proceed on posting until he does.**
 | Database | `chart_tiles_initial_type_check` widened to allow Primary | The constraint blocked the tile |
 | Database | RLS enabled on `dos_code_names`, `dos_codenum_map`, `dos_write_log` | They were readable and writable by anyone with the project URL and the public key |
 | `supabase/migrations/20260825120000_021_tile_names_tooth_state_and_rls.sql` | Records all 4 database changes above in one re-runnable file | A rebuild from the migrations came up with the old names, no new tiles and 3 open tables |
+| `scripts/fee-schedule-pdf.mjs` | New. Reads a payer's PDF by coordinates and writes the CSV the upload screen takes | 6 schedules were loaded into both offices from it |
+| `supabase/functions/od-payment/index.ts` | New. Records a payment already taken on the terminal, refuses to post the same amount twice inside 2 minutes | The coordinator no longer walks the patient to the front desk |
+| `app/chart/page.tsx` | v19.7 and v19.8: the Financing tab takes a payment, with the payment type read live from the office | It was a placeholder reading "Not built yet" |
+| `supabase/functions/od-hygiene/index.ts` | New. A month of hygiene per office | Slots from the roster, booked from the midnight snapshot, missed as the subtraction |
+| `app/hygiene/page.tsx`, `app/page.tsx`, `app/components/TopNav.tsx` | New Hygiene Dashboard, its home tile and its nav entry | Third tile on the home page |
 
 **Fixed on the way past:** every tooth-state entry was being added to the missing list, so marking a tooth primary would have struck it through as though it had been extracted.
 
@@ -260,12 +284,18 @@ decided. Do not proceed on posting until he does.**
 | A replacement was inserted immediately before the line it was meant to replace | Extended the matched block to consume the old lines | An asserted replacement can succeed and still be dead code — read the result back |
 | `rowsOf` used in `od-chart`, where it does not exist | Used `od-chart`'s own inline `Array.isArray(body)` pattern | The 2 Edge Functions have different helpers despite similar shapes |
 | Supabase critical alert, 23 August: "Table publicly accessible" | Enabled RLS on the 3 CDT cleanup tables. All row counts intact — 512, 2,734 and 1,301 | Tables created outside the migration flow do not inherit the RLS habit the rest of the schema has. Check `relrowsecurity` after adding any table |
+| The first live payment reported as failed although it was recorded correctly | Compared the note with the line breaks normalised | OpenDental rewrites a note with Windows line endings whatever it is sent. Left alone, every payment ever taken would have read as a mismatch |
+| Delta at Maywood: 2 rows refused, and re-pushing did nothing | `fee-schedule-push` v3 turns a refused create into an update. The failed rows also had to be set back to pending by hand | A new schedule is staged as empty because it does not exist yet, but OpenDental can already hold a fee against that number. And a failed row is never picked up again — the push only claims rows still marked pending |
+| United Health Care lost 144 fees, crowns and bridges among them | The money pattern demanded a thousands separator; United Health Care writes $1029.00 | The 5 schedules read before the fix regenerate byte-identical, which is how it was proved nothing already pushed had moved |
+| The Hygiene Dashboard read 163% filled and 61% missed | Missed stopped being counted and became booked less showed | A cancelled appointment is parked in the Cancelled column with its date **and time rewritten** — all 10 minutes long, stacked from 06:40 to 18:30, hours past closing. Nothing on the row says which day it was ever for |
 
 ---
 
 ## 11. Start here next session
 
 - Read this file before replying. Claude Code opens in the repo, so nothing needs uploading
+- The Hygiene Dashboard is new and lightly used. Ask whether the numbers have held up against what the offices believe, particularly the missed count
+- The 2 test payments on patient 17 may still be sitting on the account
 - Check that the working tree is clean and that `git log` matches what this file claims is deployed
 - Ask whether the Primary / Permanent toggle was tested on patient 17 tooth 4 — one tap should remove the A, a second should put it back
 - Ask whether the 8 stray Primary flags on Patricia Ruiz have been cleared

@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 6
+// Version: 7
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,14 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v7  Showed counts a hygiene visit, not an appointment that sat in a
+//       hygiene chair. Of 237 completed in Downey's hygiene columns in
+//       August, 137 had a cleaning or perio maintenance; 22 were SRP,
+//       62 had only exams and x-rays, and 16 had nothing posted at all.
+//       Those 3 are returned per day rather than hidden, so a posting
+//       that never happened can be found. Every appointment on the day
+//       panel carries the same verdict.
 //
 //   v6  Missed is what the day held at midnight and did not do, rather
 //       than booked less showed. A day gains appointments after midnight
@@ -148,6 +156,9 @@ const HYGIENE_CODES = [
   "D4355", // full mouth debridement
   "D4910", // perio maintenance
 ];
+
+// Scaling and root planing. Counted, shown, and never called hygiene.
+const SRP_CODES = ["D4341", "D4342"];
 
 // appointment.AptStatus, confirmed against live data.
 const APT_SCHEDULED = 1;
@@ -436,18 +447,35 @@ Deno.serve(async (req: Request) => {
     // counted as hygiene at all.
     const hygList = HYGIENE_CODES.map((c) => `'${c}'`).join(",");
 
+    const srpList = SRP_CODES.map((c) => `'${c}'`).join(",");
+
     const codes =
       `(SELECT GROUP_CONCAT(pc.ProcCode ORDER BY pc.ProcCode SEPARATOR ' ') ` +
       ` FROM procedurelog pl JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
       ` WHERE pl.AptNum = a.AptNum AND pl.ProcStatus = ${APT_COMPLETE} ` +
       `   AND pc.ProcCode IN (${hygList}))`;
 
+    // What kind of visit it turned out to be, from what was posted.
+    const kind =
+      `CASE WHEN EXISTS (SELECT 1 FROM procedurelog pl JOIN procedurecode pc ` +
+      `       ON pc.CodeNum = pl.CodeNum WHERE pl.AptNum = a.AptNum ` +
+      `       AND pl.ProcStatus = ${APT_COMPLETE} AND pc.ProcCode IN (${hygList})) ` +
+      `     THEN 'hygiene' ` +
+      `WHEN EXISTS (SELECT 1 FROM procedurelog pl JOIN procedurecode pc ` +
+      `       ON pc.CodeNum = pl.CodeNum WHERE pl.AptNum = a.AptNum ` +
+      `       AND pl.ProcStatus = ${APT_COMPLETE} AND pc.ProcCode IN (${srpList})) ` +
+      `     THEN 'srp' ` +
+      `WHEN EXISTS (SELECT 1 FROM procedurelog pl WHERE pl.AptNum = a.AptNum ` +
+      `       AND pl.ProcStatus = ${APT_COMPLETE}) THEN 'other' ` +
+      `ELSE 'nothing' END`;
+
     // What stands in those columns now: the ones that happened, and the
     // ones still to come.
     const standing = await shortQueryAll(
       auth,
       `SELECT a.AptNum, TIME(a.AptDateTime) AS T, o.OpName, a.AptStatus, ` +
-        `${patientName} AS Patient, pr.Abbr AS Hyg, ${codes} AS Codes ` +
+        `${patientName} AS Patient, pr.Abbr AS Hyg, ${codes} AS Codes, ` +
+        `${kind} AS Kind ` +
         `FROM appointment a ` +
         `JOIN patient pt ON pt.PatNum = a.PatNum ` +
         `LEFT JOIN operatory o ON o.OperatoryNum = a.Op ` +
@@ -466,7 +494,7 @@ Deno.serve(async (req: Request) => {
       auth,
       `SELECT h.AptNum, TIME(h.AptDateTime) AS T, o.OpName, ` +
         `${patientName} AS Patient, pr.Abbr AS Hyg, ` +
-        `a.AptStatus AS LiveStatus, ${codes} AS Codes ` +
+        `a.AptStatus AS LiveStatus, ${codes} AS Codes, ${kind} AS Kind ` +
         `FROM histappointment h ` +
         `JOIN appointment a ON a.AptNum = h.AptNum ` +
         `JOIN patient pt ON pt.PatNum = h.PatNum ` +
@@ -491,6 +519,9 @@ Deno.serve(async (req: Request) => {
       hygienist: string;
       codes: string;
       state: "showed" | "booked" | "missed";
+      // What was posted: hygiene, srp, other, nothing. Empty until the
+      // appointment has happened.
+      kind: string;
     };
 
     const visits: Visit[] = [];
@@ -508,6 +539,7 @@ Deno.serve(async (req: Request) => {
         hygienist: String(r.Hyg ?? "").trim(),
         codes: String(r.Codes ?? "").trim(),
         state: num(r.AptStatus) === APT_COMPLETE ? "showed" : "booked",
+        kind: String(r.Kind ?? ""),
       });
     }
 
@@ -530,6 +562,7 @@ Deno.serve(async (req: Request) => {
         hygienist: String(r.Hyg ?? "").trim(),
         codes: done ? String(r.Codes ?? "").trim() : "",
         state: done ? "showed" : "missed",
+        kind: done ? String(r.Kind ?? "") : "",
       });
     }
 
@@ -585,6 +618,11 @@ Deno.serve(async (req: Request) => {
     showed: number;
     missed: number;
     open: number;
+    // Completed in a hygiene chair but not a hygiene visit. Kept apart
+    // so a posting that never happened can be found rather than hidden.
+    srp: number;
+    other_only: number;
+    nothing_posted: number;
   };
 
   const byDay = new Map<number, DayRow>();
@@ -604,6 +642,7 @@ Deno.serve(async (req: Request) => {
     const row = byDay.get(d) ?? {
       day: d, hygienists: 0, columns: 0, slots: 0,
       booked: 0, showed: 0, missed: 0, open: 0,
+      srp: 0, other_only: 0, nothing_posted: 0,
     };
 
     // An hour in a column is a slot. Two columns, two slots an hour.
@@ -681,13 +720,38 @@ Deno.serve(async (req: Request) => {
   };
 
   // ---- 3. What is on the books, day by day ----
+  //
+  // Split by what was actually posted, because that is the difference
+  // between a hygiene visit and an appointment that sat in a hygiene
+  // chair. The 3 that are not hygiene are counted rather than hidden,
+  // so a posting that never happened can be found.
+  const hygIn = HYGIENE_CODES.map((c) => `'${c}'`).join(",");
+  const srpIn = SRP_CODES.map((c) => `'${c}'`).join(",");
+
+  const hasCode = (list: string) =>
+    `EXISTS (SELECT 1 FROM procedurelog pl JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
+    `WHERE pl.AptNum = a.AptNum AND pl.ProcStatus = ${APT_COMPLETE} AND pc.ProcCode IN (${list}))`;
+  const hasAny =
+    `EXISTS (SELECT 1 FROM procedurelog pl WHERE pl.AptNum = a.AptNum ` +
+    `AND pl.ProcStatus = ${APT_COMPLETE})`;
+
+  const done = `a.AptStatus = ${APT_COMPLETE}`;
+
   const kept = await shortQueryAll(
     auth,
-    `SELECT DATE(a.AptDateTime) AS D, a.Op, a.AptStatus, COUNT(*) AS N ` +
+    `SELECT DATE(a.AptDateTime) AS D, a.Op, ` +
+      `COUNT(*) AS N, ` +
+      `SUM(CASE WHEN ${done} THEN 1 ELSE 0 END) AS Done, ` +
+      `SUM(CASE WHEN ${done} AND ${hasCode(hygIn)} THEN 1 ELSE 0 END) AS Hyg, ` +
+      `SUM(CASE WHEN ${done} AND NOT ${hasCode(hygIn)} AND ${hasCode(srpIn)} ` +
+      `         THEN 1 ELSE 0 END) AS Srp, ` +
+      `SUM(CASE WHEN ${done} AND NOT ${hasCode(hygIn)} AND NOT ${hasCode(srpIn)} ` +
+      `         AND ${hasAny} THEN 1 ELSE 0 END) AS OtherOnly, ` +
+      `SUM(CASE WHEN ${done} AND NOT ${hasAny} THEN 1 ELSE 0 END) AS Nothing_ ` +
       `FROM appointment a ` +
       `WHERE a.Op IN (${colList}) AND a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
       `AND a.AptDateTime >= '${first}' AND a.AptDateTime < '${afterLast}' ` +
-      `GROUP BY DATE(a.AptDateTime), a.Op, a.AptStatus`,
+      `GROUP BY DATE(a.AptDateTime), a.Op`,
   );
 
   if (kept.failed) return fail("Could not read this month's hygiene appointments.", kept.failed);
@@ -701,6 +765,7 @@ Deno.serve(async (req: Request) => {
       row = {
         day: d, hygienists: 0, columns: 0, slots: 0,
         booked: 0, showed: 0, missed: 0, open: 0,
+        srp: 0, other_only: 0, nothing_posted: 0,
       };
       byDay.set(d, row);
     }
@@ -712,13 +777,21 @@ Deno.serve(async (req: Request) => {
   // because the missed appointments have been moved out of it.
   const heldNow = new Map<number, number>();
 
+  const doneNow = new Map<number, number>();
+
   for (const r of kept.rows) {
     const d = dayOf(r.D);
     if (d < 1 || d > days || !countsThatDay(d, num(r.Op))) continue;
     const row = rowFor(d);
-    const n = num(r.N);
-    heldNow.set(d, (heldNow.get(d) ?? 0) + n);
-    if (num(r.AptStatus) === APT_COMPLETE) row.showed += n;
+
+    heldNow.set(d, (heldNow.get(d) ?? 0) + num(r.N));
+    doneNow.set(d, (doneNow.get(d) ?? 0) + num(r.Done));
+
+    // Showed is a hygiene visit, not an appointment in a hygiene chair.
+    row.showed += num(r.Hyg);
+    row.srp += num(r.Srp);
+    row.other_only += num(r.OtherOnly);
+    row.nothing_posted += num(r.Nothing_);
   }
 
   // ---- 4. What the day was holding when it began ----
@@ -797,13 +870,12 @@ Deno.serve(async (req: Request) => {
       // never in the snapshot - 5 missed, not 1.
       row.missed = Math.max(0, held - heldDone);
 
-      // Showed follows the appointment, not the column it ended up in.
-      // Work gets moved between columns during the day - on 1 August
-      // several completed in a column nobody was rostered in - and
-      // counting only what sits in the day's columns now would call
-      // every one of those a no-show.
-      row.showed = Math.max(row.showed, heldDone);
-      row.booked = row.showed + row.missed;
+      // Booked is what the day was holding, plus anyone taken on after
+      // midnight. Showed stays as it is - a hygiene visit - so booked
+      // less showed less missed is the number of people who came and
+      // had no hygiene posted, which is exactly what you want to see.
+      const arrived = doneNow.get(d) ?? 0;
+      row.booked = held + Math.max(0, arrived - heldDone);
     } else {
       row.booked = heldNow.get(d) ?? 0;
       row.missed = 0;
@@ -819,9 +891,15 @@ Deno.serve(async (req: Request) => {
       showed: t.showed + r.showed,
       missed: t.missed + r.missed,
       open: t.open + r.open,
+      srp: t.srp + r.srp,
+      other_only: t.other_only + r.other_only,
+      nothing_posted: t.nothing_posted + r.nothing_posted,
       days_open: t.days_open + 1,
     }),
-    { slots: 0, booked: 0, showed: 0, missed: 0, open: 0, days_open: 0 },
+    {
+      slots: 0, booked: 0, showed: 0, missed: 0, open: 0,
+      srp: 0, other_only: 0, nothing_posted: 0, days_open: 0,
+    },
   );
 
   // How many different hygienists worked at all this month, which is not

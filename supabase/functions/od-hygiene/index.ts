@@ -524,6 +524,10 @@ Deno.serve(async (req: Request) => {
     for (const p of set) hygienists.add(p);
   }
 
+  // Hygienist-days: one hygienist working one day. This is the sum, so
+  // 3 of them on a Saturday counts 3.
+  const rdhDays = out.reduce((sum, r) => sum + r.hygienists, 0);
+
   return json({
     ok: true,
     office: officeRow.slug,
@@ -532,7 +536,7 @@ Deno.serve(async (req: Request) => {
     month,
     days_in_month: days,
     days: out,
-    totals: { ...totals, hygienists: hygienists.size },
+    totals: { ...totals, hygienists: hygienists.size, rdh_days: rdhDays },
     // Worth surfacing rather than hiding: a roster entry with no
     // columns on it contributes no slots, so the day reads light.
     roster_rows_without_columns: rosterRowsWithoutColumns,

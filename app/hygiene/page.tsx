@@ -42,6 +42,7 @@ type DayRow = {
 
 type MonthTotals = {
   hygienists?: number;
+  rdh_days?: number;
   slots: number;
   booked: number;
   showed: number;
@@ -288,11 +289,15 @@ export default function HygienePage() {
             <span className="font-mono text-[15px] text-[#EDF3F1]">
               {totals.hygienists ?? 0}
             </span>{" "}
-            {(totals.hygienists ?? 0) === 1 ? "hygienist" : "hygienists"} worked{" "}
+            {(totals.hygienists ?? 0) === 1 ? "hygienist" : "hygienists"} across{" "}
+            <span className="font-mono text-[15px] text-[#EDF3F1]">
+              {totals.rdh_days ?? 0}
+            </span>{" "}
+            hygienist-days, over{" "}
             <span className="font-mono text-[15px] text-[#EDF3F1]">
               {totals.days_open}
             </span>{" "}
-            {totals.days_open === 1 ? "day" : "days"} this month.
+            {totals.days_open === 1 ? "day open" : "days open"}.
           </p>
         )}
 

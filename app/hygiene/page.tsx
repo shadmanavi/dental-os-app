@@ -1,10 +1,15 @@
 "use client";
 
-// Hygiene Dashboard — v5
+// Hygiene Dashboard — v6
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v6  The error-checking figures moved into their own column, "No
+//       hyg". They were sitting inside the Showed cell, which crowded
+//       it and pushed the digits out of line. One number a day, one
+//       click, and the panel says which kind each one was.
+//
 //   v5  Showed counts a hygiene visit. Each day row also carries the
 //       completed appointments that were not one - SRP, exams and
 //       x-rays only, and nothing posted at all - each a link to the
@@ -94,7 +99,12 @@ type DayDetail = {
 };
 
 // Which figure was clicked, so the panel opens on the right list.
-type Focus = "showed" | "booked" | "missed" | "rdh" | "srp" | "other" | "nothing";
+type Focus =
+  | "showed"
+  | "booked"
+  | "missed"
+  | "rdh"
+  | "notHygiene";
 
 // Booked means everything the day held — the ones that happened, the
 // ones that did not, and on a day still ahead the ones yet to come.
@@ -102,9 +112,10 @@ type Focus = "showed" | "booked" | "missed" | "rdh" | "srp" | "other" | "nothing
 // list on every past day.
 function inFocus(focus: Focus): (v: Visit) => boolean {
   if (focus === "booked") return () => true;
-  if (focus === "srp") return (v) => v.kind === "srp";
-  if (focus === "other") return (v) => v.kind === "other";
-  if (focus === "nothing") return (v) => v.kind === "nothing";
+  // Everything that completed without hygiene on it, in one list.
+  if (focus === "notHygiene") {
+    return (v) => v.kind === "srp" || v.kind === "other" || v.kind === "nothing";
+  }
   // Showed means a hygiene visit, so the ones that completed with no
   // hygiene posted are not in it - they are in the 3 above.
   if (focus === "showed") return (v) => v.kind === "hygiene";
@@ -384,7 +395,7 @@ export default function HygienePage() {
             posting that never happened can be found. */}
         {totals !== null && !loading && (
           <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-[#8AA6AB]">
-            <span>Also completed in the hygiene chairs this month:</span>
+            <span>The No hyg column, broken out:</span>
             <span>
               <span className="font-mono text-[15px] text-[#EDF3F1]">{totals.srp ?? 0}</span> SRP
             </span>
@@ -400,8 +411,7 @@ export default function HygienePage() {
               </span>{" "}
               with nothing posted
             </span>
-            <span className="text-[#4A6165]">— the day rows carry these too</span>
-          </p>
+            </p>
         )}
 
         {error !== "" && (
@@ -428,6 +438,7 @@ export default function HygienePage() {
                   <th className="w-32 px-3.5 pt-2.5 text-left">Filled</th>
                   <th className="px-3.5 pt-2.5 text-right">Showed</th>
                   <th className="px-3.5 pt-2.5 text-right">Missed</th>
+                  <th className="px-3.5 pt-2.5 text-right">No hyg</th>
                 </tr>
 
                 {/* The month's figures, each under the column it totals. */}
@@ -458,6 +469,10 @@ export default function HygienePage() {
                     </th>
                     <Total value={totals.showed} note={`of ${seen} seen`} tone="good" />
                     <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" />
+                    <Total
+                      value={(totals.srp ?? 0) + (totals.other_only ?? 0) + (totals.nothing_posted ?? 0)}
+                      note={`${totals.nothing_posted ?? 0} posted nothing`}
+                    />
                   </tr>
                 )}
               </thead>
@@ -465,7 +480,7 @@ export default function HygienePage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={7} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
+                    <td colSpan={8} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
                       Reading the month…
                     </td>
                   </tr>
@@ -485,7 +500,7 @@ export default function HygienePage() {
                           <span className="inline-block min-w-[22px] font-mono text-[15px]">{d}</span>
                           <span className="text-xs">{weekday}</span>
                         </td>
-                        <td colSpan={6} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
+                        <td colSpan={7} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
                           —
                         </td>
                       </tr>
@@ -560,46 +575,11 @@ export default function HygienePage() {
 
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {past || isToday ? (
-                          <>
-                            <Figure
-                              value={row.showed}
-                              onClick={() => openDay(d, "showed")}
-                              tone="text-[#79B4C4]"
-                            />
-                            {/* Came, but no hygiene on the account. This
-                                is where a missing posting shows up. */}
-                            {row.srp + row.other_only + row.nothing_posted > 0 && (
-                              <span className="ml-2 whitespace-nowrap text-[10px]">
-                                {row.srp > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openDay(d, "srp")}
-                                    className="ml-1 text-[#8AA6AB] underline decoration-dotted hover:text-[#EDF3F1]"
-                                  >
-                                    {row.srp} srp
-                                  </button>
-                                )}
-                                {row.other_only > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openDay(d, "other")}
-                                    className="ml-1 text-[#8AA6AB] underline decoration-dotted hover:text-[#EDF3F1]"
-                                  >
-                                    {row.other_only} exam
-                                  </button>
-                                )}
-                                {row.nothing_posted > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openDay(d, "nothing")}
-                                    className="ml-1 text-[#F3B0A2] underline decoration-dotted hover:text-[#EDF3F1]"
-                                  >
-                                    {row.nothing_posted} none
-                                  </button>
-                                )}
-                              </span>
-                            )}
-                          </>
+                          <Figure
+                            value={row.showed}
+                            onClick={() => openDay(d, "showed")}
+                            tone="text-[#79B4C4]"
+                          />
                         ) : (
                           <span className="text-[#4A6165]">—</span>
                         )}
@@ -614,6 +594,22 @@ export default function HygienePage() {
                             value={row.missed}
                             onClick={() => openDay(d, "missed")}
                             tone="font-bold text-[#F3B0A2]"
+                          />
+                        )}
+                      </td>
+
+                      {/* Came, and had no hygiene put on the account.
+                          Its own column so the digits still line up. */}
+                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
+                        {!past && !isToday ? (
+                          <span className="text-[#4A6165]">—</span>
+                        ) : row.srp + row.other_only + row.nothing_posted === 0 ? (
+                          <span className="text-[#4A6165]">0</span>
+                        ) : (
+                          <Figure
+                            value={row.srp + row.other_only + row.nothing_posted}
+                            onClick={() => openDay(d, "notHygiene")}
+                            tone={row.nothing_posted > 0 ? "text-[#F0A93B]" : "text-[#8AA6AB]"}
                           />
                         )}
                       </td>
@@ -639,6 +635,9 @@ export default function HygienePage() {
                     </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.showed}</td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.missed}</td>
+                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
+                      {(totals.srp ?? 0) + (totals.other_only ?? 0) + (totals.nothing_posted ?? 0)}
+                    </td>
                   </tr>
                 </tfoot>
               )}
@@ -723,7 +722,7 @@ export default function HygienePage() {
                             </span>
                             {/* On the Booked list the three states sit
                                 together, so each says which it is. */}
-                            {panel.focus === "booked" && (
+                            {(panel.focus === "booked" || panel.focus === "notHygiene") && (
                               <span
                                 className={`shrink-0 self-start rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.06em] ${
                                   v.state === "showed"
@@ -733,7 +732,7 @@ export default function HygienePage() {
                                       : "text-[#8AA6AB]"
                                 }`}
                               >
-                                {v.state}
+                                {panel.focus === "notHygiene" ? v.kind : v.state}
                               </span>
                             )}
                           </li>
@@ -752,13 +751,9 @@ export default function HygienePage() {
                       ? "Booked at midnight and not completed. "
                       : panel.focus === "showed"
                         ? "Completed with a cleaning, perio maintenance or other hygiene code. "
-                        : panel.focus === "srp"
-                          ? "Completed with scaling and root planing, which is not counted as hygiene. "
-                          : panel.focus === "other"
-                            ? "Completed with exams or x-rays and no hygiene posted. "
-                            : panel.focus === "nothing"
-                              ? "Completed with nothing at all posted to the account. "
-                              : ""}
+                        : panel.focus === "notHygiene"
+                          ? "Completed in a hygiene chair with no hygiene posted. Each says what was found instead. "
+                          : ""}
                     Read from OpenDental now; nothing is stored here.
                   </p>
                 </>

@@ -1,16 +1,19 @@
 "use client";
 
-// Hygiene Dashboard — v12
+// Hygiene Dashboard — v13
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v13 The month totals are clicks. Each opens the whole month listed
+//       by patient - one line each, times counted and on which days -
+//       so a person who missed 3 times reads once as x3, the times add
+//       to the column total, and the repeats sort to the top.
+//
 //   v12 The slot count is a click. It opens the roster with the
-//       arithmetic spelled out per shift, and the percentages sit in a
-//       fixed-width slot so the digits stay in a straight column on
-//       days with 0 slots.
 //       arithmetic spelled out per shift - hours times columns - and
-//       the total they add to, so the number is never taken on faith.
+//       the total they add to, and the percentages sit in a fixed-width
+//       slot so the digits stay in a straight column on 0-slot days.
 //
 //   v11 Booked carries its fill of the slots in parentheses, and Showed
 //       its share of booked, on every day and on the month total.
@@ -123,6 +126,24 @@ type DayDetail = {
   appointments: Visit[];
 };
 
+// A clicked month total, and one patient's line in it.
+type MonthFocus = "showed" | "srp" | "nhne" | "missed" | "booked";
+
+const MONTH_FOCUS_LABEL: Record<MonthFocus, string> = {
+  showed: "Showed — cleaning and exam done",
+  srp: "SRP — scaling and root planing",
+  nhne: "NH/NE — short a cleaning or an exam",
+  missed: "Missed — held at midnight, never seen",
+  booked: "Booked — everyone the month involved",
+};
+
+type MonthListEntry = {
+  pat_num: number;
+  name: string;
+  times: number;
+  days: string;
+};
+
 // Which figure was clicked, so the panel opens on the right list.
 type Focus =
   | "showed"
@@ -211,6 +232,44 @@ export default function HygienePage() {
   const [detail, setDetail] = useState<DayDetail | null>(null);
   const [detailBusy, setDetailBusy] = useState(false);
   const [detailError, setDetailError] = useState("");
+
+  // The month panel: a clicked total, listed by patient with how many
+  // times each is counted. The times add to the total; the same person
+  // can miss twice, and the list says so rather than hiding it.
+  const [monthPanel, setMonthPanel] = useState<MonthFocus | null>(null);
+  const [monthList, setMonthList] = useState<MonthListEntry[] | null>(null);
+  const [monthBusy, setMonthBusy] = useState(false);
+  const [monthError, setMonthError] = useState("");
+
+  const openMonth = useCallback(
+    async (mf: MonthFocus) => {
+      setMonthPanel(mf);
+      setMonthList(null);
+      setMonthError("");
+      setMonthBusy(true);
+
+      try {
+        const supabase = createClient();
+        const { data, error: fnError } = await supabase.functions.invoke("od-hygiene", {
+          body: { office: officeSlug, action: "month_list", year, month, focus: mf },
+        });
+
+        if (fnError || !data?.ok) {
+          setMonthError(String(data?.error ?? "That total could not be read."));
+          return;
+        }
+
+        setMonthList((data.patients ?? []) as MonthListEntry[]);
+      } catch (caught) {
+        setMonthError(
+          caught instanceof Error ? caught.message : "That total could not be read.",
+        );
+      } finally {
+        setMonthBusy(false);
+      }
+    },
+    [officeSlug, year, month],
+  );
 
   // ---- Session and offices ----
   useEffect(() => {
@@ -488,7 +547,7 @@ export default function HygienePage() {
                       </span>
                     </th>
                     <Total value={totals.slots} note="slot hours" />
-                    <Total value={totals.booked} note={`${fillRate}% filled`} />
+                    <Total value={totals.booked} note={`% filled`} onClick={() => openMonth("booked")} />
                     <Total value={unsold} note="gone for good" struck={unsold > 0} />
                     <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">
                       {stillOpen > 0 ? `${stillOpen} still bookable` : "nothing left open"}
@@ -501,10 +560,11 @@ export default function HygienePage() {
                           : "—"
                       }
                       tone="good"
+                      onClick={() => openMonth("showed")}
                     />
-                    <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" />
-                    <Total value={totals.nhne ?? 0} note="short a charge" tone="warn" />
-                    <Total value={totals.srp ?? 0} note="patients" />
+                    <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" onClick={() => openMonth("missed")} />
+                    <Total value={totals.nhne ?? 0} note="short a charge" tone="warn" onClick={() => openMonth("nhne")} />
+                    <Total value={totals.srp ?? 0} note="patients" onClick={() => openMonth("srp")} />
                   </tr>
                 )}
               </thead>
@@ -725,6 +785,80 @@ export default function HygienePage() {
             </table>
           </div>
         </div>
+
+        {/* A month total behind a number: each patient once, with how
+            many times they are counted. The times add to the total. */}
+        {monthPanel !== null && (
+          <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 px-4 py-8">
+            <div className="w-full max-w-2xl overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="flex flex-wrap items-baseline gap-3 border-b border-[#2C4E54] px-5 py-3">
+                <h3 className="text-[13px] font-bold uppercase tracking-[0.06em]">
+                  {MONTHS[month - 1]} {year} total
+                </h3>
+                <span className="rounded bg-[#16292D] px-2 py-0.5 text-[11px] font-bold uppercase tracking-[0.06em] text-[#79B4C4]">
+                  {MONTH_FOCUS_LABEL[monthPanel]}
+                </span>
+                {monthList !== null && (
+                  <span className="font-mono text-[11px] tabular-nums text-[#8AA6AB]">
+                    {monthList.reduce((s, p) => s + p.times, 0)} counted ·{" "}
+                    {monthList.length} patients
+                  </span>
+                )}
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => setMonthPanel(null)}
+                  className="rounded-lg border border-[#2C4E54] px-3 py-1 text-xs text-[#8AA6AB] hover:bg-[#193034]"
+                >
+                  Close
+                </button>
+              </div>
+
+              {monthBusy && (
+                <p className="px-5 py-8 text-center text-sm text-[#8AA6AB]">Reading the month…</p>
+              )}
+
+              {monthError !== "" && (
+                <p className="m-5 rounded-lg border border-[#E4674F] bg-[#2A1714] px-3 py-2 text-sm text-[#F3B0A2]">
+                  {monthError}
+                </p>
+              )}
+
+              {monthList !== null && !monthBusy && (
+                <>
+                  <ul className="max-h-[28rem] divide-y divide-[#2C4E54]/50 overflow-y-auto">
+                    {monthList.map((p) => (
+                      <li key={p.pat_num} className="flex items-baseline gap-3 px-5 py-2 text-sm">
+                        <span className="min-w-0 flex-1 truncate text-[#EDF3F1]">{p.name}</span>
+                        <span className="shrink-0 text-xs text-[#8AA6AB]">
+                          {monthPanel === "missed" ? "missed on" : "on"}{" "}
+                          <span className="font-mono">{p.days.split(",").join(", ")}</span>
+                        </span>
+                        <span
+                          className={`w-10 shrink-0 text-right font-mono tabular-nums ${
+                            p.times > 1 ? "font-bold text-[#F3B0A2]" : "text-[#8AA6AB]"
+                          }`}
+                        >
+                          ×{p.times}
+                        </span>
+                      </li>
+                    ))}
+                    {monthList.length === 0 && (
+                      <li className="px-5 py-6 text-center text-sm text-[#4A6165]">
+                        Nobody this month.
+                      </li>
+                    )}
+                  </ul>
+                  <p className="border-t border-[#2C4E54] px-5 py-2.5 text-[11px] text-[#4A6165]">
+                    Each patient is listed once. ×2 or more means they are counted
+                    that many times in the total — the repeats sort to the top.
+                    Read from OpenDental now; nothing is stored here.
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* The day behind a number: who was on, who came, who did not.
             Read from OpenDental when opened; nothing is stored. */}
@@ -962,29 +1096,44 @@ function Figure({
 }
 
 // One month figure, sitting in the header above the column it totals.
+// With onClick it opens the month's own list of patients.
 function Total({
   value,
   note,
   tone,
   struck,
+  onClick,
 }: {
   value: number;
   note: string;
   tone?: "good" | "warn";
   struck?: boolean;
+  onClick?: () => void;
 }) {
   const colour =
     tone === "good" ? "text-[#79B4C4]" : tone === "warn" ? "text-[#E4674F]" : "text-[#EDF3F1]";
 
+  const figure = struck ? (
+    <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{value}</s>
+  ) : (
+    value
+  );
+
   return (
     <th className="whitespace-nowrap px-3.5 pb-2 pt-0.5 text-right align-top">
-      <span className={`block font-mono text-[17px] font-bold tabular-nums ${colour}`}>
-        {struck ? (
-          <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{value}</s>
-        ) : (
-          value
-        )}
-      </span>
+      {onClick ? (
+        <button
+          type="button"
+          onClick={onClick}
+          className={`block w-full text-right font-mono text-[17px] font-bold tabular-nums underline decoration-dotted underline-offset-4 decoration-[#4A6165] hover:decoration-[#EDF3F1] ${colour}`}
+        >
+          {figure}
+        </button>
+      ) : (
+        <span className={`block font-mono text-[17px] font-bold tabular-nums ${colour}`}>
+          {figure}
+        </span>
+      )}
       <span className="block font-sans text-[11px] font-normal text-[#4A6165]">{note}</span>
     </th>
   );

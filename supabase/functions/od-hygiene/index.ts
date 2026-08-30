@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 14
+// Version: 15
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,11 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v15 New action month_list: a clicked month total, listed by patient
+//       with how many times each is counted and on which days. Times
+//       sum to the column total; missed counts only days that have
+//       been.
 //
 //   v14 The midnight snapshot is grouped per day, not per month. An
 //       appointment can sit on 2 days' books - missed on the 1st,
@@ -393,6 +398,7 @@ Deno.serve(async (req: Request) => {
     action?: string;
     year?: number;
     day?: number;
+    focus?: string;
     month?: number;
   };
 
@@ -403,8 +409,17 @@ Deno.serve(async (req: Request) => {
   }
 
   const action = (body.action ?? "").toLowerCase().trim();
-  if (action !== "month" && action !== "day") {
-    return json({ ok: false, error: "action must be month or day." }, 400);
+  if (action !== "month" && action !== "day" && action !== "month_list") {
+    return json({ ok: false, error: "action must be month, day, or month_list." }, 400);
+  }
+
+  const focus = (body.focus ?? "").toLowerCase().trim();
+  const MONTH_FOCUSES = ["showed", "srp", "nhne", "missed", "booked"];
+  if (action === "month_list" && !MONTH_FOCUSES.includes(focus)) {
+    return json({
+      ok: false,
+      error: `focus must be one of: ${MONTH_FOCUSES.join(", ")}.`,
+    }, 400);
   }
 
   const year = num(body.year);
@@ -500,6 +515,150 @@ Deno.serve(async (req: Request) => {
   // Nothing is stored. Patient names are read from OpenDental and sent
   // to the screen, the same as the chart does, and go no further.
   // ===================================================================
+  // ===================================================================
+  // month_list — a month total, named
+  //
+  // A month total is a sum of days, so one person can be in it several
+  // times - missed on the 1st, rebooked, missed again on the 3rd. The
+  // list therefore names each patient once with how many times they
+  // are counted and on which days; the times add up to the column's
+  // total, and the repeats sort to the top, which is the follow-up
+  // list the front desk actually wants.
+  // ===================================================================
+  if (action === "month_list") {
+    const tickedQ = await shortQueryAll(
+      auth,
+      `SELECT OperatoryNum FROM operatory WHERE IsHygiene = 1 AND IsHidden = 0`,
+    );
+    if (tickedQ.failed) {
+      return fail("Could not read this office's hygiene columns.", tickedQ.failed);
+    }
+
+    const tickedIn = tickedQ.rows
+      .map((r) => num(r.OperatoryNum))
+      .filter((n) => n > 0)
+      .join(",") || "0";
+
+    const spec = hygSpecialty;
+    const nm = `TRIM(CONCAT(pt.LName, ', ', pt.FName))`;
+
+    const has = (list: string[]) =>
+      `EXISTS (SELECT 1 FROM procedurelog pl JOIN procedurecode pc ` +
+      `ON pc.CodeNum = pl.CodeNum WHERE pl.AptNum = a.AptNum ` +
+      `AND pl.ProcStatus = ${APT_COMPLETE} ` +
+      `AND pc.ProcCode IN (${list.map((c) => `'${c}'`).join(",")}))`;
+
+    // The same membership the day rows use: any column the appointment
+    // occupied that date that was rostered, or the hygiene-ticked
+    // columns on a day with nobody rostered.
+    const rosterDayA =
+      `EXISTS(SELECT 1 FROM schedule s5 JOIN provider pv5 ON pv5.ProvNum=s5.ProvNum ` +
+      `WHERE s5.SchedType=1 AND pv5.Specialty=${spec} AND s5.SchedDate=DATE(a.AptDateTime))`;
+
+    const belongsA =
+      `( EXISTS(SELECT 1 FROM schedule s3 JOIN scheduleop so3 ON so3.ScheduleNum=s3.ScheduleNum ` +
+      `JOIN provider pv3 ON pv3.ProvNum=s3.ProvNum WHERE s3.SchedType=1 AND pv3.Specialty=${spec} ` +
+      `AND s3.SchedDate=DATE(a.AptDateTime) AND so3.OperatoryNum=a.Op) ` +
+      `OR EXISTS(SELECT 1 FROM histappointment h4 JOIN schedule s4 ON s4.SchedDate=DATE(h4.AptDateTime) ` +
+      `JOIN scheduleop so4 ON so4.ScheduleNum=s4.ScheduleNum JOIN provider pv4 ON pv4.ProvNum=s4.ProvNum ` +
+      `WHERE h4.AptNum=a.AptNum AND DATE(h4.AptDateTime)=DATE(a.AptDateTime) AND s4.SchedType=1 ` +
+      `AND pv4.Specialty=${spec} AND so4.OperatoryNum=h4.Op) ` +
+      `OR ( NOT ${rosterDayA} AND (a.Op IN (${tickedIn}) ` +
+      `OR EXISTS(SELECT 1 FROM histappointment h6 WHERE h6.AptNum=a.AptNum ` +
+      `AND DATE(h6.AptDateTime)=DATE(a.AptDateTime) AND h6.Op IN (${tickedIn}))) ) )`;
+
+    const belongsH =
+      `( EXISTS(SELECT 1 FROM schedule s3 JOIN scheduleop so3 ON so3.ScheduleNum=s3.ScheduleNum ` +
+      `JOIN provider pv3 ON pv3.ProvNum=s3.ProvNum WHERE s3.SchedType=1 AND pv3.Specialty=${spec} ` +
+      `AND s3.SchedDate=DATE(h.AptDateTime) AND so3.OperatoryNum=h.Op) ` +
+      `OR ( NOT EXISTS(SELECT 1 FROM schedule s5 JOIN provider pv5 ON pv5.ProvNum=s5.ProvNum ` +
+      `WHERE s5.SchedType=1 AND pv5.Specialty=${spec} AND s5.SchedDate=DATE(h.AptDateTime)) ` +
+      `AND h.Op IN (${tickedIn}) ) )`;
+
+    const innerFlags =
+      `SELECT DAYOFMONTH(a.AptDateTime) AS D, a.PatNum, MAX(${nm}) AS Nm, ` +
+      `MAX(a.AptStatus=${APT_COMPLETE}) AS dn, ` +
+      `MAX((a.AptStatus=${APT_COMPLETE}) AND ${has(CLEANING_CODES)}) AS cl, ` +
+      `MAX((a.AptStatus=${APT_COMPLETE}) AND ${has(EXAM_CODES)}) AS ex, ` +
+      `MAX((a.AptStatus=${APT_COMPLETE}) AND ${has(SRP_CODES)}) AS sr ` +
+      `FROM appointment a JOIN patient pt ON pt.PatNum=a.PatNum ` +
+      `WHERE a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+      `AND a.AptDateTime >= '${first}' AND a.AptDateTime < '${afterLast}' ` +
+      `AND ${belongsA} GROUP BY DAYOFMONTH(a.AptDateTime), a.PatNum`;
+
+    // Missed looks only at days that have been; a future day's book is
+    // not a miss yet.
+    const heldInner =
+      `SELECT DAYOFMONTH(h.AptDateTime) AS D, h.PatNum, MAX(${nm}) AS Nm ` +
+      `FROM histappointment h JOIN patient pt ON pt.PatNum=h.PatNum ` +
+      `WHERE h.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+      `AND h.AptDateTime >= '${first}' AND h.AptDateTime < '${afterLast}' ` +
+      `AND DATE(h.AptDateTime) <= '${localDate()}' ` +
+      `AND h.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
+      `WHERE h2.AptNum = h.AptNum AND h2.HistDateTStamp < DATE(h.AptDateTime)) ` +
+      `AND ${belongsH} GROUP BY DAYOFMONTH(h.AptDateTime), h.PatNum`;
+
+    const doneInner =
+      `SELECT DAYOFMONTH(a.AptDateTime) AS D, a.PatNum FROM appointment a ` +
+      `WHERE a.AptStatus = ${APT_COMPLETE} ` +
+      `AND a.AptDateTime >= '${first}' AND a.AptDateTime < '${afterLast}' ` +
+      `AND ${belongsA} GROUP BY DAYOFMONTH(a.AptDateTime), a.PatNum`;
+
+    const VERDICT_COND: Record<string, string> = {
+      showed: `x.dn=1 AND x.cl=1 AND x.ex=1`,
+      srp: `x.dn=1 AND NOT(x.cl=1 AND x.ex=1) AND x.sr=1`,
+      nhne: `x.dn=1 AND NOT(x.cl=1 AND x.ex=1) AND x.sr=0`,
+    };
+
+    let sql: string;
+    if (focus === "missed") {
+      sql =
+        `SELECT hd.PatNum, MAX(hd.Nm) AS Nm, COUNT(*) AS Times, ` +
+        `GROUP_CONCAT(hd.D ORDER BY hd.D) AS Days ` +
+        `FROM (${heldInner}) hd LEFT JOIN (${doneInner}) dn ` +
+        `ON dn.D = hd.D AND dn.PatNum = hd.PatNum ` +
+        `WHERE dn.PatNum IS NULL GROUP BY hd.PatNum ORDER BY Times DESC, Nm`;
+    } else if (focus === "booked") {
+      sql =
+        `SELECT u.PatNum, MAX(u.Nm) AS Nm, COUNT(*) AS Times, ` +
+        `GROUP_CONCAT(u.D ORDER BY u.D) AS Days FROM ` +
+        `(SELECT DAYOFMONTH(a.AptDateTime) AS D, a.PatNum, MAX(${nm}) AS Nm ` +
+        ` FROM appointment a JOIN patient pt ON pt.PatNum=a.PatNum ` +
+        ` WHERE a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+        ` AND a.AptDateTime >= '${first}' AND a.AptDateTime < '${afterLast}' ` +
+        ` AND ${belongsA} GROUP BY DAYOFMONTH(a.AptDateTime), a.PatNum ` +
+        ` UNION ${heldInner}) u GROUP BY u.PatNum ORDER BY Times DESC, Nm`;
+    } else {
+      sql =
+        `SELECT x.PatNum, MAX(x.Nm) AS Nm, COUNT(*) AS Times, ` +
+        `GROUP_CONCAT(x.D ORDER BY x.D) AS Days ` +
+        `FROM (${innerFlags}) x WHERE ${VERDICT_COND[focus]} ` +
+        `GROUP BY x.PatNum ORDER BY Times DESC, Nm`;
+    }
+
+    const list = await shortQueryAll(auth, sql);
+    if (list.failed) return fail("Could not read that month total.", list.failed);
+
+    const patients = list.rows.map((r) => ({
+      pat_num: num(r.PatNum),
+      name: String(r.Nm ?? "").trim(),
+      times: num(r.Times),
+      days: String(r.Days ?? ""),
+    }));
+
+    return json({
+      ok: true,
+      office: officeRow.slug,
+      year,
+      month,
+      focus,
+      patients,
+      total_times: patients.reduce((s, p) => s + p.times, 0),
+      distinct_patients: patients.length,
+      read_at: new Date().toISOString(),
+    });
+  }
+
   if (action === "day") {
     const date = `${year}-${pad(month)}-${pad(dayAsked)}`;
 

@@ -1,10 +1,13 @@
 "use client";
 
-// Hygiene Dashboard — v10
+// Hygiene Dashboard — v11
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v11 Booked carries its fill of the slots in parentheses, and Showed
+//       its share of booked, on every day and on the month total.
+//
 //   v10 The panel title bar names the list it is showing - Showed,
 //       Missed, Booked, NH/NE, SRP - beside the day and its figures.
 //
@@ -472,7 +475,15 @@ export default function HygienePage() {
                     <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">
                       {stillOpen > 0 ? `${stillOpen} still bookable` : "nothing left open"}
                     </th>
-                    <Total value={totals.showed} note={`of ${seen} seen`} tone="good" />
+                    <Total
+                      value={totals.showed}
+                      note={
+                        totals.booked > 0
+                          ? `${Math.round((totals.showed / totals.booked) * 100)}% of booked`
+                          : "—"
+                      }
+                      tone="good"
+                    />
                     <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" />
                     <Total value={totals.nhne ?? 0} note="short a charge" tone="warn" />
                     <Total value={totals.srp ?? 0} note="patients" />
@@ -553,6 +564,12 @@ export default function HygienePage() {
                         ahead ? "text-[#EDF3F1]" : ""
                       }`}>
                         <Figure value={row.booked} onClick={() => openDay(d, "booked")} />
+                        {/* How full the day was booked against its slots. */}
+                        {row.slots > 0 && (
+                          <span className="ml-1 text-[10px] text-[#4A6165]">
+                            ({Math.round((row.booked / row.slots) * 100)}%)
+                          </span>
+                        )}
                       </td>
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {row.open === 0 ? (
@@ -578,11 +595,19 @@ export default function HygienePage() {
 
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {past || isToday ? (
-                          <Figure
-                            value={row.showed}
-                            onClick={() => openDay(d, "showed")}
-                            tone="text-[#79B4C4]"
-                          />
+                          <>
+                            <Figure
+                              value={row.showed}
+                              onClick={() => openDay(d, "showed")}
+                              tone="text-[#79B4C4]"
+                            />
+                            {/* How many of the booked actually showed. */}
+                            {row.booked > 0 && (
+                              <span className="ml-1 text-[10px] text-[#4A6165]">
+                                ({Math.round((row.showed / row.booked) * 100)}%)
+                              </span>
+                            )}
+                          </>
                         ) : (
                           <span className="text-[#4A6165]">—</span>
                         )}
@@ -639,7 +664,14 @@ export default function HygienePage() {
                       {MONTHS[month - 1]} total
                     </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.slots}</td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.booked}</td>
+                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
+                      {totals.booked}
+                      {totals.slots > 0 && (
+                        <span className="ml-1 text-[10px] font-normal text-[#4A6165]">
+                          ({fillRate}%)
+                        </span>
+                      )}
+                    </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
                       <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{unsold}</s>
                       {stillOpen > 0 ? ` + ${stillOpen}` : ""}
@@ -647,7 +679,14 @@ export default function HygienePage() {
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-left font-normal text-[#8AA6AB]">
                       {fillRate}% filled
                     </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.showed}</td>
+                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
+                      {totals.showed}
+                      {totals.booked > 0 && (
+                        <span className="ml-1 text-[10px] font-normal text-[#4A6165]">
+                          ({Math.round((totals.showed / totals.booked) * 100)}%)
+                        </span>
+                      )}
+                    </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.missed}</td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right text-[#F3B0A2]">
                       {totals.nhne ?? 0}

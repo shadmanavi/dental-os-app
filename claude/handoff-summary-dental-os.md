@@ -2,7 +2,7 @@
 
 **Owner:** Shad
 **Last updated:** 28 August 2026
-**Session focus:** Moved onto Claude Code. Wrote the missing migration, built a PDF reader for payer fee schedules and loaded 6 of them into both offices, added payment recording from the tablet, and built the Hygiene Dashboard.
+**Session focus:** Moved onto Claude Code. Wrote the missing migration, built a PDF reader for payer fee schedules and loaded 6 of them into both offices, added payment recording from the tablet, and built the Hygiene Dashboard. A parallel chat built the Production Dashboard on 29 August.
 
 **Working from the repo now.** Claude Code runs inside
 `C:\Users\shadm\dental-os-app\dental-os-app`, so it reads the real files
@@ -52,7 +52,8 @@ the last one.
 | **Live in database** | Primary / Permanent tile | Missing & Other, Existing, both offices. Write proved on patient 17 |
 | **Live in database** | `chart_tiles.initial_type` widened to allow Primary | Schema change, applied by hand |
 | **Live in database** | Row-level security enabled on `dos_code_names`, `dos_codenum_map`, `dos_write_log` | Closed a Supabase critical security alert. No table in `public` is open now |
-| **Deployed** | `od-hygiene` **v7** and the Hygiene Dashboard **v6** at `/hygiene` | Third tile on the home page. Slots from the roster, booked from the midnight snapshot, showed only where hygiene was posted, and a No hyg column that finds missing postings. Every figure opens the patients behind it |
+| **Deployed** | `od-hygiene` **v15** and the Hygiene Dashboard **v15** at `/hygiene` | Third tile on the home page. Slots from the roster, booked from the midnight snapshot, showed only where a cleaning **and** an exam were both posted, SRP and NH/NE in their own columns, missed carried per day so a twice-missed rebooking counts twice. Every figure — day or month total — opens the patients behind it, each human counted once with a ×N where they recur. Audited against hand-built days at both offices; row and panel come from the same query and one verdict |
+| **Deployed** | `od-production` **v1** and the Production Dashboard **v1** at `/production` | Built by a parallel chat, 29 August, commit `6ad2e36`. Fourth tile on the home page |
 | **Deployed** | `od-payment` **v2** and chart page **v19.8** | Records a card already taken on the Clover terminal, stamped with the presenter. Proved on patient 17 |
 | **Deployed** | `fee-schedule-push` **v3** | A create refused as already existing becomes an update |
 | **In the repo** | `scripts/fee-schedule-pdf.mjs` **v5** | Turns a payer's PDF into the CSV the upload screen takes |
@@ -68,13 +69,7 @@ the last one.
 
 ## 3. Next steps (prioritized)
 
-1. **Production Dashboard** — the same shape as the Hygiene Dashboard, but by provider rather than by hygienist. A day to a row, and for each provider: scheduled production, patients scheduled, patients who showed, and production actually done. Every figure clicks through to the detail for that provider.
-
-   Its error checking is the interesting part and goes further than hygiene's: match the doctor's note against the procedures completed, and surface patients seen with no documentation at all. The hygiene build already found the same class of problem — 16 appointments in August completed with nothing posted to the account.
-
-   Most of `od-hygiene` is reusable: the roster read, the midnight snapshot, the day panel, and the per-day column logic. What is new is money, the note comparison, and keying on the treating provider instead of the hygienist.
-
-   Worth settling the posting question first — it is still open from 21 August and this dashboard will keep running into it.
+1. **Production Dashboard — built.** Landed 29 August by a parallel chat (`od-production` v1, `/production` v1, commit `6ad2e36`). Its note-vs-procedure checking still depends on the posting decision, item 2. Verify its numbers against the offices the way the hygiene ones were.
 
 2. **Settle how procedures get posted** — open since 21 August and now blocking more than one thing. The 5 options are in section 3a and Shad has not chosen. Claims and preauthorizations both wait on it, the Production Dashboard's note checking depends on it, and the Hygiene Dashboard has already found the symptom: 16 appointments in August completed at Downey with nothing posted to the account at all, and another 62 with only exams and x-rays
 
@@ -101,7 +96,7 @@ Together that takes a month read from 7 OpenDental round trips to 5, with the 2 
 
 - A staged fee upload has no lock. Two browsers pushing the same upload would both claim the same rows. Different offices in different tabs is safe and is how it is used
 - A failed row on a staged upload cannot be retried from the review screen. It has to be set back to pending in the database
-- The Hygiene Dashboard does not count an appointment moved to a different day as missed on the day it was booked for
+- Open question for Shad: should NH/NE count days with no RDH rostered? Maywood 13 August shows 29 NH/NE — really doctor production in hygiene chairs on a no-RDH day. Asked 28 August, not yet answered
 
 ---
 

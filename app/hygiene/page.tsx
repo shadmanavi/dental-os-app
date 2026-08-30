@@ -1,10 +1,13 @@
 "use client";
 
-// Hygiene Dashboard — v9
+// Hygiene Dashboard — v10
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v10 The panel title bar names the list it is showing - Showed,
+//       Missed, Booked, NH/NE, SRP - beside the day and its figures.
+//
 //   v9  The NH/NE panel lists its 2 groups one under the other: no
 //       exam - cleaning done, exam unbilled - then no cleaning. Counts
 //       come from the same verdict the month row uses.
@@ -670,6 +673,17 @@ export default function HygienePage() {
                 </h3>
                 <span className="text-xs text-[#8AA6AB]">
                   {weekdayOf(year, month, panel.day)}
+                </span>
+
+                {/* What this list actually is, so the reader never has
+                    to remember which figure they clicked. */}
+                <span className="rounded bg-[#16292D] px-2 py-0.5 text-[11px] font-bold uppercase tracking-[0.06em] text-[#79B4C4]">
+                  {panel.focus === "showed" && "Showed — cleaning and exam done"}
+                  {panel.focus === "missed" && "Missed — held at midnight, never seen"}
+                  {panel.focus === "booked" && "Booked — everyone the day involved"}
+                  {panel.focus === "notHygiene" && "NH/NE — short a cleaning or an exam"}
+                  {panel.focus === "srp" && "SRP — scaling and root planing"}
+                  {panel.focus === "rdh" && "Rostered hygienists"}
                 </span>
 
                 {/* The day's own figures, so it is plain what this list

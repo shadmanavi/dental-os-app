@@ -1,6 +1,6 @@
 "use client";
 
-// Provider Summary — v3
+// Provider Summary — v4
 // A month by provider, one row each: the days OpenDental scheduled
 // them against the days they actually produced, patients seen, what it
 // added to, what a working day averaged, and how many of their
@@ -10,6 +10,12 @@
 // day rows; it earned its own page when it earned its own questions.
 //
 // Changelog:
+//   v4  The General rows carry exams and diagnosis per exam. Exams is
+//       completed exam procedures on the doctor's number; Dx/exam is
+//       the dollars they treatment-planned this month over those
+//       exams — what an exam turns into, on average. The other groups
+//       show a dash; hygienists and specialists are not examiners.
+//
 //   v3  Three groups instead of two — General, Specialists, Hygienists
 //       — each with its own subtotal line, and the foot row named for
 //       what it is: the office total.
@@ -52,6 +58,9 @@ type ProvRow = {
   days_scheduled: number;
   days_worked: number;
   patients: number;
+  exams: number;
+  dx_count: number;
+  dx_fees: number;
   production: number;
   nonote: number;
 };
@@ -267,13 +276,15 @@ export default function ProviderSummaryPage() {
 
         <div className="overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] border-collapse">
+            <table className="w-full min-w-[880px] border-collapse">
               <thead>
                 <tr className="border-b border-[#2C4E54] text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
                   <th className="px-3.5 py-2 text-left">Provider</th>
                   <th className="px-3.5 py-2 text-right">Days sched</th>
                   <th className="px-3.5 py-2 text-right">Days worked</th>
                   <th className="px-3.5 py-2 text-right">Patients</th>
+                  <th className="px-3.5 py-2 text-right">Exams</th>
+                  <th className="px-3.5 py-2 text-right">Dx/exam</th>
                   <th className="px-3.5 py-2 text-right">Production</th>
                   <th className="px-3.5 py-2 text-right">Per day</th>
                   <th className="px-3.5 py-2 text-right">Undocumented</th>
@@ -282,7 +293,7 @@ export default function ProviderSummaryPage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={7} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
+                    <td colSpan={9} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
                       Reading the month…
                     </td>
                   </tr>
@@ -290,7 +301,7 @@ export default function ProviderSummaryPage() {
 
                 {!loading && providers.length === 0 && error === "" && (
                   <tr>
-                    <td colSpan={7} className="px-3.5 py-8 text-center text-sm text-[#4A6165]">
+                    <td colSpan={9} className="px-3.5 py-8 text-center text-sm text-[#4A6165]">
                       Nothing produced this month.
                     </td>
                   </tr>
@@ -308,6 +319,21 @@ export default function ProviderSummaryPage() {
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5" />
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right">
                       {g.rows.reduce((s, p) => s + p.patients, 0)}
+                    </td>
+                    {/* Exams and diagnosis are General's figures; the
+                        other groups are not examiners. */}
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right">
+                      {g.title === "General"
+                        ? g.rows.reduce((s, p) => s + p.exams, 0)
+                        : ""}
+                    </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right">
+                      {(() => {
+                        if (g.title !== "General") return "";
+                        const e = g.rows.reduce((s, p) => s + p.exams, 0);
+                        const f = g.rows.reduce((s, p) => s + p.dx_fees, 0);
+                        return e > 0 ? usd(f / e) : "";
+                      })()}
                     </td>
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right text-[#79B4C4]">
                       {usd(g.rows.reduce((s, p) => s + p.production, 0))}
@@ -347,6 +373,20 @@ export default function ProviderSummaryPage() {
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                       {p.patients}
                     </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
+                      {p.is_gp ? (
+                        p.exams
+                      ) : (
+                        <span className="text-[#4A6165]">—</span>
+                      )}
+                    </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
+                      {p.is_gp && p.exams > 0 ? (
+                        usd(p.dx_fees / p.exams)
+                      ) : (
+                        <span className="text-[#4A6165]">—</span>
+                      )}
+                    </td>
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right text-[#79B4C4]">
                       {usd(p.production)}
                     </td>
@@ -379,6 +419,8 @@ export default function ProviderSummaryPage() {
                     <td className="px-3.5 py-2" />
                     <td className="px-3.5 py-2" />
                     <td className="px-3.5 py-2 text-right">{totals.patients}</td>
+                    <td className="px-3.5 py-2" />
+                    <td className="px-3.5 py-2" />
                     <td className="px-3.5 py-2 text-right text-[#79B4C4]">
                       {usd(totals.production)}
                     </td>
@@ -401,10 +443,13 @@ export default function ProviderSummaryPage() {
           Days sched is the OpenDental roster — days this month the schedule has
           the provider down to work, past and still to come. Days worked is a
           day with completed work on their number, and Per day is production
-          over days worked. Production follows the procedure&apos;s provider, so an
-          exam a dentist did inside a hygiene visit lands on the dentist. The
-          patients total counts each provider&apos;s patients once each — a patient
-          two providers saw is in two rows.
+          over days worked. Exams is completed exam procedures on the doctor&apos;s
+          number, and Dx/exam is the dollars they treatment-planned this month
+          over those exams — what an exam turns into, on average. Production
+          follows the procedure&apos;s provider, so an exam a dentist did inside a
+          hygiene visit lands on the dentist. The patients total counts each
+          provider&apos;s patients once each — a patient two providers saw is in
+          two rows.
         </p>
       </div>
     </main>

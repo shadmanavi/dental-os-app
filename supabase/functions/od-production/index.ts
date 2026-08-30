@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-production/index.ts
-// Version: 4
+// Version: 5
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -17,6 +17,13 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v5  providers carries exams and diagnosis. Exams is the completed
+//       exam procedures on the provider's number this month. Diagnosis
+//       is the treatment they planned this month - every procedure
+//       whose DateTP falls in the month, planned still or completed
+//       since, summed by count and by fee - so the screen can put
+//       diagnosed dollars beside the exams that produced them.
 //
 //   v4  providers carries each provider's specialty, read from
 //       definition category 35 the way the hygiene dashboard does,
@@ -403,6 +410,49 @@ Deno.serve(async (req: Request) => {
 
     if (roster.failed) return fail("Could not read this month's roster.", roster.failed);
 
+    // Exams completed this month, on the provider who did them. The
+    // same exam codes the hygiene dashboard counts, C0130 included -
+    // Downey's own 3 month recall exam.
+    const EXAM_CODES = ["D0120", "D0140", "D0150", "D0170", "D0180", "C0130"];
+    const examIn = EXAM_CODES.map((c) => `'${c}'`).join(",");
+
+    const exams = await shortQueryAll(
+      auth,
+      `SELECT pl.ProvNum, COUNT(*) AS Exams ` +
+        `FROM procedurelog pl JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
+        `WHERE pl.ProcStatus = ${PROC_COMPLETE} ` +
+        `AND pl.ProcDate >= '${first}' AND pl.ProcDate < '${afterLast}' ` +
+        `AND pc.ProcCode IN (${examIn}) ` +
+        `GROUP BY pl.ProvNum`,
+    );
+
+    if (exams.failed) return fail("Could not read this month's exams.", exams.failed);
+
+    // What each provider diagnosed this month: every procedure whose
+    // treatment-plan date falls in the month, planned still or
+    // completed since. Deleted rows and charted conditions are not
+    // diagnosis and are excluded by status.
+    const dx = await shortQueryAll(
+      auth,
+      `SELECT pl.ProvNum, COUNT(*) AS DxCount, SUM(${fee("pl")}) AS DxFees ` +
+        `FROM procedurelog pl ` +
+        `WHERE pl.ProcStatus IN (1, ${PROC_COMPLETE}) ` +
+        `AND pl.DateTP >= '${first}' AND pl.DateTP < '${afterLast}' ` +
+        `GROUP BY pl.ProvNum`,
+    );
+
+    if (dx.failed) return fail("Could not read this month's diagnosed treatment.", dx.failed);
+
+    const examsOf = new Map<number, number>();
+    for (const r of exams.rows) {
+      examsOf.set(num(r.ProvNum), num(r.Exams));
+    }
+
+    const dxOf = new Map<number, { count: number; fees: number }>();
+    for (const r of dx.rows) {
+      dxOf.set(num(r.ProvNum), { count: num(r.DxCount), fees: num(r.DxFees) });
+    }
+
     const nameOf = new Map<number, { abbr: string; full: string; specialty: string }>();
     for (const r of names.rows) {
       const abbr = String(r.Abbr ?? "").trim();
@@ -472,6 +522,9 @@ Deno.serve(async (req: Request) => {
           days_scheduled: schedDays.get(provNum) ?? 0,
           days_worked: m.days.size,
           patients: m.patients.size,
+          exams: examsOf.get(provNum) ?? 0,
+          dx_count: dxOf.get(provNum)?.count ?? 0,
+          dx_fees: Math.round((dxOf.get(provNum)?.fees ?? 0) * 100) / 100,
           production: Math.round(m.production * 100) / 100,
           nonote: m.unnoted.size,
         };

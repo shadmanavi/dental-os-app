@@ -73,15 +73,12 @@ the last one.
 
 2. **Settle how procedures get posted** — open since 21 August and now blocking more than one thing. The 5 options are in section 3a and Shad has not chosen. Claims and preauthorizations both wait on it, the Production Dashboard's note checking depends on it, and the Hygiene Dashboard has already found the symptom: 16 appointments in August completed at Downey with nothing posted to the account at all, and another 62 with only exams and x-rays
 
-3. **Delete the 2 test payments on patient 17 at Downey** — 59587 and 59588, $1.02 each. Shad can remove them in OpenDental
-4. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
-5. **Send the email to Maria and Manuel** about D9630 and D0350. Two drafts were written on 23 August and never saved to file, so they need writing again
-6. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
-7. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced
-8. **Clear the stale Flouridex fees off Maywood M9955** — about 15 insurance schedules at $20, one Denti-Cal at $550, UCR Prior 2022 at $45
-9. **Tidy the trailing space on Downey's `[.025] Credit Card - M1`** — invisible, harmless, but there
-10. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
-11. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
+3. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
+4. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
+5. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced
+6. **Clear the stale Flouridex fees off Maywood M9955** — about 15 insurance schedules at $20, one Denti-Cal at $550, UCR Prior 2022 at $45
+7. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
+8. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
 
 **If the Hygiene Dashboard gets too slow, in this order:**
 

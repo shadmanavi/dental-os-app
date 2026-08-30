@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 7
+// Version: 8
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v8  Showed counts hygiene completed by the appointment, wherever it
+//       ended up. It was counting only what still sits in the day's own
+//       columns, so 1 August read 15 while the day panel could name 26 -
+//       the difference being work moved into a column nobody was
+//       rostered in and completed there.
 //
 //   v7  Showed counts a hygiene visit, not an appointment that sat in a
 //       hygiene chair. Of 237 completed in Downey's hygiene columns in
@@ -810,7 +816,9 @@ Deno.serve(async (req: Request) => {
   const snapshot = await shortQueryAll(
     auth,
     `SELECT DATE(h.AptDateTime) AS D, h.Op, COUNT(DISTINCT h.AptNum) AS N, ` +
-      `COUNT(DISTINCT CASE WHEN a.AptStatus = ${APT_COMPLETE} THEN h.AptNum END) AS Done ` +
+      `COUNT(DISTINCT CASE WHEN a.AptStatus = ${APT_COMPLETE} THEN h.AptNum END) AS Done, ` +
+      `COUNT(DISTINCT CASE WHEN a.AptStatus = ${APT_COMPLETE} AND ${hasCode(hygIn)} ` +
+      `                    THEN h.AptNum END) AS DoneHyg ` +
       `FROM histappointment h ` +
       `JOIN appointment a ON a.AptNum = h.AptNum ` +
       `WHERE h.Op IN (${colList}) ` +
@@ -828,6 +836,7 @@ Deno.serve(async (req: Request) => {
 
   const heldAtMidnight = new Map<number, number>();
   const heldAndDone = new Map<number, number>();
+  const heldAndHygiene = new Map<number, number>();
 
   for (const r of snapshot.rows) {
     const d = dayOf(r.D);
@@ -835,6 +844,7 @@ Deno.serve(async (req: Request) => {
     rowFor(d);
     heldAtMidnight.set(d, (heldAtMidnight.get(d) ?? 0) + num(r.N));
     heldAndDone.set(d, (heldAndDone.get(d) ?? 0) + num(r.Done));
+    heldAndHygiene.set(d, (heldAndHygiene.get(d) ?? 0) + num(r.DoneHyg));
   }
 
   // ---- 5. Finish each day and total the month ----
@@ -874,6 +884,12 @@ Deno.serve(async (req: Request) => {
       // midnight. Showed stays as it is - a hygiene visit - so booked
       // less showed less missed is the number of people who came and
       // had no hygiene posted, which is exactly what you want to see.
+      // Showed follows the appointment, not the column it ended up in.
+      // On 1 August work was moved into columns nobody was rostered in
+      // and completed there; counting only what still sits in the day's
+      // own columns read 15 where the day panel could name 26.
+      row.showed = Math.max(row.showed, heldAndHygiene.get(d) ?? 0);
+
       const arrived = doneNow.get(d) ?? 0;
       row.booked = held + Math.max(0, arrived - heldDone);
     } else {

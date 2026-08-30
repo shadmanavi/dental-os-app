@@ -1,10 +1,14 @@
 "use client";
 
-// Hygiene Dashboard — v6
+// Hygiene Dashboard — v7
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v7  The day panel's title bar carries that day's figures - slots,
+//       booked, showed, missed, no hyg - so it is plain what the list
+//       below was counted against.
+//
 //   v6  The error-checking figures moved into their own column, "No
 //       hyg". They were sitting inside the Showed cell, which crowded
 //       it and pushed the digits out of line. One number a day, one
@@ -657,6 +661,25 @@ export default function HygienePage() {
                 <span className="text-xs text-[#8AA6AB]">
                   {weekdayOf(year, month, panel.day)}
                 </span>
+
+                {/* The day's own figures, so it is plain what this list
+                    was counted against. */}
+                {(() => {
+                  const row = byDay.get(panel.day);
+                  if (!row) return null;
+                  return (
+                    <span className="flex flex-wrap items-baseline gap-x-3 font-mono text-[11px] tabular-nums text-[#8AA6AB]">
+                      <span>{row.slots} slots</span>
+                      <span>{row.booked} booked</span>
+                      <span className="text-[#79B4C4]">{row.showed} showed</span>
+                      <span className="text-[#F3B0A2]">{row.missed} missed</span>
+                      <span>
+                        {row.srp + row.other_only + row.nothing_posted} no hyg
+                      </span>
+                    </span>
+                  );
+                })()}
+
                 <div className="flex-1" />
                 <button
                   type="button"

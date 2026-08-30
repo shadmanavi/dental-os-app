@@ -1,6 +1,6 @@
 "use client";
 
-// Provider Summary — v2
+// Provider Summary — v3
 // A month by provider, one row each: the days OpenDental scheduled
 // them against the days they actually produced, patients seen, what it
 // added to, what a working day averaged, and how many of their
@@ -10,6 +10,10 @@
 // day rows; it earned its own page when it earned its own questions.
 //
 // Changelog:
+//   v3  Three groups instead of two — General, Specialists, Hygienists
+//       — each with its own subtotal line, and the foot row named for
+//       what it is: the office total.
+//
 //   v2  Two tables in one: Doctors — general practice first, then the
 //       specialists — and Hygienists, each group under its own header
 //       row carrying the group's patients, production and undocumented
@@ -191,18 +195,13 @@ export default function ProviderSummaryPage() {
     { patients: 0, production: 0, nonote: 0 },
   );
 
-  // Two tables in one: the doctors — general practice first, then the
-  // specialists — and the hygienists. Production sorts within each.
-  const doctors = providers
-    .filter((p) => !p.is_hygienist)
-    .sort((a, b) =>
-      (a.is_gp ? 0 : 1) - (b.is_gp ? 0 : 1) || b.production - a.production,
-    );
-  const hygienists = providers.filter((p) => p.is_hygienist);
-
+  // Three tables in one — general practice, the specialists, and the
+  // hygienists — each totalled on its own line. Production sorts
+  // within each; the rows arrive from the server already sorted.
   const groups = [
-    { title: "Doctors", rows: doctors },
-    { title: "Hygienists", rows: hygienists },
+    { title: "General", rows: providers.filter((p) => !p.is_hygienist && p.is_gp) },
+    { title: "Specialists", rows: providers.filter((p) => !p.is_hygienist && !p.is_gp) },
+    { title: "Hygienists", rows: providers.filter((p) => p.is_hygienist) },
   ].filter((g) => g.rows.length > 0);
 
   return (
@@ -375,7 +374,7 @@ export default function ProviderSummaryPage() {
                 <tfoot>
                   <tr className="font-mono text-sm font-bold tabular-nums">
                     <td className="px-3.5 py-2 font-sans text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
-                      {MONTHS[month - 1]} {year}
+                      Office total · {MONTHS[month - 1]} {year}
                     </td>
                     <td className="px-3.5 py-2" />
                     <td className="px-3.5 py-2" />

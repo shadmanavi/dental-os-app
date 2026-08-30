@@ -1,10 +1,16 @@
-"use client";
+{(panel.focus === "booked" || panel.focus === "notHygiene") && ("use client";
 
-// Hygiene Dashboard — v7
+// Hygiene Dashboard — v8
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v8  Showed is a patient who had a cleaning and an exam. NH/NE is
+//       one who came and got one without the other, or neither - a
+//       charge nobody billed - and SRP has its own column. Everything
+//       counts people, so a patient with 2 appointments in a day is one
+//       patient.
+//
 //   v7  The day panel's title bar carries that day's figures - slots,
 //       booked, showed, missed, no hyg - so it is plain what the list
 //       below was counted against.
@@ -67,8 +73,7 @@ type DayRow = {
   missed: number;
   open: number;
   srp: number;
-  other_only: number;
-  nothing_posted: number;
+  nhne: number;
 };
 
 type MonthTotals = {
@@ -80,8 +85,7 @@ type MonthTotals = {
   missed: number;
   open: number;
   srp?: number;
-  other_only?: number;
-  nothing_posted?: number;
+  nhne?: number;
   days_open: number;
 };
 
@@ -108,7 +112,8 @@ type Focus =
   | "booked"
   | "missed"
   | "rdh"
-  | "notHygiene";
+  | "notHygiene"
+  | "srp";
 
 // Booked means everything the day held — the ones that happened, the
 // ones that did not, and on a day still ahead the ones yet to come.
@@ -117,9 +122,13 @@ type Focus =
 function inFocus(focus: Focus): (v: Visit) => boolean {
   if (focus === "booked") return () => true;
   // Everything that completed without hygiene on it, in one list.
+  // NH/NE: came, and the visit was short of a cleaning, an exam, or
+  // both. SRP is its own column and is not in here.
   if (focus === "notHygiene") {
-    return (v) => v.kind === "srp" || v.kind === "other" || v.kind === "nothing";
+    return (v) =>
+      v.kind === "no exam" || v.kind === "no cleaning" || v.kind === "nothing";
   }
+  if (focus === "srp") return (v) => v.kind === "srp";
   // Showed means a hygiene visit, so the ones that completed with no
   // hygiene posted are not in it - they are in the 3 above.
   if (focus === "showed") return (v) => v.kind === "hygiene";
@@ -394,28 +403,12 @@ export default function HygienePage() {
           </div>
         </div>
 
-        {/* The rest of what happened in the hygiene chairs, which the
-            table does not have a column for. Every one is a click, so a
-            posting that never happened can be found. */}
         {totals !== null && !loading && (
-          <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-1 text-xs text-[#8AA6AB]">
-            <span>The No hyg column, broken out:</span>
-            <span>
-              <span className="font-mono text-[15px] text-[#EDF3F1]">{totals.srp ?? 0}</span> SRP
-            </span>
-            <span>
-              <span className="font-mono text-[15px] text-[#EDF3F1]">
-                {totals.other_only ?? 0}
-              </span>{" "}
-              exams and x-rays only
-            </span>
-            <span>
-              <span className="font-mono text-[15px] text-[#F3B0A2]">
-                {totals.nothing_posted ?? 0}
-              </span>{" "}
-              with nothing posted
-            </span>
-            </p>
+          <p className="px-1 text-[11px] text-[#4A6165]">
+            Showed is a patient who had a cleaning and an exam. NH/NE is a
+            patient who came and got one without the other, or neither — a
+            charge nobody billed.
+          </p>
         )}
 
         {error !== "" && (
@@ -442,7 +435,8 @@ export default function HygienePage() {
                   <th className="w-32 px-3.5 pt-2.5 text-left">Filled</th>
                   <th className="px-3.5 pt-2.5 text-right">Showed</th>
                   <th className="px-3.5 pt-2.5 text-right">Missed</th>
-                  <th className="px-3.5 pt-2.5 text-right">No hyg</th>
+                  <th className="px-3.5 pt-2.5 text-right">NH/NE</th>
+                  <th className="px-3.5 pt-2.5 text-right">SRP</th>
                 </tr>
 
                 {/* The month's figures, each under the column it totals. */}
@@ -473,10 +467,8 @@ export default function HygienePage() {
                     </th>
                     <Total value={totals.showed} note={`of ${seen} seen`} tone="good" />
                     <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" />
-                    <Total
-                      value={(totals.srp ?? 0) + (totals.other_only ?? 0) + (totals.nothing_posted ?? 0)}
-                      note={`${totals.nothing_posted ?? 0} posted nothing`}
-                    />
+                    <Total value={totals.nhne ?? 0} note="short a charge" tone="warn" />
+                    <Total value={totals.srp ?? 0} note="patients" />
                   </tr>
                 )}
               </thead>
@@ -484,7 +476,7 @@ export default function HygienePage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={8} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
+                    <td colSpan={9} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
                       Reading the month…
                     </td>
                   </tr>
@@ -504,7 +496,7 @@ export default function HygienePage() {
                           <span className="inline-block min-w-[22px] font-mono text-[15px]">{d}</span>
                           <span className="text-xs">{weekday}</span>
                         </td>
-                        <td colSpan={7} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
+                        <td colSpan={8} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
                           —
                         </td>
                       </tr>
@@ -607,14 +599,25 @@ export default function HygienePage() {
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {!past && !isToday ? (
                           <span className="text-[#4A6165]">—</span>
-                        ) : row.srp + row.other_only + row.nothing_posted === 0 ? (
+                        ) : row.nhne === 0 ? (
                           <span className="text-[#4A6165]">0</span>
                         ) : (
                           <Figure
-                            value={row.srp + row.other_only + row.nothing_posted}
+                            value={row.nhne}
                             onClick={() => openDay(d, "notHygiene")}
-                            tone={row.nothing_posted > 0 ? "text-[#F0A93B]" : "text-[#8AA6AB]"}
+                            tone="font-bold text-[#E4674F]"
                           />
+                        )}
+                      </td>
+
+                      {/* Scaling and root planing, kept apart. */}
+                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
+                        {!past && !isToday ? (
+                          <span className="text-[#4A6165]">—</span>
+                        ) : row.srp === 0 ? (
+                          <span className="text-[#4A6165]">0</span>
+                        ) : (
+                          <Figure value={row.srp} onClick={() => openDay(d, "srp")} />
                         )}
                       </td>
                     </tr>
@@ -639,8 +642,11 @@ export default function HygienePage() {
                     </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.showed}</td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.missed}</td>
+                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right text-[#F3B0A2]">
+                      {totals.nhne ?? 0}
+                    </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
-                      {(totals.srp ?? 0) + (totals.other_only ?? 0) + (totals.nothing_posted ?? 0)}
+                      {totals.srp ?? 0}
                     </td>
                   </tr>
                 </tfoot>
@@ -674,7 +680,7 @@ export default function HygienePage() {
                       <span className="text-[#79B4C4]">{row.showed} showed</span>
                       <span className="text-[#F3B0A2]">{row.missed} missed</span>
                       <span>
-                        {row.srp + row.other_only + row.nothing_posted} no hyg
+                        {row.nhne} NH/NE, {row.srp} SRP
                       </span>
                     </span>
                   );

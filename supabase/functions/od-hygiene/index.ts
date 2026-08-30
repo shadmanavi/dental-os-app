@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 9
+// Version: 10
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v10 The pager was asking for the same rows over and over. ShortQuery
+//       returns the first 100 at offset 0 and then everything from the
+//       offset onward, so walking it in hundreds made dozens of
+//       ever-larger round trips and the month read timed out. A result
+//       over 100 rows now takes exactly 2 calls.
 //
 //   v9  Counting core rewritten. One read of the month's appointments
 //       feeds both the day rows and the day panel, so they can no longer
@@ -239,33 +245,37 @@ function rowsOf(call: OdCall): Record<string, unknown>[] {
   return Array.isArray(call.body) ? (call.body as Record<string, unknown>[]) : [];
 }
 
-// ShortQuery caps a page at 100 rows and Offset advances from there.
+// ShortQuery hands back the first 100 rows at offset 0, and then
+// *everything from the offset onward* on any later page. It does not
+// page a hundred at a time.
+//
+// So a result larger than 100 rows takes exactly 2 calls. Walking it in
+// hundreds asks for the same rows again and again: the month read is
+// 466 rows, and the old loop made dozens of ever-larger round trips
+// until the function timed out and the screen said the server did not
+// respond.
 async function shortQueryAll(
   auth: string,
   sql: string,
-  maxPages = 20,
 ): Promise<{ rows: Record<string, unknown>[]; failed: OdCall | null }> {
-  const rows: Record<string, unknown>[] = [];
+  const first = await odFetch(auth, "PUT", "/queries/ShortQuery", { SqlCommand: sql });
 
-  for (let page = 0; page < maxPages; page++) {
-    const offset = page * 100;
-    const call = await odFetch(
-      auth,
-      "PUT",
-      offset === 0 ? "/queries/ShortQuery" : `/queries/ShortQuery?Offset=${offset}`,
-      { SqlCommand: sql },
-    );
-
-    if (call.http_status < 200 || call.http_status >= 300) {
-      return { rows, failed: call };
-    }
-
-    const batch = rowsOf(call);
-    rows.push(...batch);
-    if (batch.length < 100) break;
+  if (first.http_status < 200 || first.http_status >= 300) {
+    return { rows: [], failed: first };
   }
 
-  return { rows, failed: null };
+  const rows = rowsOf(first);
+  if (rows.length < 100) return { rows, failed: null };
+
+  const rest = await odFetch(auth, "PUT", "/queries/ShortQuery?Offset=100", {
+    SqlCommand: sql,
+  });
+
+  if (rest.http_status < 200 || rest.http_status >= 300) {
+    return { rows, failed: rest };
+  }
+
+  return { rows: [...rows, ...rowsOf(rest)], failed: null };
 }
 
 const num = (v: unknown): number => {
@@ -812,7 +822,6 @@ Deno.serve(async (req: Request) => {
       `AND (a.Op IN (${colList}) OR EXISTS (SELECT 1 FROM histappointment h2 ` +
       `     WHERE h2.AptNum = a.AptNum AND h2.Op IN (${colList}) ` +
       `       AND DATE(h2.AptDateTime) = DATE(a.AptDateTime)))`,
-    60,
   );
 
   if (onTheDay.failed) {
@@ -834,7 +843,6 @@ Deno.serve(async (req: Request) => {
       `                     WHERE h2.AptNum = h.AptNum ` +
       `                       AND h2.HistDateTStamp < DATE(h.AptDateTime)) ` +
       `GROUP BY h.AptNum`,
-    60,
   );
 
   if (snapshot.failed) {

@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-production/index.ts
-// Version: 3
+// Version: 4
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -17,6 +17,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v4  providers carries each provider's specialty, read from
+//       definition category 35 the way the hygiene dashboard does,
+//       so the summary can seat doctors and hygienists at separate
+//       tables. A provider with no specialty on file is treated as
+//       general practice rather than invented into a specialty.
 //
 //   v3  New action providers, for the Provider Summary page: each
 //       provider by full name, the days OpenDental's roster scheduled
@@ -359,13 +365,30 @@ Deno.serve(async (req: Request) => {
 
     if (prod.failed) return fail("Could not read this month's completed work.", prod.failed);
 
-    // Names, whole.
+    // Names, whole, and the specialty each provider is filed under.
     const names = await shortQueryAll(
       auth,
-      `SELECT ProvNum, Abbr, FName, LName FROM provider`,
+      `SELECT ProvNum, Abbr, FName, LName, Specialty FROM provider`,
     );
 
     if (names.failed) return fail("Could not read this office's providers.", names.failed);
+
+    // What the specialty numbers mean at this office. Category 35 is
+    // the provider specialty list; the DefNums differ per office, so
+    // they are read by name every time, as the hygiene dashboard does.
+    const specs = await shortQueryAll(
+      auth,
+      `SELECT DefNum, ItemName FROM definition WHERE Category = 35`,
+    );
+
+    if (specs.failed) {
+      return fail("Could not read this office's provider specialties.", specs.failed);
+    }
+
+    const specNameOf = new Map<number, string>();
+    for (const r of specs.rows) {
+      specNameOf.set(num(r.DefNum), String(r.ItemName ?? "").trim());
+    }
 
     // The roster: how many days OpenDental has each provider scheduled
     // to work this month. SchedType 1 is a provider's own schedule.
@@ -380,11 +403,15 @@ Deno.serve(async (req: Request) => {
 
     if (roster.failed) return fail("Could not read this month's roster.", roster.failed);
 
-    const nameOf = new Map<number, { abbr: string; full: string }>();
+    const nameOf = new Map<number, { abbr: string; full: string; specialty: string }>();
     for (const r of names.rows) {
       const abbr = String(r.Abbr ?? "").trim();
       const full = `${String(r.FName ?? "").trim()} ${String(r.LName ?? "").trim()}`.trim();
-      nameOf.set(num(r.ProvNum), { abbr, full: full !== "" ? full : abbr });
+      nameOf.set(num(r.ProvNum), {
+        abbr,
+        full: full !== "" ? full : abbr,
+        specialty: specNameOf.get(num(r.Specialty)) ?? "",
+      });
     }
 
     const schedDays = new Map<number, number>();
@@ -429,16 +456,26 @@ Deno.serve(async (req: Request) => {
     }
 
     const providers = [...byProv.entries()]
-      .map(([provNum, m]) => ({
-        prov_num: provNum,
-        abbr: nameOf.get(provNum)?.abbr || "—",
-        name: nameOf.get(provNum)?.full || "—",
-        days_scheduled: schedDays.get(provNum) ?? 0,
-        days_worked: m.days.size,
-        patients: m.patients.size,
-        production: Math.round(m.production * 100) / 100,
-        nonote: m.unnoted.size,
-      }))
+      .map(([provNum, m]) => {
+        const who = nameOf.get(provNum);
+        const specialty = who?.specialty ?? "";
+        const lower = specialty.toLowerCase();
+        return {
+          prov_num: provNum,
+          abbr: who?.abbr || "—",
+          name: who?.full || "—",
+          specialty,
+          is_hygienist: lower === "hygienist",
+          // No specialty on file reads as general practice rather
+          // than being invented into a specialty.
+          is_gp: lower.startsWith("general") || specialty === "",
+          days_scheduled: schedDays.get(provNum) ?? 0,
+          days_worked: m.days.size,
+          patients: m.patients.size,
+          production: Math.round(m.production * 100) / 100,
+          nonote: m.unnoted.size,
+        };
+      })
       .sort((a, b) => b.production - a.production);
 
     return json({

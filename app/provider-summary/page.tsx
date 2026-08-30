@@ -1,6 +1,6 @@
 "use client";
 
-// Provider Summary — v1
+// Provider Summary — v2
 // A month by provider, one row each: the days OpenDental scheduled
 // them against the days they actually produced, patients seen, what it
 // added to, what a working day averaged, and how many of their
@@ -10,6 +10,11 @@
 // day rows; it earned its own page when it earned its own questions.
 //
 // Changelog:
+//   v2  Two tables in one: Doctors — general practice first, then the
+//       specialists — and Hygienists, each group under its own header
+//       row carrying the group's patients, production and undocumented
+//       subtotals. Specialty reads beside each doctor's name.
+//
 //   v1  First build. Office switch, month paging, the provider table.
 //       Reads od-production (action providers); writes nothing.
 //
@@ -26,7 +31,7 @@
 //   Per day is production over days worked — what a day in the chair
 //   actually averaged, not what the roster hoped.
 
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
@@ -37,6 +42,9 @@ type ProvRow = {
   prov_num: number;
   abbr: string;
   name: string;
+  specialty: string;
+  is_hygienist: boolean;
+  is_gp: boolean;
   days_scheduled: number;
   days_worked: number;
   patients: number;
@@ -183,6 +191,20 @@ export default function ProviderSummaryPage() {
     { patients: 0, production: 0, nonote: 0 },
   );
 
+  // Two tables in one: the doctors — general practice first, then the
+  // specialists — and the hygienists. Production sorts within each.
+  const doctors = providers
+    .filter((p) => !p.is_hygienist)
+    .sort((a, b) =>
+      (a.is_gp ? 0 : 1) - (b.is_gp ? 0 : 1) || b.production - a.production,
+    );
+  const hygienists = providers.filter((p) => p.is_hygienist);
+
+  const groups = [
+    { title: "Doctors", rows: doctors },
+    { title: "Hygienists", rows: hygienists },
+  ].filter((g) => g.rows.length > 0);
+
   return (
     <main className="min-h-screen bg-[#0B1719] px-4 py-4 text-[#EDF3F1] sm:px-6">
       <div className="mx-auto flex max-w-5xl flex-col gap-3">
@@ -275,13 +297,43 @@ export default function ProviderSummaryPage() {
                   </tr>
                 )}
 
-                {!loading && providers.map((p) => (
+                {!loading && groups.map((g) => (
+                  <Fragment key={g.title}>
+                  {/* The group's own line: who it is, and what its
+                      rows add to. */}
+                  <tr className="bg-[#16292D] font-mono text-xs font-bold tabular-nums text-[#8AA6AB]">
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 font-sans text-[10px] uppercase tracking-[0.08em]">
+                      {g.title} · {g.rows.length}
+                    </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5" />
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5" />
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right">
+                      {g.rows.reduce((s, p) => s + p.patients, 0)}
+                    </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right text-[#79B4C4]">
+                      {usd(g.rows.reduce((s, p) => s + p.production, 0))}
+                    </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5" />
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right">
+                      {(() => {
+                        const n = g.rows.reduce((s, p) => s + p.nonote, 0);
+                        return n === 0 ? (
+                          <span className="font-normal text-[#4A6165]">0</span>
+                        ) : (
+                          <span className="text-[#E4674F]">{n}</span>
+                        );
+                      })()}
+                    </td>
+                  </tr>
+
+                  {g.rows.map((p) => (
                   <tr key={p.prov_num} className="font-mono text-sm tabular-nums">
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 font-sans text-[#EDF3F1]">
                       {p.name}
-                      {p.abbr !== "" && p.abbr !== p.name && (
-                        <span className="ml-2 text-xs text-[#4A6165]">{p.abbr}</span>
-                      )}
+                      <span className="ml-2 text-xs text-[#4A6165]">
+                        {p.abbr !== "" && p.abbr !== p.name ? p.abbr : ""}
+                        {!p.is_hygienist && p.specialty !== "" ? ` · ${p.specialty}` : ""}
+                      </span>
                     </td>
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right text-[#8AA6AB]">
                       {p.days_scheduled === 0 ? (
@@ -314,6 +366,8 @@ export default function ProviderSummaryPage() {
                       )}
                     </td>
                   </tr>
+                  ))}
+                  </Fragment>
                 ))}
               </tbody>
 

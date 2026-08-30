@@ -1,11 +1,17 @@
 "use client";
 
-// Production Dashboard — v4
+// Production Dashboard — v5
 // A month of production, a day to a row: what the book promised in
 // dollars, how many patients it named, how many came, what was actually
 // produced — and who left no note behind.
 //
 // Changelog:
+//   v5  The totals line up with their columns. The realized percentage
+//       was riding beside the Actual total and pushing it off its
+//       column; it now sits under Realized, where the day rows put
+//       theirs. Missed loses its inline rate for the same reason —
+//       the day cells below it carry no percentage slot.
+//
 //   v4  The provider table moves out to its own page, /provider-summary,
 //       linked from the top bar. Patient names in the day panel carry
 //       their patient number — Doe, John (PT#1234) — so a name can be
@@ -359,8 +365,6 @@ export default function ProductionPage() {
   const showRate = totals && totals.patients > 0
     ? Math.round((totals.showed / totals.patients) * 100)
     : 0;
-  const seen = totals ? totals.showed + totals.missed : 0;
-  const missRate = seen > 0 ? Math.round(((totals?.missed ?? 0) / seen) * 100) : 0;
 
   return (
     <main className="min-h-screen bg-[#0B1719] px-4 py-4 text-[#EDF3F1] sm:px-6">
@@ -461,17 +465,25 @@ export default function ProductionPage() {
                       pct={totals.patients > 0 ? `(${showRate}%)` : ""}
                       tone="good"
                     />
-                    <Total
-                      value={String(totals.missed)}
-                      pct={seen > 0 ? `(${missRate}%)` : ""}
-                      tone="warn"
-                    />
-                    <Total
-                      value={usd(totals.actual)}
-                      pct={totals.sched > 0 ? `(${realized}%)` : ""}
-                      tone="good"
-                    />
-                    <th className="px-3.5 pb-2 pt-0.5 align-top" />
+                    <Total value={String(totals.missed)} tone="warn" />
+                    <Total value={usd(totals.actual)} tone="good" />
+                    {/* The month's realized rate, under the column
+                        whose day cells carry the same figure. */}
+                    <th className="px-3.5 pb-2 pt-0.5 text-left align-top">
+                      {totals.sched > 0 && (
+                        <span
+                          className={`block font-mono text-[17px] font-bold tabular-nums ${
+                            realized >= 90
+                              ? "text-[#79B4C4]"
+                              : realized >= 60
+                                ? "text-[#F0A93B]"
+                                : "text-[#E4674F]"
+                          }`}
+                        >
+                          {realized}%
+                        </span>
+                      )}
+                    </th>
                     <Total
                       value={String(totals.nonote)}
                       tone={totals.nonote > 0 ? "warn" : undefined}

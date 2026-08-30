@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 10
+// Version: 11
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v11 Restores rowFor, lost when the counting core was replaced in
+//       v9. The month read threw ReferenceError and every load came
+//       back 500. It slipped through because the syntax check was
+//       filtering out the whole error code that the Deno globals also
+//       raise - it now filters by name, so a real missing symbol shows.
 //
 //   v10 The pager was asking for the same rows over and over. ShortQuery
 //       returns the first 100 at offset 0 and then everything from the
@@ -864,6 +870,22 @@ Deno.serve(async (req: Request) => {
   };
 
   const work = new Map<number, DayWork>();
+
+  // A day with no hygienist rostered still gets a row if hygiene work
+  // happened on it. The doctors see those patients; the day simply had
+  // no hygiene slots behind it.
+  const rowFor = (d: number): DayRow => {
+    let row = byDay.get(d);
+    if (!row) {
+      row = {
+        day: d, hygienists: 0, columns: 0, slots: 0,
+        booked: 0, showed: 0, missed: 0, open: 0,
+        srp: 0, nhne: 0,
+      };
+      byDay.set(d, row);
+    }
+    return row;
+  };
 
   const workFor = (d: number): DayWork => {
     let w = work.get(d);

@@ -88,6 +88,15 @@ the last one.
 10. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
 11. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
 
+**If the Hygiene Dashboard gets too slow, in this order:**
+
+- Count in SQL rather than returning every row and counting in the function. Measured on Downey's August: 917ms and 466 rows becomes 628ms and 106 rows
+- Merge the 2 office lookups — the hygienist specialty and the hygiene columns — into 1 call. They change about once a year
+- Remember the last few months in the page, so paging back and forth or switching office and back is instant
+- Draw the table as soon as the roster lands and fill the counts in after, so the screen is not blank while the slow part runs
+
+Together that takes a month read from 7 OpenDental round trips to 5, with the 2 costly ones cheaper. Running the calls in parallel would not help — OpenDental serialises them per office key.
+
 **Known gaps, deliberately left:**
 
 - A staged fee upload has no lock. Two browsers pushing the same upload would both claim the same rows. Different offices in different tabs is safe and is how it is used

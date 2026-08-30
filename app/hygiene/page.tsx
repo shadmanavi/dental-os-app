@@ -1076,6 +1076,7 @@ function Total({
   tone,
   struck,
   onClick,
+  pct,
 }: {
   value: number;
   note: string;

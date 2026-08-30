@@ -1,10 +1,15 @@
 "use client";
 
-// Hygiene Dashboard — v13
+// Hygiene Dashboard — v14
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v14 One totals row, at the top, in line with its columns. The
+//       bottom duplicate is gone, and the top row carries the same
+//       fixed-width percentage slots as the day rows so the digits
+//       stack in a straight column.
+//
 //   v13 The month totals are clicks. Each opens the whole month listed
 //       by patient - one line each, times counted and on which days -
 //       so a person who missed 3 times reads once as x3, the times add
@@ -547,18 +552,24 @@ export default function HygienePage() {
                       </span>
                     </th>
                     <Total value={totals.slots} note="slot hours" />
-                    <Total value={totals.booked} note={`% filled`} onClick={() => openMonth("booked")} />
+                    <Total
+                      value={totals.booked}
+                      pct={totals.slots > 0 ? `(${fillRate}%)` : ""}
+                      note="of the slots"
+                      onClick={() => openMonth("booked")}
+                    />
                     <Total value={unsold} note="gone for good" struck={unsold > 0} />
                     <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">
                       {stillOpen > 0 ? `${stillOpen} still bookable` : "nothing left open"}
                     </th>
                     <Total
                       value={totals.showed}
-                      note={
+                      pct={
                         totals.booked > 0
-                          ? `${Math.round((totals.showed / totals.booked) * 100)}% of booked`
-                          : "—"
+                          ? `(${Math.round((totals.showed / totals.booked) * 100)}%)`
+                          : ""
                       }
+                      note="of booked"
                       tone="good"
                       onClick={() => openMonth("showed")}
                     />
@@ -744,44 +755,6 @@ export default function HygienePage() {
                 })}
               </tbody>
 
-              {totals !== null && !loading && (
-                <tfoot>
-                  <tr className="bg-[#16292D] font-mono text-sm font-bold tabular-nums">
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-left font-sans text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
-                      {MONTHS[month - 1]} total
-                    </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.slots}</td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
-                      {totals.booked}
-                      <span className="ml-1 inline-block w-12 text-left text-[10px] font-normal text-[#4A6165]">
-                        {totals.slots > 0 ? `(${fillRate}%)` : ""}
-                      </span>
-                    </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
-                      <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{unsold}</s>
-                      {stillOpen > 0 ? ` + ${stillOpen}` : ""}
-                    </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-left font-normal text-[#8AA6AB]">
-                      {fillRate}% filled
-                    </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
-                      {totals.showed}
-                      <span className="ml-1 inline-block w-12 text-left text-[10px] font-normal text-[#4A6165]">
-                        {totals.booked > 0
-                          ? `(${Math.round((totals.showed / totals.booked) * 100)}%)`
-                          : ""}
-                      </span>
-                    </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.missed}</td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right text-[#F3B0A2]">
-                      {totals.nhne ?? 0}
-                    </td>
-                    <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
-                      {totals.srp ?? 0}
-                    </td>
-                  </tr>
-                </tfoot>
-              )}
             </table>
           </div>
         </div>
@@ -1109,14 +1082,26 @@ function Total({
   tone?: "good" | "warn";
   struck?: boolean;
   onClick?: () => void;
+  pct?: string;
 }) {
   const colour =
     tone === "good" ? "text-[#79B4C4]" : tone === "warn" ? "text-[#E4674F]" : "text-[#EDF3F1]";
 
-  const figure = struck ? (
-    <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{value}</s>
-  ) : (
-    value
+  const figure = (
+    <>
+      {struck ? (
+        <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{value}</s>
+      ) : (
+        value
+      )}
+      {/* The same fixed-width slot the day rows use for their
+          percentage, so the total's digits land in the same column. */}
+      {pct !== undefined && (
+        <span className="ml-1 inline-block w-12 text-left text-[10px] font-normal text-[#4A6165]">
+          {pct}
+        </span>
+      )}
+    </>
   );
 
   return (

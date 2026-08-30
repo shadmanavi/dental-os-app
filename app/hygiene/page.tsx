@@ -1,10 +1,15 @@
 "use client";
 
-// Hygiene Dashboard — v14
+// Hygiene Dashboard — v15
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v15 The totals row loses its notes line, gains the month fill bar
+//       in the Filled column, and Missed carries its rate inline -
+//       (61%) beside 240 - with the day rows matching. Column titles
+//       end exactly above their digits.
+//
 //   v14 One totals row, at the top, in line with its columns. The
 //       bottom duplicate is gone, and the top row carries the same
 //       fixed-width percentage slots as the day rows so the digits
@@ -519,14 +524,23 @@ export default function HygienePage() {
           <div className="overflow-x-auto">
             <table className="w-full min-w-[720px] border-collapse">
               <thead>
+                {/* The spacer after Booked, Showed and Missed matches
+                    the fixed-width percentage slot in their cells, so
+                    the title ends exactly above the digits. */}
                 <tr className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
                   <th className="px-3.5 pt-2.5 text-left">Day</th>
                   <th className="px-3.5 pt-2.5 text-right">Slots</th>
-                  <th className="px-3.5 pt-2.5 text-right">Booked</th>
+                  <th className="px-3.5 pt-2.5 text-right">
+                    Booked<span className="ml-1 inline-block w-12" />
+                  </th>
                   <th className="px-3.5 pt-2.5 text-right">Open</th>
                   <th className="w-32 px-3.5 pt-2.5 text-left">Filled</th>
-                  <th className="px-3.5 pt-2.5 text-right">Showed</th>
-                  <th className="px-3.5 pt-2.5 text-right">Missed</th>
+                  <th className="px-3.5 pt-2.5 text-right">
+                    Showed<span className="ml-1 inline-block w-12" />
+                  </th>
+                  <th className="px-3.5 pt-2.5 text-right">
+                    Missed<span className="ml-1 inline-block w-12" />
+                  </th>
                   <th className="px-3.5 pt-2.5 text-right">NH/NE</th>
                   <th className="px-3.5 pt-2.5 text-right">SRP</th>
                 </tr>
@@ -541,26 +555,30 @@ export default function HygienePage() {
                         {MONTHS[month - 1]} {year}
                       </span>
                       <span className="block font-sans text-[11px] font-normal text-[#4A6165]">
-                        <span className="font-mono text-[#8AA6AB]">
-                          {totals.rdh_days ?? 0}
-                        </span>{" "}
-                        RDH days over{" "}
-                        <span className="font-mono text-[#8AA6AB]">
-                          {totals.days_open}
-                        </span>{" "}
+                        <span className="font-mono text-[#8AA6AB]">{totals.rdh_days ?? 0}</span>{" "}
+                        RDH days ·{" "}
+                        <span className="font-mono text-[#8AA6AB]">{totals.days_open}</span>{" "}
                         open
                       </span>
                     </th>
-                    <Total value={totals.slots} note="slot hours" />
+                    <Total value={totals.slots} />
                     <Total
                       value={totals.booked}
                       pct={totals.slots > 0 ? `(${fillRate}%)` : ""}
-                      note="of the slots"
                       onClick={() => openMonth("booked")}
                     />
-                    <Total value={unsold} note="gone for good" struck={unsold > 0} />
-                    <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">
-                      {stillOpen > 0 ? `${stillOpen} still bookable` : "nothing left open"}
+                    <Total value={unsold} struck={unsold > 0} />
+                    {/* The month's own fill bar, same as the day rows. */}
+                    <th className="px-3.5 pb-2 pt-1.5 text-left align-top font-normal">
+                      <div className="h-1.5 overflow-hidden rounded-full bg-[#2C4E54]/55">
+                        <div
+                          className={`h-full rounded-full ${fillClass(fillRate)}`}
+                          style={{ width: `${Math.min(100, fillRate)}%` }}
+                        />
+                      </div>
+                      <span className="mt-0.5 block font-sans text-[10px] text-[#4A6165]">
+                        {fillRate}% filled
+                      </span>
                     </th>
                     <Total
                       value={totals.showed}
@@ -569,13 +587,17 @@ export default function HygienePage() {
                           ? `(${Math.round((totals.showed / totals.booked) * 100)}%)`
                           : ""
                       }
-                      note="of booked"
                       tone="good"
                       onClick={() => openMonth("showed")}
                     />
-                    <Total value={totals.missed} note={`${missRate}% of them`} tone="warn" onClick={() => openMonth("missed")} />
-                    <Total value={totals.nhne ?? 0} note="short a charge" tone="warn" onClick={() => openMonth("nhne")} />
-                    <Total value={totals.srp ?? 0} note="patients" onClick={() => openMonth("srp")} />
+                    <Total
+                      value={totals.missed}
+                      pct={`(${missRate}%)`}
+                      tone="warn"
+                      onClick={() => openMonth("missed")}
+                    />
+                    <Total value={totals.nhne ?? 0} tone="warn" onClick={() => openMonth("nhne")} />
+                    <Total value={totals.srp ?? 0} onClick={() => openMonth("srp")} />
                   </tr>
                 )}
               </thead>
@@ -716,11 +738,20 @@ export default function HygienePage() {
                         ) : row.missed === 0 ? (
                           <span className="text-[#4A6165]">0</span>
                         ) : (
-                          <Figure
-                            value={row.missed}
-                            onClick={() => openDay(d, "missed")}
-                            tone="font-bold text-[#F3B0A2]"
-                          />
+                          <>
+                            <Figure
+                              value={row.missed}
+                              onClick={() => openDay(d, "missed")}
+                              tone="font-bold text-[#F3B0A2]"
+                            />
+                            {/* The day's own miss rate, same formula as
+                                the month total: missed of those seen. */}
+                            <span className="ml-1 inline-block w-12 text-left text-[10px] font-normal text-[#4A6165]">
+                              {row.showed + row.missed > 0
+                                ? `(${Math.round((row.missed / (row.showed + row.missed)) * 100)}%)`
+                                : ""}
+                            </span>
+                          </>
                         )}
                       </td>
 
@@ -1072,14 +1103,12 @@ function Figure({
 // With onClick it opens the month's own list of patients.
 function Total({
   value,
-  note,
   tone,
   struck,
   onClick,
   pct,
 }: {
   value: number;
-  note: string;
   tone?: "good" | "warn";
   struck?: boolean;
   onClick?: () => void;
@@ -1120,7 +1149,6 @@ function Total({
           {figure}
         </span>
       )}
-      <span className="block font-sans text-[11px] font-normal text-[#4A6165]">{note}</span>
     </th>
   );
 }

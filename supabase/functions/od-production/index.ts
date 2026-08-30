@@ -8,14 +8,22 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-production/index.ts
-// Version: 2
+// Version: 3
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
 //   { "office":"downey", "action":"day", "year":2026, "month":8, "day":12 }
+//   { "office":"downey", "action":"providers", "year":2026, "month":8 }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v3  New action providers, for the Provider Summary page: each
+//       provider by full name, the days OpenDental's roster scheduled
+//       them against the days they actually produced, patients,
+//       production, and the undocumented count. Cheaper than month -
+//       it skips the book and the midnight snapshot, which are the
+//       heavy reads, and adds one small roster query instead.
 //
 //   v2  Each month day row carries its own per-provider breakdown, so
 //       the screen can open a day in place without another read. It
@@ -253,8 +261,8 @@ Deno.serve(async (req: Request) => {
   }
 
   const action = (body.action ?? "").toLowerCase().trim();
-  if (action !== "month" && action !== "day") {
-    return json({ ok: false, error: "action must be month or day." }, 400);
+  if (action !== "month" && action !== "day" && action !== "providers") {
+    return json({ ok: false, error: "action must be month, day, or providers." }, 400);
   }
 
   const year = num(body.year);
@@ -325,6 +333,124 @@ Deno.serve(async (req: Request) => {
   const heldAtMidnight = (h: string, dayExpr: string) =>
     `${h}.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
     `WHERE h2.AptNum = ${h}.AptNum AND h2.HistDateTStamp < ${dayExpr})`;
+
+  // ===================================================================
+  // providers — the month, a provider to a row
+  //
+  // For the Provider Summary page: who was scheduled to work how many
+  // days, how many days they actually produced on, how many patients
+  // they saw, what it added to, and how many of their patients have
+  // no note. Full names, because a summary read by the owner should
+  // not need the abbreviation key in their head.
+  // ===================================================================
+  if (action === "providers") {
+    // Completed work, one group per (day, provider, patient) - the
+    // same read the month rows are counted from.
+    const prod = await shortQueryAll(
+      auth,
+      `SELECT DAYOFMONTH(pl.ProcDate) AS D, pl.ProvNum, pl.PatNum, ` +
+        `SUM(${fee("pl")}) AS Prod, ` +
+        `MAX(${NOTED}) AS Noted ` +
+        `FROM procedurelog pl ` +
+        `WHERE pl.ProcStatus = ${PROC_COMPLETE} ` +
+        `AND pl.ProcDate >= '${first}' AND pl.ProcDate < '${afterLast}' ` +
+        `GROUP BY DAYOFMONTH(pl.ProcDate), pl.ProvNum, pl.PatNum`,
+    );
+
+    if (prod.failed) return fail("Could not read this month's completed work.", prod.failed);
+
+    // Names, whole.
+    const names = await shortQueryAll(
+      auth,
+      `SELECT ProvNum, Abbr, FName, LName FROM provider`,
+    );
+
+    if (names.failed) return fail("Could not read this office's providers.", names.failed);
+
+    // The roster: how many days OpenDental has each provider scheduled
+    // to work this month. SchedType 1 is a provider's own schedule.
+    const roster = await shortQueryAll(
+      auth,
+      `SELECT s.ProvNum, COUNT(DISTINCT s.SchedDate) AS SDays ` +
+        `FROM schedule s ` +
+        `WHERE s.SchedType = 1 AND s.ProvNum > 0 ` +
+        `AND s.SchedDate >= '${first}' AND s.SchedDate < '${afterLast}' ` +
+        `GROUP BY s.ProvNum`,
+    );
+
+    if (roster.failed) return fail("Could not read this month's roster.", roster.failed);
+
+    const nameOf = new Map<number, { abbr: string; full: string }>();
+    for (const r of names.rows) {
+      const abbr = String(r.Abbr ?? "").trim();
+      const full = `${String(r.FName ?? "").trim()} ${String(r.LName ?? "").trim()}`.trim();
+      nameOf.set(num(r.ProvNum), { abbr, full: full !== "" ? full : abbr });
+    }
+
+    const schedDays = new Map<number, number>();
+    for (const r of roster.rows) {
+      schedDays.set(num(r.ProvNum), num(r.SDays));
+    }
+
+    // Whether anyone noted the patient's day, so one provider's group
+    // note redeems the other provider's chart, as everywhere else.
+    const notedByDayPatient = new Map<string, boolean>();
+    for (const r of prod.rows) {
+      const key = `${num(r.D)}:${num(r.PatNum)}`;
+      notedByDayPatient.set(
+        key,
+        (notedByDayPatient.get(key) ?? false) || isTrue(r.Noted),
+      );
+    }
+
+    type ProvFold = {
+      days: Set<number>;
+      patients: Set<number>;
+      production: number;
+      unnoted: Set<string>;
+    };
+
+    const byProv = new Map<number, ProvFold>();
+
+    for (const r of prod.rows) {
+      const d = num(r.D);
+      if (d < 1 || d > days) continue;
+      const provNum = num(r.ProvNum);
+      let m = byProv.get(provNum);
+      if (!m) {
+        m = { days: new Set(), patients: new Set(), production: 0, unnoted: new Set() };
+        byProv.set(provNum, m);
+      }
+      m.days.add(d);
+      m.patients.add(num(r.PatNum));
+      m.production += num(r.Prod);
+      const key = `${d}:${num(r.PatNum)}`;
+      if (!notedByDayPatient.get(key)) m.unnoted.add(key);
+    }
+
+    const providers = [...byProv.entries()]
+      .map(([provNum, m]) => ({
+        prov_num: provNum,
+        abbr: nameOf.get(provNum)?.abbr || "—",
+        name: nameOf.get(provNum)?.full || "—",
+        days_scheduled: schedDays.get(provNum) ?? 0,
+        days_worked: m.days.size,
+        patients: m.patients.size,
+        production: Math.round(m.production * 100) / 100,
+        nonote: m.unnoted.size,
+      }))
+      .sort((a, b) => b.production - a.production);
+
+    return json({
+      ok: true,
+      office: officeRow.slug,
+      office_name: officeRow.name,
+      year,
+      month,
+      providers,
+      read_at: new Date().toISOString(),
+    });
+  }
 
   // ===================================================================
   // day — one day, named

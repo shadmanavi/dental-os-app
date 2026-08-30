@@ -1,11 +1,16 @@
 "use client";
 
-// Production Dashboard — v3
+// Production Dashboard — v4
 // A month of production, a day to a row: what the book promised in
 // dollars, how many patients it named, how many came, what was actually
 // produced — and who left no note behind.
 //
 // Changelog:
+//   v4  The provider table moves out to its own page, /provider-summary,
+//       linked from the top bar. Patient names in the day panel carry
+//       their patient number — Doe, John (PT#1234) — so a name can be
+//       found in OpenDental without a search by spelling.
+//
 //   v3  The notes line under the totals row comes off — "providers
 //       over open", "booked", "of booked", "% of them", "of the
 //       promise", "short of the book", "patients", all of it. The
@@ -45,6 +50,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 
 type Office = { id: string; slug: string; name: string };
@@ -77,15 +83,6 @@ type MonthTotals = {
   providers: number;
   provider_days: number;
   days_open: number;
-};
-
-type ProvMonth = {
-  prov_num: number;
-  name: string;
-  days: number;
-  patients: number;
-  production: number;
-  nonote: number;
 };
 
 type Visit = {
@@ -182,7 +179,6 @@ export default function ProductionPage() {
 
   const [days, setDays] = useState<DayRow[]>([]);
   const [totals, setTotals] = useState<MonthTotals | null>(null);
-  const [providers, setProviders] = useState<ProvMonth[]>([]);
   const [daysInMonth, setDaysInMonth] = useState(31);
 
   const [loading, setLoading] = useState(true);
@@ -278,7 +274,6 @@ export default function ProductionPage() {
         setError(message);
         setDays([]);
         setTotals(null);
-        setProviders([]);
         return;
       }
 
@@ -286,19 +281,16 @@ export default function ProductionPage() {
         setError(String(data?.error ?? "That month could not be read."));
         setDays([]);
         setTotals(null);
-        setProviders([]);
         return;
       }
 
       setDays((data.days ?? []) as DayRow[]);
       setTotals((data.totals ?? null) as MonthTotals | null);
-      setProviders((data.providers ?? []) as ProvMonth[]);
       setDaysInMonth(Number(data.days_in_month ?? 31));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "That month could not be read.");
       setDays([]);
       setTotals(null);
-      setProviders([]);
     } finally {
       setLoading(false);
     }
@@ -376,6 +368,12 @@ export default function ProductionPage() {
         {/* One bar: name, office, month. */}
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-[17px] font-bold tracking-[-0.01em]">Production</h1>
+          <Link
+            href="/provider-summary"
+            className="text-xs text-[#79B4C4] underline decoration-dotted underline-offset-2 hover:text-[#EDF3F1]"
+          >
+            Provider Summary →
+          </Link>
           <div className="flex-1" />
 
           <div className="flex gap-1" role="group" aria-label="Office">
@@ -708,51 +706,6 @@ export default function ProductionPage() {
           </div>
         </div>
 
-        {/* The month by provider: who produced what, over how many
-            days, and how many of their patients have no note. */}
-        {!loading && providers.length > 0 && (
-          <div className="overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[560px] border-collapse">
-                <thead>
-                  <tr className="border-b border-[#2C4E54] text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
-                    <th className="px-3.5 py-2 text-left">Provider</th>
-                    <th className="px-3.5 py-2 text-right">Days</th>
-                    <th className="px-3.5 py-2 text-right">Patients</th>
-                    <th className="px-3.5 py-2 text-right">Production</th>
-                    <th className="px-3.5 py-2 text-right">Undocumented</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {providers.map((p) => (
-                    <tr key={p.prov_num} className="font-mono text-sm tabular-nums">
-                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 font-sans text-[#EDF3F1]">
-                        {p.name}
-                      </td>
-                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right text-[#8AA6AB]">
-                        {p.days}
-                      </td>
-                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
-                        {p.patients}
-                      </td>
-                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right text-[#79B4C4]">
-                        {usd(p.production)}
-                      </td>
-                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
-                        {p.nonote === 0 ? (
-                          <span className="text-[#4A6165]">0</span>
-                        ) : (
-                          <span className="font-bold text-[#E4674F]">{p.nonote}</span>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
         {/* The day behind a number: who produced what, who was booked,
             who came, and whose chart is blank. Read from OpenDental
             when opened; nothing is stored. */}
@@ -874,7 +827,10 @@ export default function ProductionPage() {
                           </span>
                           <span className="min-w-0 flex-1">
                             <span className="block truncate text-[#EDF3F1]">
-                              {v.patient}
+                              {v.patient}{" "}
+                              <span className="text-xs text-[#8AA6AB]">
+                                (PT#{v.pat_num})
+                              </span>
                               {v.state === "showed" && !v.noted && (
                                 <span className="ml-2 rounded bg-[#2A1714] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.06em] text-[#E4674F]">
                                   undocumented

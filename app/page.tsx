@@ -15,6 +15,7 @@
 //       click away in the section sub-nav.
 //   v3  Charting is built; its tile is live rather than 'coming soon'.
 //   v4  The Production Dashboard tile.
+//   v5  The Provider Summary tile.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -60,6 +61,14 @@ const TOOLS: Tool[] = [
     title: "Production Dashboard",
     blurb:
       "A month of production, a day to a row. What the book promised in dollars, who came, what was actually produced by each provider — and who left no note behind.",
+    ready: true,
+  },
+  {
+    href: "/provider-summary",
+    eyebrow: "Providers",
+    title: "Provider Summary",
+    blurb:
+      "A month by provider. Days scheduled against days actually worked, patients seen, production and production per day — and whose charts are missing notes.",
     ready: true,
   },
 ];

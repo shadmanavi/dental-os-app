@@ -1,10 +1,14 @@
-{(panel.focus === "booked" || panel.focus === "notHygiene") && ("use client";
+"use client";
 
-// Hygiene Dashboard — v8
+// Hygiene Dashboard — v9
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v9  The NH/NE panel lists its 2 groups one under the other: no
+//       exam - cleaning done, exam unbilled - then no cleaning. Counts
+//       come from the same verdict the month row uses.
+//
 //   v8  Showed is a patient who had a cleaning and an exam. NH/NE is
 //       one who came and got one without the other, or neither - a
 //       charge nobody billed - and SRP has its own column. Everything
@@ -733,46 +737,76 @@ export default function HygienePage() {
                   </div>
 
                   {panel.focus !== "rdh" && (
-                    <ul className="max-h-[26rem] divide-y divide-[#2C4E54]/50 overflow-y-auto">
-                      {detail.appointments
-                        .filter(inFocus(panel.focus))
-                        .map((v) => (
-                          <li key={v.apt_num} className="flex gap-3 px-5 py-2 text-sm">
-                            <span className="w-12 shrink-0 font-mono text-xs text-[#8AA6AB]">
-                              {v.time.slice(0, 5)}
-                            </span>
-                            <span className="min-w-0 flex-1">
-                              <span className="block truncate text-[#EDF3F1]">{v.patient}</span>
-                              <span className="block truncate text-xs text-[#8AA6AB]">
-                                {v.column}
-                                {v.hygienist !== "" ? ` · ${v.hygienist}` : ""}
-                                {v.codes !== "" ? ` · ${v.codes}` : ""}
-                              </span>
-                            </span>
-                            {/* On the Booked list the three states sit
-                                together, so each says which it is. */}
-                            {(panel.focus === "booked" || panel.focus === "notHygiene") && (
-                              <span
-                                className={`shrink-0 self-start rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.06em] ${
-                                  v.state === "showed"
-                                    ? "text-[#79B4C4]"
-                                    : v.state === "missed"
-                                      ? "text-[#F3B0A2]"
-                                      : "text-[#8AA6AB]"
-                                }`}
-                              >
-                                {panel.focus === "notHygiene" ? v.kind : v.state}
-                              </span>
+                    <div className="max-h-[26rem] overflow-y-auto">
+                      {/* NH/NE splits into its 2 groups, one under the
+                          other; every other figure is a single list. */}
+                      {(panel.focus === "notHygiene"
+                        ? [
+                            {
+                              title: "No exam — cleaning done, no exam posted",
+                              rows: detail.appointments.filter((v) => v.kind === "no exam"),
+                            },
+                            {
+                              title: "No hyg — no cleaning posted",
+                              rows: detail.appointments.filter(
+                                (v) => v.kind === "no cleaning" || v.kind === "nothing",
+                              ),
+                            },
+                          ]
+                        : [
+                            {
+                              title: "",
+                              rows: detail.appointments.filter(inFocus(panel.focus)),
+                            },
+                          ]
+                      ).map((section) => (
+                        <div key={section.title}>
+                          {section.title !== "" && (
+                            <h4 className="border-b border-[#2C4E54] bg-[#16292D] px-5 py-1.5 text-[10px] font-bold uppercase tracking-[0.08em] text-[#F3B0A2]">
+                              {section.title} · {section.rows.length}
+                            </h4>
+                          )}
+                          <ul className="divide-y divide-[#2C4E54]/50">
+                            {section.rows.map((v) => (
+                              <li key={v.apt_num} className="flex gap-3 px-5 py-2 text-sm">
+                                <span className="w-12 shrink-0 font-mono text-xs text-[#8AA6AB]">
+                                  {v.time.slice(0, 5)}
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="block truncate text-[#EDF3F1]">{v.patient}</span>
+                                  <span className="block truncate text-xs text-[#8AA6AB]">
+                                    {v.column}
+                                    {v.hygienist !== "" ? ` · ${v.hygienist}` : ""}
+                                    {v.codes !== "" ? ` · ${v.codes}` : ""}
+                                  </span>
+                                </span>
+                                {/* On the Booked list the states sit
+                                    together, so each row says which it
+                                    is. "Nothing" rows get named too. */}
+                                {(panel.focus === "booked" || v.kind === "nothing") && (
+                                  <span
+                                    className={`shrink-0 self-start rounded px-1.5 py-0.5 text-[10px] uppercase tracking-[0.06em] ${
+                                      v.state === "showed"
+                                        ? "text-[#79B4C4]"
+                                        : v.state === "missed"
+                                          ? "text-[#F3B0A2]"
+                                          : "text-[#8AA6AB]"
+                                    }`}
+                                  >
+                                    {v.kind === "nothing" ? "nothing posted" : v.state}
+                                  </span>
+                                )}
+                              </li>
+                            ))}
+                            {section.rows.length === 0 && (
+                              <li className="px-5 py-4 text-center text-sm text-[#4A6165]">
+                                Nobody in this group.
+                              </li>
                             )}
-                          </li>
-                        ))}
-
-                      {detail.appointments.filter(inFocus(panel.focus)).length === 0 && (
-                        <li className="px-5 py-6 text-center text-sm text-[#4A6165]">
-                          Nothing to show.
-                        </li>
-                      )}
-                    </ul>
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
                   )}
 
                   <p className="border-t border-[#2C4E54] px-5 py-2.5 text-[11px] text-[#4A6165]">

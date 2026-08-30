@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 11
+// Version: 12
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,14 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v12 One verdict for everything. The month rows and the day panel
+//       were counted by different code from different queries, and the
+//       counts drifted one apart. Both now read the same appointments
+//       and hand each patient a single verdict, with flags unioned
+//       across their appointments - a cleaning at 9 and an exam at 2 is
+//       a whole visit, and one person is never in 2 buckets. The NH/NE
+//       panel names its 2 groups: no exam, and no cleaning.
 //
 //   v11 Restores rowFor, lost when the counting core was replaced in
 //       v9. The month read threw ReferenceError and every load came
@@ -301,6 +309,34 @@ const pad = (n: number) => String(n).padStart(2, "0");
 const isTrue = (v: unknown): boolean =>
   v === true || v === 1 || v === "1" || String(v ?? "").toLowerCase() === "true";
 
+// What one patient's completed work on one day amounts to. The flags
+// are the union across every appointment they completed that day, so a
+// cleaning at 9 and an exam at 2 still make a whole visit.
+type PatientFlags = {
+  clean: boolean;
+  exam: boolean;
+  srp: boolean;
+  posted: boolean;
+  done: boolean;
+  sched: boolean;
+};
+
+// The one verdict, used by the month rows and the day panel alike so
+// the two can never disagree.
+//
+//   hygiene      cleaning and an exam - the whole visit
+//   srp          scaling and root planing instead
+//   no exam      cleaning done, no exam posted - an exam went unbilled
+//   no cleaning  something posted, but no cleaning - or exam only
+//   nothing      completed with nothing on the account at all
+function verdictOf(f: PatientFlags): string {
+  if (f.clean && f.exam) return "hygiene";
+  if (f.srp) return "srp";
+  if (f.clean) return "no exam";
+  if (f.posted) return "no cleaning";
+  return "nothing";
+}
+
 // Today in California, not UTC. toISOString() rolls the date over from
 // mid-afternoon onwards and would call today a day gone.
 function localDate(): string {
@@ -508,8 +544,9 @@ Deno.serve(async (req: Request) => {
     // recall visit are not what this screen is about, and SRP is not
     // counted as hygiene at all.
     const hygList = HYGIENE_CODES.map((c) => `'${c}'`).join(",");
-
     const srpList = SRP_CODES.map((c) => `'${c}'`).join(",");
+    const cleanList = CLEANING_CODES.map((c) => `'${c}'`).join(",");
+    const examList = EXAM_CODES.map((c) => `'${c}'`).join(",");
 
     const codes =
       `(SELECT GROUP_CONCAT(pc.ProcCode ORDER BY pc.ProcCode SEPARATOR ' ') ` +
@@ -517,53 +554,45 @@ Deno.serve(async (req: Request) => {
       ` WHERE pl.AptNum = a.AptNum AND pl.ProcStatus = ${APT_COMPLETE} ` +
       `   AND pc.ProcCode IN (${hygList}))`;
 
-    // What the visit turned out to be, from what was posted. A cleaning
-    // and an exam together is the whole visit; the rest name what was
-    // short, so the front desk can see the charge that went unbilled.
     const has = (list: string) =>
       `EXISTS (SELECT 1 FROM procedurelog pl JOIN procedurecode pc ` +
       `ON pc.CodeNum = pl.CodeNum WHERE pl.AptNum = a.AptNum ` +
       `AND pl.ProcStatus = ${APT_COMPLETE} AND pc.ProcCode IN (${list}))`;
 
-    const cleanList = CLEANING_CODES.map((c) => `'${c}'`).join(",");
-    const examList = EXAM_CODES.map((c) => `'${c}'`).join(",");
+    const postedAny =
+      `EXISTS (SELECT 1 FROM procedurelog pl WHERE pl.AptNum = a.AptNum ` +
+      `AND pl.ProcStatus = ${APT_COMPLETE})`;
 
-    const kind =
-      `CASE WHEN ${has(cleanList)} AND ${has(examList)} THEN 'hygiene' ` +
-      `WHEN ${has(srpList)} THEN 'srp' ` +
-      `WHEN ${has(cleanList)} THEN 'no exam' ` +
-      `WHEN NOT EXISTS (SELECT 1 FROM procedurelog pl WHERE pl.AptNum = a.AptNum ` +
-      `       AND pl.ProcStatus = ${APT_COMPLETE}) THEN 'nothing' ` +
-      `ELSE 'no cleaning' END`;
-
-    // What stands in those columns now: the ones that happened, and the
-    // ones still to come.
-    const standing = await shortQueryAll(
+    // The same 2 reads the month makes, cut to one day and carrying
+    // names. The panel and the month row are then counted from the same
+    // appointments by the same rule, so they cannot disagree.
+    const dayAppts = await shortQueryAll(
       auth,
-      `SELECT a.AptNum, TIME(a.AptDateTime) AS T, o.OpName, a.AptStatus, ` +
-        `${patientName} AS Patient, pr.Abbr AS Hyg, ${codes} AS Codes, ` +
-        `${kind} AS Kind ` +
+      `SELECT a.AptNum, a.PatNum, ${patientName} AS Patient, ` +
+        `TIME(a.AptDateTime) AS T, o.OpName, pr.Abbr AS Hyg, a.AptStatus, ` +
+        `${has(cleanList)} AS Clean, ${has(examList)} AS Exam, ` +
+        `${has(srpList)} AS Srp, ${postedAny} AS Posted, ${codes} AS Codes ` +
         `FROM appointment a ` +
         `JOIN patient pt ON pt.PatNum = a.PatNum ` +
         `LEFT JOIN operatory o ON o.OperatoryNum = a.Op ` +
         `LEFT JOIN provider pr ON pr.ProvNum = a.ProvHyg ` +
-        `WHERE a.Op IN (${dayColList}) ` +
-        `AND a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
-        `AND DATE(a.AptDateTime) = '${date}' ORDER BY a.AptDateTime`,
+        `WHERE a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
+        `AND DATE(a.AptDateTime) = '${date}' ` +
+        `AND (a.Op IN (${dayColList}) OR EXISTS (SELECT 1 FROM histappointment h2 ` +
+        `     WHERE h2.AptNum = a.AptNum AND h2.Op IN (${dayColList}) ` +
+        `       AND DATE(h2.AptDateTime) = '${date}')) ` +
+        `ORDER BY a.AptDateTime`,
     );
 
-    if (standing.failed) return fail("Could not read that day's appointments.", standing.failed);
+    if (dayAppts.failed) return fail("Could not read that day's appointments.", dayAppts.failed);
 
-    // What the day was holding at midnight. The ones here that are not
-    // above are the misses - and this is where their real time and
-    // column come from, because the live row has been re-dated.
+    // What the day was holding at midnight - where the misses' real
+    // time and column live, because the live row has been re-dated.
     const held = await shortQueryAll(
       auth,
-      `SELECT h.AptNum, TIME(h.AptDateTime) AS T, o.OpName, ` +
-        `${patientName} AS Patient, pr.Abbr AS Hyg, ` +
-        `a.AptStatus AS LiveStatus, ${codes} AS Codes, ${kind} AS Kind ` +
+      `SELECT h.AptNum, h.PatNum, TIME(h.AptDateTime) AS T, o.OpName, ` +
+        `${patientName} AS Patient, pr.Abbr AS Hyg ` +
         `FROM histappointment h ` +
-        `JOIN appointment a ON a.AptNum = h.AptNum ` +
         `JOIN patient pt ON pt.PatNum = h.PatNum ` +
         `LEFT JOIN operatory o ON o.OperatoryNum = h.Op ` +
         `LEFT JOIN provider pr ON pr.ProvNum = h.ProvHyg ` +
@@ -573,7 +602,7 @@ Deno.serve(async (req: Request) => {
         `AND h.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
         `                     WHERE h2.AptNum = h.AptNum ` +
         `                       AND h2.HistDateTStamp < '${date}') ` +
-        `ORDER BY h.AptDateTime`,
+        `GROUP BY h.AptNum ORDER BY h.AptDateTime`,
     );
 
     if (held.failed) return fail("Could not read what that day was holding.", held.failed);
@@ -586,50 +615,103 @@ Deno.serve(async (req: Request) => {
       hygienist: string;
       codes: string;
       state: "showed" | "booked" | "missed";
-      // What was posted: hygiene, srp, other, nothing. Empty until the
-      // appointment has happened.
       kind: string;
     };
 
-    const visits: Visit[] = [];
-    const seen = new Set<number>();
+    // One entry per patient, flags unioned across their appointments,
+    // exactly as the month counts them.
+    type PatDay = {
+      apt_num: number;
+      name: string;
+      time: string;
+      column: string;
+      hyg: string;
+      codes: Set<string>;
+      f: PatientFlags;
+    };
 
-    for (const r of standing.rows) {
-      const aptNum = num(r.AptNum);
-      if (seen.has(aptNum)) continue;
-      seen.add(aptNum);
+    const byPatient = new Map<number, PatDay>();
+
+    for (const r of dayAppts.rows) {
+      const patient = num(r.PatNum);
+      let p = byPatient.get(patient);
+      if (!p) {
+        p = {
+          apt_num: num(r.AptNum),
+          name: String(r.Patient ?? "").trim(),
+          time: String(r.T ?? ""),
+          column: String(r.OpName ?? "").trim(),
+          hyg: String(r.Hyg ?? "").trim(),
+          codes: new Set(),
+          f: { clean: false, exam: false, srp: false, posted: false, done: false, sched: false },
+        };
+        byPatient.set(patient, p);
+      }
+
+      if (num(r.AptStatus) === APT_COMPLETE) {
+        p.f.done = true;
+        p.f.clean = p.f.clean || isTrue(r.Clean);
+        p.f.exam = p.f.exam || isTrue(r.Exam);
+        p.f.srp = p.f.srp || isTrue(r.Srp);
+        p.f.posted = p.f.posted || isTrue(r.Posted);
+        for (const c of String(r.Codes ?? "").split(" ")) {
+          if (c.trim() !== "") p.codes.add(c.trim());
+        }
+      } else {
+        p.f.sched = true;
+      }
+    }
+
+    const been = date <= localDate();
+    const visits: Visit[] = [];
+    const placed = new Set<number>();
+
+    for (const [patient, p] of byPatient) {
+      if (!p.f.done) continue;
+      placed.add(patient);
       visits.push({
-        apt_num: aptNum,
-        time: String(r.T ?? ""),
-        column: String(r.OpName ?? "").trim(),
-        patient: String(r.Patient ?? "").trim(),
-        hygienist: String(r.Hyg ?? "").trim(),
-        codes: String(r.Codes ?? "").trim(),
-        state: num(r.AptStatus) === APT_COMPLETE ? "showed" : "booked",
-        kind: String(r.Kind ?? ""),
+        apt_num: p.apt_num,
+        time: p.time,
+        column: p.column,
+        patient: p.name,
+        hygienist: p.hyg,
+        codes: [...p.codes].sort().join(" "),
+        state: "showed",
+        kind: verdictOf(p.f),
       });
     }
 
-    // An appointment held at midnight that is now Complete happened,
-    // wherever it ended up. On 1 August several were moved into a column
-    // nobody was rostered in and completed there; judging by the column
-    // rather than the appointment called every one of them a no-show.
+    // Held at midnight and completed nothing: on a day that has been,
+    // that patient is a miss.
     for (const r of held.rows) {
-      const aptNum = num(r.AptNum);
-      if (seen.has(aptNum)) continue;
-      seen.add(aptNum);
-
-      const done = num(r.LiveStatus) === APT_COMPLETE;
-
+      const patient = num(r.PatNum);
+      if (placed.has(patient)) continue;
+      placed.add(patient);
       visits.push({
-        apt_num: aptNum,
+        apt_num: num(r.AptNum),
         time: String(r.T ?? ""),
         column: String(r.OpName ?? "").trim(),
         patient: String(r.Patient ?? "").trim(),
         hygienist: String(r.Hyg ?? "").trim(),
-        codes: done ? String(r.Codes ?? "").trim() : "",
-        state: done ? "showed" : "missed",
-        kind: done ? String(r.Kind ?? "") : "",
+        codes: "",
+        state: been ? "missed" : "booked",
+        kind: "",
+      });
+    }
+
+    // Booked after midnight and still to come.
+    for (const [patient, p] of byPatient) {
+      if (placed.has(patient)) continue;
+      placed.add(patient);
+      visits.push({
+        apt_num: p.apt_num,
+        time: p.time,
+        column: p.column,
+        patient: p.name,
+        hygienist: p.hyg,
+        codes: "",
+        state: "booked",
+        kind: "",
       });
     }
 
@@ -647,10 +729,15 @@ Deno.serve(async (req: Request) => {
         columns: String(r.Cols ?? "").trim(),
       })),
       appointments: visits,
+      // The same rule the month row uses, so the two always agree.
       counts: {
-        showed: visits.filter((v) => v.state === "showed").length,
+        showed: visits.filter((v) => v.kind === "hygiene").length,
+        srp: visits.filter((v) => v.kind === "srp").length,
+        nhne: visits.filter((v) =>
+          v.kind === "no exam" || v.kind === "no cleaning" || v.kind === "nothing"
+        ).length,
         missed: visits.filter((v) => v.state === "missed").length,
-        booked: visits.filter((v) => v.state === "booked").length,
+        booked: visits.length,
       },
       read_at: new Date().toISOString(),
     });
@@ -899,32 +986,57 @@ Deno.serve(async (req: Request) => {
     return w;
   };
 
-  const completed = new Set<number>();
+  // First gather every patient's flags for the day - the union across
+  // all their appointments - and only then hand down one verdict each.
+  // Judging appointment by appointment put a patient whose cleaning and
+  // exam sat on 2 separate appointments into the wrong bucket, and let
+  // one person land in 2 buckets at once.
+  const flagsByDay = new Map<number, Map<number, PatientFlags>>();
+
+  const flagsFor = (d: number, patient: number): PatientFlags => {
+    let dayMap = flagsByDay.get(d);
+    if (!dayMap) {
+      dayMap = new Map();
+      flagsByDay.set(d, dayMap);
+    }
+    let f = dayMap.get(patient);
+    if (!f) {
+      f = { clean: false, exam: false, srp: false, posted: false, done: false, sched: false };
+      dayMap.set(patient, f);
+    }
+    return f;
+  };
 
   for (const r of onTheDay.rows) {
     const d = dayOf(r.D);
     if (d < 1 || d > days || !countsThatDay(d, num(r.HygOp))) continue;
 
-    const w = workFor(d);
     rowFor(d);
-    const patient = num(r.PatNum);
+    const f = flagsFor(d, num(r.PatNum));
 
     if (num(r.AptStatus) !== APT_COMPLETE) {
-      w.scheduledAhead.add(patient);
+      f.sched = true;
       continue;
     }
 
-    completed.add(num(r.AptNum));
+    f.done = true;
+    f.clean = f.clean || isTrue(r.Clean);
+    f.exam = f.exam || isTrue(r.Exam);
+    f.srp = f.srp || isTrue(r.Srp);
+    f.posted = f.posted || isTrue(r.Posted);
+  }
 
-    // A cleaning and an exam is the whole visit. Anything short of that
-    // is a charge nobody billed: the cleaning that was never posted, or
-    // the exam that was never done.
-    if (isTrue(r.Clean) && isTrue(r.Exam)) {
-      w.showed.add(patient);
-    } else if (isTrue(r.Srp)) {
-      w.srp.add(patient);
-    } else {
-      w.nhne.add(patient);
+  for (const [d, dayMap] of flagsByDay) {
+    const w = workFor(d);
+    for (const [patient, f] of dayMap) {
+      if (!f.done) {
+        w.scheduledAhead.add(patient);
+        continue;
+      }
+      const verdict = verdictOf(f);
+      if (verdict === "hygiene") w.showed.add(patient);
+      else if (verdict === "srp") w.srp.add(patient);
+      else w.nhne.add(patient);
     }
   }
 
@@ -937,16 +1049,10 @@ Deno.serve(async (req: Request) => {
     const patient = num(r.PatNum);
     w.heldPatients.add(patient);
 
-    // Held at midnight and never completed: the patient did not come.
-    if (!completed.has(num(r.AptNum))) w.heldNotDone.add(patient);
-  }
-
-  // A patient who was held and also seen did come, so they are not a
-  // miss even if a second appointment of theirs was cancelled.
-  for (const w of work.values()) {
-    for (const p of w.showed) w.heldNotDone.delete(p);
-    for (const p of w.srp) w.heldNotDone.delete(p);
-    for (const p of w.nhne) w.heldNotDone.delete(p);
+    // Held at midnight and the patient completed nothing that day:
+    // they did not come. A patient who was held and also seen is not a
+    // miss even if a second appointment of theirs was cancelled.
+    if (!flagsByDay.get(d)?.get(patient)?.done) w.heldNotDone.add(patient);
   }
 
   // ---- 6. Finish each day ----

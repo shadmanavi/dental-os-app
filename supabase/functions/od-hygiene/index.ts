@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 12
+// Version: 13
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v13 The month read judges an appointment by every column it
+//       occupied that day, as the panel does, not by the lowest-numbered
+//       one. The reduction dropped patients who passed through 2
+//       columns: 1 August read 12 showed, 10 missed, 5 NH/NE, 33 booked
+//       against the panel's correct 14, 9, 7, 36.
 //
 //   v12 One verdict for everything. The month rows and the day panel
 //       were counted by different code from different queries, and the
@@ -896,17 +902,20 @@ Deno.serve(async (req: Request) => {
     `EXISTS (SELECT 1 FROM procedurelog pl WHERE pl.AptNum = a.AptNum ` +
     `AND pl.ProcStatus = ${APT_COMPLETE})`;
 
-  // The hygiene column it occupied on its own date, from the history if
-  // it has since been moved.
-  const hygieneOp =
-    `COALESCE((SELECT MIN(h.Op) FROM histappointment h ` +
+  // Every hygiene column the appointment occupied on its own date, not
+  // just one of them. Reducing this to the lowest-numbered column and
+  // judging by that dropped patients who passed through 2 columns - on
+  // 1 August the row read 12 showed while the panel could name 14,
+  // because the reduction picked a column nobody was rostered in.
+  const hygieneOps =
+    `CONCAT_WS(',', a.Op, (SELECT GROUP_CONCAT(DISTINCT h.Op) FROM histappointment h ` +
     `          WHERE h.AptNum = a.AptNum AND h.Op IN (${colList}) ` +
-    `            AND DATE(h.AptDateTime) = DATE(a.AptDateTime)), a.Op)`;
+    `            AND DATE(h.AptDateTime) = DATE(a.AptDateTime)))`;
 
   const onTheDay = await shortQueryAll(
     auth,
     `SELECT DATE(a.AptDateTime) AS D, a.AptNum, a.PatNum, a.AptStatus, ` +
-      `${hygieneOp} AS HygOp, ` +
+      `${hygieneOps} AS HygOps, ` +
       `${posted(cleanIn)} AS Clean, ${posted(examIn)} AS Exam, ` +
       `${posted(srpIn)} AS Srp, ${postedAnything} AS Posted ` +
       `FROM appointment a ` +
@@ -1009,7 +1018,15 @@ Deno.serve(async (req: Request) => {
 
   for (const r of onTheDay.rows) {
     const d = dayOf(r.D);
-    if (d < 1 || d > days || !countsThatDay(d, num(r.HygOp))) continue;
+    if (d < 1 || d > days) continue;
+
+    // The appointment belongs to the day if any column it occupied
+    // that date counts - the same question the day panel asks.
+    const ops = String(r.HygOps ?? "")
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (!ops.some((op) => countsThatDay(d, op))) continue;
 
     rowFor(d);
     const f = flagsFor(d, num(r.PatNum));

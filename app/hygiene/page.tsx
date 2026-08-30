@@ -6,6 +6,9 @@
 //
 // Changelog:
 //   v12 The slot count is a click. It opens the roster with the
+//       arithmetic spelled out per shift, and the percentages sit in a
+//       fixed-width slot so the digits stay in a straight column on
+//       days with 0 slots.
 //       arithmetic spelled out per shift - hours times columns - and
 //       the total they add to, so the number is never taken on faith.
 //
@@ -583,12 +586,15 @@ export default function HygienePage() {
                         ahead ? "text-[#EDF3F1]" : ""
                       }`}>
                         <Figure value={row.booked} onClick={() => openDay(d, "booked")} />
-                        {/* How full the day was booked against its slots. */}
-                        {row.slots > 0 && (
-                          <span className="ml-1 text-[10px] text-[#4A6165]">
-                            ({Math.round((row.booked / row.slots) * 100)}%)
-                          </span>
-                        )}
+                        {/* How full the day was booked against its
+                            slots. The span keeps its width even when
+                            empty, so the digits above and below stay
+                            in a straight column on 0-slot days. */}
+                        <span className="ml-1 inline-block w-12 text-left text-[10px] text-[#4A6165]">
+                          {row.slots > 0
+                            ? `(${Math.round((row.booked / row.slots) * 100)}%)`
+                            : ""}
+                        </span>
                       </td>
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                         {row.open === 0 ? (
@@ -620,12 +626,14 @@ export default function HygienePage() {
                               onClick={() => openDay(d, "showed")}
                               tone="text-[#79B4C4]"
                             />
-                            {/* How many of the booked actually showed. */}
-                            {row.booked > 0 && (
-                              <span className="ml-1 text-[10px] text-[#4A6165]">
-                                ({Math.round((row.showed / row.booked) * 100)}%)
-                              </span>
-                            )}
+                            {/* How many of the booked actually showed.
+                                Fixed width for the same reason as the
+                                Booked percentage: the digits line up. */}
+                            <span className="ml-1 inline-block w-12 text-left text-[10px] text-[#4A6165]">
+                              {row.booked > 0
+                                ? `(${Math.round((row.showed / row.booked) * 100)}%)`
+                                : ""}
+                            </span>
                           </>
                         ) : (
                           <span className="text-[#4A6165]">—</span>
@@ -685,11 +693,9 @@ export default function HygienePage() {
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.slots}</td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
                       {totals.booked}
-                      {totals.slots > 0 && (
-                        <span className="ml-1 text-[10px] font-normal text-[#4A6165]">
-                          ({fillRate}%)
-                        </span>
-                      )}
+                      <span className="ml-1 inline-block w-12 text-left text-[10px] font-normal text-[#4A6165]">
+                        {totals.slots > 0 ? `(${fillRate}%)` : ""}
+                      </span>
                     </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
                       <s className="text-[#4A6165] decoration-[#E4674F] decoration-[1.5px]">{unsold}</s>
@@ -700,11 +706,11 @@ export default function HygienePage() {
                     </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">
                       {totals.showed}
-                      {totals.booked > 0 && (
-                        <span className="ml-1 text-[10px] font-normal text-[#4A6165]">
-                          ({Math.round((totals.showed / totals.booked) * 100)}%)
-                        </span>
-                      )}
+                      <span className="ml-1 inline-block w-12 text-left text-[10px] font-normal text-[#4A6165]">
+                        {totals.booked > 0
+                          ? `(${Math.round((totals.showed / totals.booked) * 100)}%)`
+                          : ""}
+                      </span>
                     </td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right">{totals.missed}</td>
                     <td className="border-t border-[#2C4E54] px-3.5 py-2.5 text-right text-[#F3B0A2]">

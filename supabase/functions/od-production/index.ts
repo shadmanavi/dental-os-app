@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-production/index.ts
-// Version: 1
+// Version: 2
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,11 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v2  Each month day row carries its own per-provider breakdown, so
+//       the screen can open a day in place without another read. It
+//       folds out of the same (day, provider, patient) groups the day
+//       rows were already counted from - no extra OpenDental call.
 //
 //   v1  First build. Month rows, day panel, per-provider month totals,
 //       and the no-note check.
@@ -735,6 +740,29 @@ Deno.serve(async (req: Request) => {
     return m;
   };
 
+  // The same fold again, kept per day this time, so each day row can
+  // carry its own provider breakdown and the screen can open a day in
+  // place without another read.
+  type DayProv = {
+    patients: Set<number>;
+    production: number;
+    unnoted: Set<number>;
+  };
+  const provByDay = new Map<number, Map<number, DayProv>>();
+  const dayProvFor = (d: number, p: number): DayProv => {
+    let dayMap = provByDay.get(d);
+    if (!dayMap) {
+      dayMap = new Map();
+      provByDay.set(d, dayMap);
+    }
+    let w = dayMap.get(p);
+    if (!w) {
+      w = { patients: new Set(), production: 0, unnoted: new Set() };
+      dayMap.set(p, w);
+    }
+    return w;
+  };
+
   for (const r of prod.rows) {
     const d = num(r.D);
     if (d < 1 || d > days) continue;
@@ -755,6 +783,11 @@ Deno.serve(async (req: Request) => {
     m.patients.add(patient);
     m.production += num(r.Prod);
     if (!isTrue(r.Noted)) m.unnoted.add(`${d}:${patient}`);
+
+    const dp = dayProvFor(d, provNum);
+    dp.patients.add(patient);
+    dp.production += num(r.Prod);
+    if (!isTrue(r.Noted)) dp.unnoted.add(patient);
   }
 
   // A provider's unnoted set was gathered per group; drop the pairs
@@ -765,6 +798,14 @@ Deno.serve(async (req: Request) => {
       const [dStr, patStr] = key.split(":");
       if (fold.get(Number(dStr))?.notedByPatient.get(Number(patStr))) {
         m.unnoted.delete(key);
+      }
+    }
+  }
+
+  for (const [d, dayMap] of provByDay) {
+    for (const w of dayMap.values()) {
+      for (const patient of [...w.unnoted]) {
+        if (fold.get(d)?.notedByPatient.get(patient)) w.unnoted.delete(patient);
       }
     }
   }
@@ -797,6 +838,15 @@ Deno.serve(async (req: Request) => {
     missed: number;
     actual: number;
     nonote: number;
+    // Who produced what that day, so the screen can open the row in
+    // place. Empty on a day still ahead - nothing is produced yet.
+    provs: {
+      prov_num: number;
+      name: string;
+      patients: number;
+      production: number;
+      nonote: number;
+    }[];
   };
 
   const out: DayRow[] = [];
@@ -840,6 +890,15 @@ Deno.serve(async (req: Request) => {
       missed: been ? missed : 0,
       actual: been ? Math.round(f.actual * 100) / 100 : 0,
       nonote: been ? nonote : 0,
+      provs: [...(provByDay.get(d) ?? new Map<number, DayProv>()).entries()]
+        .map(([provNum, w]) => ({
+          prov_num: provNum,
+          name: abbrOf.get(provNum) || "—",
+          patients: w.patients.size,
+          production: Math.round(w.production * 100) / 100,
+          nonote: w.unnoted.size,
+        }))
+        .sort((a, b) => b.production - a.production),
     });
   }
 

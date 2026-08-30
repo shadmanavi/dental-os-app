@@ -1,11 +1,20 @@
 "use client";
 
-// Production Dashboard — v1
+// Production Dashboard — v2
 // A month of production, a day to a row: what the book promised in
 // dollars, how many patients it named, how many came, what was actually
 // produced — and who left no note behind.
 //
 // Changelog:
+//   v2  Missed gets its own column, daily and in the totals row, the
+//       same shape as Showed. The "the promise" note under the
+//       Scheduled total comes off. The error column is renamed
+//       Undocumented. And each day row grows a chevron that opens the
+//       day in place, listing that day's providers with their patients,
+//       production and undocumented counts — carried on the month read,
+//       so opening a day costs nothing. A provider clicked there opens
+//       the day panel already narrowed to them.
+//
 //   v1  First build, shaped on the hygiene dashboard. Office switch,
 //       month paging, the day table with a totals row in the header,
 //       a per-provider month strip, and the day panel with a provider
@@ -28,7 +37,7 @@
 //   completed procedures carry not one word of clinical note between
 //   them. A note by any provider on the visit clears the patient.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 
@@ -43,6 +52,13 @@ type DayRow = {
   missed: number;
   actual: number;
   nonote: number;
+  provs: {
+    prov_num: number;
+    name: string;
+    patients: number;
+    production: number;
+    nonote: number;
+  }[];
 };
 
 type MonthTotals = {
@@ -109,7 +125,7 @@ const FOCUS_LABEL: Record<Focus, string> = {
   showed: "Showed — seen in the chair",
   missed: "Missed — held at midnight, never seen",
   production: "Production — what each visit was worth",
-  nonote: "No note — seen, and nothing written",
+  nonote: "Undocumented — seen, and nothing written",
 };
 
 function inFocus(focus: Focus): (v: Visit) => boolean {
@@ -177,6 +193,19 @@ export default function ProductionPage() {
   // patients. Clicked again, the narrowing comes off.
   const [provFilter, setProvFilter] = useState("");
 
+  // Days opened in place with the chevron, each showing its own
+  // provider breakdown. Carried on the month read, so this is free.
+  const [openDays, setOpenDays] = useState<Set<number>>(new Set());
+
+  const toggleDay = (d: number) => {
+    setOpenDays((previous) => {
+      const next = new Set(previous);
+      if (next.has(d)) next.delete(d);
+      else next.add(d);
+      return next;
+    });
+  };
+
   // ---- Session and offices ----
   useEffect(() => {
     let active = true;
@@ -221,6 +250,7 @@ export default function ProductionPage() {
 
     setLoading(true);
     setError("");
+    setOpenDays(new Set());
 
     try {
       const supabase = createClient();
@@ -273,12 +303,15 @@ export default function ProductionPage() {
   }, [load]);
 
   // ---- One day, named ----
+  //
+  // A provider name passed in opens the panel already narrowed to
+  // them - the expanded row's providers click through this way.
   const openDay = useCallback(
-    async (day: number, focus: Focus) => {
+    async (day: number, focus: Focus, prov = "") => {
       setPanel({ day, focus });
       setDetail(null);
       setDetailError("");
-      setProvFilter("");
+      setProvFilter(prov);
       setDetailBusy(true);
 
       try {
@@ -328,6 +361,8 @@ export default function ProductionPage() {
   const showRate = totals && totals.patients > 0
     ? Math.round((totals.showed / totals.patients) * 100)
     : 0;
+  const seen = totals ? totals.showed + totals.missed : 0;
+  const missRate = seen > 0 ? Math.round(((totals?.missed ?? 0) / seen) * 100) : 0;
 
   return (
     <main className="min-h-screen bg-[#0B1719] px-4 py-4 text-[#EDF3F1] sm:px-6">
@@ -381,8 +416,8 @@ export default function ProductionPage() {
         {totals !== null && !loading && (
           <p className="px-1 text-[11px] text-[#4A6165]">
             Scheduled is what the book promised; Actual is gross production as
-            completed. No note is a patient seen that day with no clinical note
-            on any of it.
+            completed. Undocumented is a patient seen that day with no clinical
+            note on any of it.
           </p>
         )}
 
@@ -394,16 +429,17 @@ export default function ProductionPage() {
 
         <div className="overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[760px] border-collapse">
+            <table className="w-full min-w-[840px] border-collapse">
               <thead>
                 <tr className="text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
                   <th className="px-3.5 pt-2.5 text-left">Day</th>
                   <th className="px-3.5 pt-2.5 text-right">Scheduled</th>
                   <th className="px-3.5 pt-2.5 text-right">Patients</th>
                   <th className="px-3.5 pt-2.5 text-right">Showed</th>
+                  <th className="px-3.5 pt-2.5 text-right">Missed</th>
                   <th className="px-3.5 pt-2.5 text-right">Actual</th>
                   <th className="w-32 px-3.5 pt-2.5 text-left">Realized</th>
-                  <th className="px-3.5 pt-2.5 text-right">No note</th>
+                  <th className="px-3.5 pt-2.5 text-right">Undocumented</th>
                 </tr>
 
                 {/* The month's figures, each under the column it totals. */}
@@ -424,13 +460,18 @@ export default function ProductionPage() {
                         open
                       </span>
                     </th>
-                    <Total value={usd(totals.sched)} note="the promise" />
+                    <Total value={usd(totals.sched)} />
                     <Total value={String(totals.patients)} note="booked" />
                     <Total
                       value={String(totals.showed)}
                       pct={totals.patients > 0 ? `(${showRate}%)` : ""}
-                      note={`${totals.missed} missed`}
+                      note="of booked"
                       tone="good"
+                    />
+                    <Total
+                      value={String(totals.missed)}
+                      note={`${missRate}% of them`}
+                      tone="warn"
                     />
                     <Total
                       value={usd(totals.actual)}
@@ -445,7 +486,7 @@ export default function ProductionPage() {
                     </th>
                     <Total
                       value={String(totals.nonote)}
-                      note="undocumented"
+                      note="patients"
                       tone={totals.nonote > 0 ? "warn" : undefined}
                     />
                   </tr>
@@ -455,7 +496,7 @@ export default function ProductionPage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={7} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
+                    <td colSpan={8} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
                       Reading the month…
                     </td>
                   </tr>
@@ -475,7 +516,7 @@ export default function ProductionPage() {
                           <span className="inline-block min-w-[22px] font-mono text-[15px]">{d}</span>
                           <span className="text-xs">{weekday}</span>
                         </td>
-                        <td colSpan={6} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
+                        <td colSpan={7} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
                           —
                         </td>
                       </tr>
@@ -485,10 +526,11 @@ export default function ProductionPage() {
                   const been = past || isToday;
                   const ahead = !been;
                   const pct = row.sched > 0 ? Math.round((row.actual / row.sched) * 100) : 0;
+                  const opened = openDays.has(d);
 
                   return (
+                    <Fragment key={d}>
                     <tr
-                      key={d}
                       className={`font-mono text-sm tabular-nums ${
                         isToday ? "bg-[#F0A93B]/[0.07]" : ""
                       } ${ahead ? "text-[#8AA6AB]" : ""}`}
@@ -516,6 +558,21 @@ export default function ProductionPage() {
                           </button>
                         ) : (
                           <span className="text-xs text-[#4A6165]">no prov</span>
+                        )}
+                        {/* Opens the day in place: the providers and
+                            their figures, no round trip. */}
+                        {row.provs.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => toggleDay(d)}
+                            aria-expanded={opened}
+                            aria-label={`${opened ? "Hide" : "Show"} provider totals for day ${d}`}
+                            className="rounded px-1 text-xs text-[#8AA6AB] hover:bg-[#16292D] hover:text-[#EDF3F1]"
+                          >
+                            <span className={`inline-block transition-transform ${opened ? "rotate-180" : ""}`}>
+                              ▾
+                            </span>
+                          </button>
                         )}
                       </td>
 
@@ -555,6 +612,20 @@ export default function ProductionPage() {
                           </>
                         ) : (
                           <span className="text-[#4A6165]">—</span>
+                        )}
+                      </td>
+
+                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
+                        {!been ? (
+                          <span className="text-[#4A6165]">—</span>
+                        ) : row.missed === 0 ? (
+                          <span className="text-[#4A6165]">0</span>
+                        ) : (
+                          <Figure
+                            value={String(row.missed)}
+                            onClick={() => openDay(d, "missed")}
+                            tone="font-bold text-[#F3B0A2]"
+                          />
                         )}
                       </td>
 
@@ -602,6 +673,45 @@ export default function ProductionPage() {
                         )}
                       </td>
                     </tr>
+
+                    {/* The day opened in place: who produced what.
+                        A provider clicked here opens the day panel
+                        already narrowed to them. */}
+                    {opened && (
+                      <tr className="bg-[#0E1D20]">
+                        <td colSpan={8} className="border-b border-[#2C4E54]/45 px-3.5 py-2">
+                          {row.provs.length === 0 ? (
+                            <p className="pl-6 text-xs text-[#4A6165]">Nothing completed yet.</p>
+                          ) : (
+                            <ul className="flex flex-col gap-0.5 pl-6">
+                              {row.provs.map((p) => (
+                                <li key={p.prov_num}>
+                                  <button
+                                    type="button"
+                                    onClick={() => openDay(d, "production", p.name)}
+                                    className="w-full rounded px-1 py-0.5 text-left text-sm hover:bg-[#16292D]"
+                                  >
+                                    <span className="text-[#EDF3F1]">{p.name}</span>{" "}
+                                    <span className="font-mono text-xs tabular-nums text-[#8AA6AB]">
+                                      {p.patients} pts
+                                    </span>{" "}
+                                    <span className="font-mono text-xs tabular-nums text-[#79B4C4]">
+                                      {usd(p.production)}
+                                    </span>
+                                    {p.nonote > 0 && (
+                                      <span className="ml-2 font-mono text-xs font-bold tabular-nums text-[#E4674F]">
+                                        {p.nonote} undocumented
+                                      </span>
+                                    )}
+                                  </button>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   );
                 })}
               </tbody>
@@ -621,7 +731,7 @@ export default function ProductionPage() {
                     <th className="px-3.5 py-2 text-right">Days</th>
                     <th className="px-3.5 py-2 text-right">Patients</th>
                     <th className="px-3.5 py-2 text-right">Production</th>
-                    <th className="px-3.5 py-2 text-right">No note</th>
+                    <th className="px-3.5 py-2 text-right">Undocumented</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -682,7 +792,7 @@ export default function ProductionPage() {
                     <span className="text-[#79B4C4]">{usd(detail.counts.actual)} done</span>
                     <span>{detail.counts.showed} showed</span>
                     <span className="text-[#F3B0A2]">{detail.counts.missed} missed</span>
-                    <span className="text-[#E4674F]">{detail.counts.nonote} no note</span>
+                    <span className="text-[#E4674F]">{detail.counts.nonote} undocumented</span>
                   </span>
                 )}
 
@@ -740,7 +850,7 @@ export default function ProductionPage() {
                               </span>
                               {p.nonote > 0 && (
                                 <span className="ml-2 font-mono text-xs font-bold text-[#E4674F]">
-                                  {p.nonote} no note
+                                  {p.nonote} undocumented
                                 </span>
                               )}
                             </button>
@@ -778,7 +888,7 @@ export default function ProductionPage() {
                               {v.patient}
                               {v.state === "showed" && !v.noted && (
                                 <span className="ml-2 rounded bg-[#2A1714] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-[0.06em] text-[#E4674F]">
-                                  no note
+                                  undocumented
                                 </span>
                               )}
                             </span>
@@ -861,7 +971,7 @@ function Total({
   pct,
 }: {
   value: string;
-  note: string;
+  note?: string;
   tone?: "good" | "warn";
   pct?: string;
 }) {
@@ -880,7 +990,9 @@ function Total({
           </span>
         )}
       </span>
-      <span className="block font-sans text-[11px] font-normal text-[#4A6165]">{note}</span>
+      {note !== undefined && (
+        <span className="block font-sans text-[11px] font-normal text-[#4A6165]">{note}</span>
+      )}
     </th>
   );
 }

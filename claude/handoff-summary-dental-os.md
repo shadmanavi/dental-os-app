@@ -96,7 +96,7 @@ Together that takes a month read from 7 OpenDental round trips to 5, with the 2 
 
 - A staged fee upload has no lock. Two browsers pushing the same upload would both claim the same rows. Different offices in different tabs is safe and is how it is used
 - A failed row on a staged upload cannot be retried from the review screen. It has to be set back to pending in the database
-- Open question for Shad: should NH/NE count days with no RDH rostered? Maywood 13 August shows 29 NH/NE — really doctor production in hygiene chairs on a no-RDH day. Asked 28 August, not yet answered
+- Open question: should NH/NE count days with no RDH rostered? Maywood 13 August shows 29 NH/NE — really doctor production in hygiene chairs on a no-RDH day. Shad is reviewing it with Maria, 29 August; wait for his answer before changing anything
 
 ---
 

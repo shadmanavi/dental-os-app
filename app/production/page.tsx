@@ -1,11 +1,17 @@
 "use client";
 
-// Production Dashboard — v2
+// Production Dashboard — v3
 // A month of production, a day to a row: what the book promised in
 // dollars, how many patients it named, how many came, what was actually
 // produced — and who left no note behind.
 //
 // Changelog:
+//   v3  The notes line under the totals row comes off — "providers
+//       over open", "booked", "of booked", "% of them", "of the
+//       promise", "short of the book", "patients", all of it. The
+//       title bar is the column labels and the figures, nothing else.
+//       The percentages stay, inline beside their figures.
+//
 //   v2  Missed gets its own column, daily and in the totals row, the
 //       same shape as Showed. The "the promise" note under the
 //       Scheduled total comes off. The error column is renamed
@@ -449,44 +455,27 @@ export default function ProductionPage() {
                       <span className="block font-sans text-[10px] font-bold uppercase tracking-[0.08em] text-[#8AA6AB]">
                         {MONTHS[month - 1]} {year}
                       </span>
-                      <span className="block font-sans text-[11px] font-normal text-[#4A6165]">
-                        <span className="font-mono text-[#8AA6AB]">
-                          {totals.providers}
-                        </span>{" "}
-                        providers over{" "}
-                        <span className="font-mono text-[#8AA6AB]">
-                          {totals.days_open}
-                        </span>{" "}
-                        open
-                      </span>
                     </th>
                     <Total value={usd(totals.sched)} />
-                    <Total value={String(totals.patients)} note="booked" />
+                    <Total value={String(totals.patients)} />
                     <Total
                       value={String(totals.showed)}
                       pct={totals.patients > 0 ? `(${showRate}%)` : ""}
-                      note="of booked"
                       tone="good"
                     />
                     <Total
                       value={String(totals.missed)}
-                      note={`${missRate}% of them`}
+                      pct={seen > 0 ? `(${missRate}%)` : ""}
                       tone="warn"
                     />
                     <Total
                       value={usd(totals.actual)}
                       pct={totals.sched > 0 ? `(${realized}%)` : ""}
-                      note="of the promise"
                       tone="good"
                     />
-                    <th className="px-3.5 pb-2 pt-0.5 text-left align-top font-sans text-[11px] font-normal text-[#4A6165]">
-                      {totals.sched > totals.actual
-                        ? `${usd(totals.sched - totals.actual)} short of the book`
-                        : "ahead of the book"}
-                    </th>
+                    <th className="px-3.5 pb-2 pt-0.5 align-top" />
                     <Total
                       value={String(totals.nonote)}
-                      note="patients"
                       tone={totals.nonote > 0 ? "warn" : undefined}
                     />
                   </tr>
@@ -966,12 +955,10 @@ function Figure({
 // One month figure, sitting in the header above the column it totals.
 function Total({
   value,
-  note,
   tone,
   pct,
 }: {
   value: string;
-  note?: string;
   tone?: "good" | "warn";
   pct?: string;
 }) {
@@ -990,9 +977,6 @@ function Total({
           </span>
         )}
       </span>
-      {note !== undefined && (
-        <span className="block font-sans text-[11px] font-normal text-[#4A6165]">{note}</span>
-      )}
     </th>
   );
 }

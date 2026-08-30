@@ -1,7 +1,7 @@
 # Handoff Summary — Dental OS / TC Charting
 
 **Owner:** Shad
-**Last updated:** 28 August 2026
+**Last updated:** 29 August 2026
 **Session focus:** Moved onto Claude Code. Wrote the missing migration, built a PDF reader for payer fee schedules and loaded 6 of them into both offices, added payment recording from the tablet, and built the Hygiene Dashboard. A parallel chat built the Production Dashboard on 29 August.
 
 **Working from the repo now.** Claude Code runs inside

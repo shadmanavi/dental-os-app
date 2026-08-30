@@ -1,10 +1,14 @@
 "use client";
 
-// Hygiene Dashboard — v11
+// Hygiene Dashboard — v12
 // A month of hygiene, a day to a row: slots offered, booked, still open,
 // and once the day has been, who showed and who did not.
 //
 // Changelog:
+//   v12 The slot count is a click. It opens the roster with the
+//       arithmetic spelled out per shift - hours times columns - and
+//       the total they add to, so the number is never taken on faith.
+//
 //   v11 Booked carries its fill of the slots in parentheses, and Showed
 //       its share of booked, on every day and on the month total.
 //
@@ -161,6 +165,17 @@ function todayParts(): { year: number; month: number; day: number } {
 
 function weekdayOf(year: number, month: number, day: number): string {
   return WEEKDAYS[new Date(year, month - 1, day).getDay()];
+}
+
+// "07:00:00" to "11:00:00" is 4 hours. Used only to show the reader
+// how a day's slot count was built; the count itself comes from the
+// server the same way.
+function shiftHours(from: string, to: string): number {
+  const minutes = (t: string) => {
+    const m = t.match(/^(\d{2}):(\d{2})/);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : 0;
+  };
+  return Math.max(0, (minutes(to) - minutes(from)) / 60);
 }
 
 function fillClass(pct: number): string {
@@ -558,7 +573,11 @@ export default function HygienePage() {
                       </td>
 
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
-                        {row.slots}
+                        {row.slots > 0 ? (
+                          <Figure value={row.slots} onClick={() => openDay(d, "rdh")} />
+                        ) : (
+                          <span className="text-[#4A6165]">0</span>
+                        )}
                       </td>
                       <td className={`border-b border-[#2C4E54]/45 px-3.5 py-2 text-right ${
                         ahead ? "text-[#EDF3F1]" : ""
@@ -776,15 +795,39 @@ export default function HygienePage() {
                       </p>
                     ) : (
                       <ul className="mt-1 space-y-0.5">
-                        {detail.hygienists.map((h, i) => (
-                          <li key={`${h.name}-${i}`} className="text-sm text-[#EDF3F1]">
-                            {h.name}{" "}
-                            <span className="font-mono text-xs text-[#8AA6AB]">
-                              {h.from.slice(0, 5)}–{h.to.slice(0, 5)}
-                            </span>{" "}
-                            <span className="text-xs text-[#8AA6AB]">{h.columns}</span>
-                          </li>
-                        ))}
+                        {detail.hygienists.map((h, i) => {
+                          const hours = shiftHours(h.from, h.to);
+                          const cols = h.columns === "" ? 0 : h.columns.split(" + ").length;
+                          return (
+                            <li key={`${h.name}-${i}`} className="text-sm text-[#EDF3F1]">
+                              {h.name}{" "}
+                              <span className="font-mono text-xs text-[#8AA6AB]">
+                                {h.from.slice(0, 5)}–{h.to.slice(0, 5)}
+                              </span>{" "}
+                              <span className="text-xs text-[#8AA6AB]">{h.columns}</span>
+                              {/* The arithmetic behind the slot count:
+                                  an hour in a column is a slot. */}
+                              <span className="ml-2 font-mono text-xs text-[#79B4C4]">
+                                {hours}h × {cols} col = {Math.round(hours * cols * 10) / 10}
+                              </span>
+                            </li>
+                          );
+                        })}
+                        <li className="pt-1 text-xs text-[#8AA6AB]">
+                          Total{" "}
+                          <span className="font-mono text-[#EDF3F1]">
+                            {Math.round(
+                              detail.hygienists.reduce(
+                                (sum, h) =>
+                                  sum +
+                                  shiftHours(h.from, h.to) *
+                                    (h.columns === "" ? 0 : h.columns.split(" + ").length),
+                                0,
+                              ),
+                            )}
+                          </span>{" "}
+                          slots — hours are summed exactly, then rounded once.
+                        </li>
                       </ul>
                     )}
                   </div>

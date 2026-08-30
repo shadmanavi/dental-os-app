@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 13
+// Version: 14
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,12 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v14 The midnight snapshot is grouped per day, not per month. An
+//       appointment can sit on 2 days' books - missed on the 1st,
+//       rebooked to the 3rd, missed again - and grouping by appointment
+//       alone kept one of the days and lost the other, so 3 August read
+//       2 missed where the panel could name 3.
 //
 //   v13 The month read judges an appointment by every column it
 //       occupied that day, as the panel does, not by the lowest-numbered
@@ -944,7 +950,10 @@ Deno.serve(async (req: Request) => {
       `AND h.HistApptNum = (SELECT MAX(h2.HistApptNum) FROM histappointment h2 ` +
       `                     WHERE h2.AptNum = h.AptNum ` +
       `                       AND h2.HistDateTStamp < DATE(h.AptDateTime)) ` +
-      `GROUP BY h.AptNum`,
+      // Per day, not per month. One appointment can sit on 2 days'
+      // books - missed on the 1st, rebooked to the 3rd, missed again -
+      // and grouping by appointment alone kept only one of the days.
+      `GROUP BY DATE(h.AptDateTime), h.AptNum`,
   );
 
   if (snapshot.failed) {

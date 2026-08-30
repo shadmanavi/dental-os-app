@@ -52,7 +52,7 @@ the last one.
 | **Live in database** | Primary / Permanent tile | Missing & Other, Existing, both offices. Write proved on patient 17 |
 | **Live in database** | `chart_tiles.initial_type` widened to allow Primary | Schema change, applied by hand |
 | **Live in database** | Row-level security enabled on `dos_code_names`, `dos_codenum_map`, `dos_write_log` | Closed a Supabase critical security alert. No table in `public` is open now |
-| **Deployed** | `od-hygiene` **v3** and the Hygiene Dashboard at `/hygiene` | Third tile on the home page. A month of hygiene, a day to a row |
+| **Deployed** | `od-hygiene` **v7** and the Hygiene Dashboard **v6** at `/hygiene` | Third tile on the home page. Slots from the roster, booked from the midnight snapshot, showed only where hygiene was posted, and a No hyg column that finds missing postings. Every figure opens the patients behind it |
 | **Deployed** | `od-payment` **v2** and chart page **v19.8** | Records a card already taken on the Clover terminal, stamped with the presenter. Proved on patient 17 |
 | **Deployed** | `fee-schedule-push` **v3** | A create refused as already existing becomes an update |
 | **In the repo** | `scripts/fee-schedule-pdf.mjs` **v5** | Turns a payer's PDF into the CSV the upload screen takes |
@@ -68,15 +68,23 @@ the last one.
 
 ## 3. Next steps (prioritized)
 
-1. **Delete the 2 test payments on patient 17 at Downey** — 59587 and 59588, $1.02 each. Shad can remove them in OpenDental
-2. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
-3. **Send the email to Maria and Manuel** about D9630 and D0350. Two drafts were written on 23 August and never saved to file, so they need writing again
-4. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
-5. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced
-6. **Clear the stale Flouridex fees off Maywood M9955** — about 15 insurance schedules at $20, one Denti-Cal at $550, UCR Prior 2022 at $45
-7. **Tidy the trailing space on Downey's `[.025] Credit Card - M1`** — invisible, harmless, but there
-8. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
-9. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
+1. **Production Dashboard** — the same shape as the Hygiene Dashboard, but by provider rather than by hygienist. A day to a row, and for each provider: scheduled production, patients scheduled, patients who showed, and production actually done. Every figure clicks through to the detail for that provider.
+
+   Its error checking is the interesting part and goes further than hygiene's: match the doctor's note against the procedures completed, and surface patients seen with no documentation at all. The hygiene build already found the same class of problem — 16 appointments in August completed with nothing posted to the account.
+
+   Most of `od-hygiene` is reusable: the roster read, the midnight snapshot, the day panel, and the per-day column logic. What is new is money, the note comparison, and keying on the treating provider instead of the hygienist.
+
+   Worth settling the posting question first — it is still open from 21 August and this dashboard will keep running into it.
+
+2. **Delete the 2 test payments on patient 17 at Downey** — 59587 and 59588, $1.02 each. Shad can remove them in OpenDental
+3. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
+4. **Send the email to Maria and Manuel** about D9630 and D0350. Two drafts were written on 23 August and never saved to file, so they need writing again
+5. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
+6. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced
+7. **Clear the stale Flouridex fees off Maywood M9955** — about 15 insurance schedules at $20, one Denti-Cal at $550, UCR Prior 2022 at $45
+8. **Tidy the trailing space on Downey's `[.025] Credit Card - M1`** — invisible, harmless, but there
+9. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
+10. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
 
 **Known gaps, deliberately left:**
 

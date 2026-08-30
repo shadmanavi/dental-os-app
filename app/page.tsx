@@ -14,6 +14,7 @@
 //       schedule upload tool, not a tool of its own, and it is already one
 //       click away in the section sub-nav.
 //   v3  Charting is built; its tile is live rather than 'coming soon'.
+//   v4  The Production Dashboard tile.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -51,6 +52,14 @@ const TOOLS: Tool[] = [
     title: "Hygiene Dashboard",
     blurb:
       "A month of hygiene, a day to a row. Slots the roster put on offer, what got booked, what is still open, and once the day has been, who showed and who did not.",
+    ready: true,
+  },
+  {
+    href: "/production",
+    eyebrow: "Front desk",
+    title: "Production Dashboard",
+    blurb:
+      "A month of production, a day to a row. What the book promised in dollars, who came, what was actually produced by each provider — and who left no note behind.",
     ready: true,
   },
 ];

@@ -1,6 +1,6 @@
 "use client";
 
-// Top navigation — v3
+// Top navigation — v4
 // The one navigation bar for Dental OS. Rendered once in the root layout, so
 // every page gets it without owning a header of its own.
 //
@@ -20,6 +20,7 @@
 //   v1  Sections, sub-nav, session email, sign out.
 //   v2  Charting is built, so its section is live rather than greyed.
 //   v3  Adds the build badge.
+//   v4  The Production section.
 //
 //       A failed Vercel build is silent. Vercel builds the new version
 //       alongside the old one and only swaps traffic when the build
@@ -112,6 +113,11 @@ const SECTIONS: Section[] = [
   {
     href: "/hygiene",
     label: "Hygiene",
+    ready: true,
+  },
+  {
+    href: "/production",
+    label: "Production",
     ready: true,
   },
 ];

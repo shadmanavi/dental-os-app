@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 11
+// Version: 12
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -21,6 +21,26 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v12 A family plan no longer multiplies the estimate.
+//
+//       The plan query reached Ordinal through
+//       patplan ON pp.InsSubNum = cp.InsSubNum, and patplan holds
+//       one row per covered family member on a subscription. Five
+//       people on one plan meant five matches per claimproc, and
+//       every SUM in the query — PriIns, PriBase, SecIns, WriteOff,
+//       DedApplied — came back five times over, along with EstRows.
+//
+//       Seen live on patient 22838 (De Chavez): a $40.41 D2920 at
+//       80% showed insurance of $161.65 — 5 x $32.33 exactly — and
+//       the patient column went to -$121.24. A patient who is alone
+//       on their subscription matched one row and looked fine,
+//       which is why this survived until a family plan was opened.
+//
+//       The join now also requires pp.PatNum = pl.PatNum, so a
+//       claimproc matches only the patient's own patplan row. The
+//       benefits query further down always did this; the money
+//       query was the one place that forgot.
 //
 //   v11 The plan says what the patient calls it.
 //
@@ -699,7 +719,12 @@ Deno.serve(async (req: Request) => {
       `LEFT JOIN definition dx ON dx.DefNum = pl.Dx ` +
       `LEFT JOIN claimproc cp ON cp.ProcNum = pl.ProcNum ` +
       `AND cp.Status = ${CLAIMPROC_ESTIMATE} ` +
+      // Ordinal lives on patplan, but patplan holds one row per
+      // covered family member on the subscription — the PatNum match
+      // is what keeps a five-person plan from summing every estimate
+      // five times (v12).
       `LEFT JOIN patplan pp ON pp.InsSubNum = cp.InsSubNum ` +
+      `AND pp.PatNum = pl.PatNum ` +
       `WHERE pl.PatNum = ${patNum} AND pl.ProcStatus = ${PROC_STATUS_TP} ` +
       `GROUP BY pl.ProcNum, pl.ToothNum, pl.Surf, pl.Priority, pl.Dx, ` +
       `pl.ProcDate, pl.ProcFee, d.ItemName, d.ItemOrder, dx.ItemName, ` +

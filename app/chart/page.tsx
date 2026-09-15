@@ -1,10 +1,34 @@
 "use client";
 
-// Chairside charting — v19.8
+// Chairside charting — v20
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v20 Partials, and a span of teeth to chart them on.
+//
+//       Partial dentures had no way in: OpenDental charts them on the
+//       teeth they replace (TreatArea 7, tooth range), and both this
+//       screen and od-chart refused that shape. Four tiles now sit in
+//       Dentures — metal and resin, upper and lower — and they appear
+//       whenever permanent teeth are lit: one tooth, which is how two
+//       thirds of the partials on the books were recorded, or several.
+//
+//       Several is new. A "Several teeth" button under the chart turns
+//       tap-to-add on: each tap adds a tooth to the span or takes it
+//       back out, and the lit teeth are written as the range, exactly
+//       the way OpenDental's own Chart module writes the selected
+//       teeth. Off, a tap moves the selection as it always did —
+//       nothing changes for anyone charting one tooth at a time.
+//
+//       With a span lit, single-tooth tiles step aside (a filling on
+//       three teeth at once is a different feature); baby teeth
+//       cannot join a span, and the screen says so. The session list
+//       reads "teeth 28, 29, 30" on a range line.
+//
+//       Needs od-chart v16, which writes ToothRange and carries it
+//       onto the delivery line.
+//
 //   v19.8 The payment type is a dropdown of the office's own list.
 //
 //       v19.7 sent one fixed tender name for both offices, and there
@@ -954,6 +978,21 @@ const QUADRANT_TEETH: Record<string, number[]> = {
   LR: [25, 26, 27, 28, 29, 30, 31, 32],
 };
 
+// Mouth order for a span of teeth: numbers numerically, baby letters
+// after them alphabetically. 19,30 and 30,19 are the same span.
+function sortTeethKeys(keys: string[]): string[] {
+  return [...keys].sort((a, b) => {
+    const na = Number(a);
+    const nb = Number(b);
+    const aNum = Number.isInteger(na);
+    const bNum = Number.isInteger(nb);
+    if (aNum && bNum) return na - nb;
+    if (aNum) return -1;
+    if (bNum) return 1;
+    return a.localeCompare(b);
+  });
+}
+
 function shapeOfTreatArea(treatArea: number | null): Shape {
   if (treatArea === 1 || treatArea === 2) return "tooth";
   if (treatArea === 4) return "quadrant";
@@ -1673,7 +1712,15 @@ export default function ChartPage() {
   const [feeSchedule, setFeeSchedule] = useState<FeeSchedule | null>(null);
   const [provOverride, setProvOverride] = useState<number | null>(null);
 
-  const [tooth, setTooth] = useState<string>("");
+  // The lit teeth. One is the ordinary case and works exactly as the
+  // single tooth always did; several is a span, for the work that is
+  // charted on the teeth it replaces (partials). Kept sorted the way
+  // the mouth is numbered.
+  const [teethSel, setTeethSel] = useState<string[]>([]);
+  // Off, a tap moves the selection; on, a tap adds the tooth to the
+  // span (or takes it back out). Off is how the screen always worked.
+  const [multiTeeth, setMultiTeeth] = useState(false);
+  const tooth = teethSel.length === 1 ? teethSel[0] : "";
   // Quadrants light independently and combine. Never set at the same
   // time as a tooth.
   const [quads, setQuads] = useState<string[]>([]);
@@ -2677,7 +2724,8 @@ export default function ChartPage() {
       setResolvedProv(data.resolved_provider ?? null);
       setFeeSchedule(data.fee_schedule ?? null);
       setProvOverride(null);
-      setTooth("");
+      setTeethSel([]);
+      setMultiTeeth(false);
       setQuads([]);
       setWholeMouth(false);
       resetNav();
@@ -2720,7 +2768,7 @@ export default function ChartPage() {
     setPrimaryTeeth([]);
     setMenu([]);
     setFeeSchedule(null);
-    setTooth("");
+    setTeethSel([]);
     setQuads([]);
     setWholeMouth(false);
     resetNav();
@@ -2843,12 +2891,24 @@ export default function ChartPage() {
     archRegion: string;
     label: string;
   } => {
-    if (tooth !== "") {
+    if (teethSel.length > 0) {
+      // One tooth takes tooth work, as it always has. A span of
+      // permanent teeth takes tooth-range work (partials) — and so
+      // does a single permanent tooth, because two thirds of the
+      // partials on the books replace exactly one tooth. Baby teeth
+      // are never part of a range.
+      const allPermanent = teethSel.every((t) => /^\d+$/.test(t));
+      const shapes: Shape[] = [];
+      if (teethSel.length === 1) shapes.push("tooth");
+      if (allPermanent) shapes.push("range");
+
       return {
-        shapes: ["tooth"],
+        shapes,
         quads: [],
         archRegion: "",
-        label: `tooth ${tooth}`,
+        label: teethSel.length === 1
+          ? `tooth ${teethSel[0]}`
+          : `teeth ${teethSel.join(", ")}`,
       };
     }
 
@@ -2896,7 +2956,7 @@ export default function ChartPage() {
             : `${ordered.length} quadrants`;
 
     return { shapes, quads: ordered, archRegion, label };
-  }, [tooth, quads, wholeMouth]);
+  }, [teethSel, quads, wholeMouth]);
 
   const hasSelection = selection.shapes.length > 0;
   const selectionLabel = selection.label;
@@ -2951,7 +3011,18 @@ export default function ChartPage() {
   }, [quads, wholeMouth]);
 
   function selectTooth(key: string) {
-    setTooth((prev) => (prev === key ? "" : key));
+    setTeethSel((prev) => {
+      // Adding to a span: in or out, the rest stay lit.
+      if (multiTeeth) {
+        const next = prev.includes(key)
+          ? prev.filter((t) => t !== key)
+          : [...prev, key];
+        return sortTeethKeys(next);
+      }
+      // The ordinary tap: move the selection, or clear it by tapping
+      // the lit tooth again.
+      return prev.length === 1 && prev[0] === key ? [] : [key];
+    });
     setQuads([]);
     setWholeMouth(false);
     resetNav();
@@ -2962,7 +3033,7 @@ export default function ChartPage() {
     setQuads((prev) =>
       prev.includes(key) ? prev.filter((q) => q !== key) : [...prev, key]
     );
-    setTooth("");
+    setTeethSel([]);
     setWholeMouth(false);
     resetNav();
     setCommitError("");
@@ -2970,15 +3041,15 @@ export default function ChartPage() {
 
   function toggleWholeMouth() {
     setWholeMouth((prev) => !prev);
-    setTooth("");
+    setTeethSel([]);
     setQuads([]);
     resetNav();
     setCommitError("");
   }
 
   // A tile is offered only where it can actually be written. Tooth-range
-  // work never is: od-chart refuses it, so showing it would be an
-  // invitation to an error message.
+  // work (partials) shows whenever permanent teeth are lit — one tooth
+  // or a span — and od-chart v16 writes the lit teeth as the range.
   const shapedMenu = useMemo(() => {
     if (selection.shapes.length === 0) return [];
 
@@ -2987,7 +3058,6 @@ export default function ChartPage() {
         ...c,
         tiles: c.tiles.filter((t) => {
           const shape = shapeOfTreatArea(t.treat_area);
-          if (shape === "range") return false;
           // A missing tooth is marked on a tooth whatever its code says.
           if (t.entry_kind === "tooth_initial") {
             return selection.shapes.includes("tooth");
@@ -3060,6 +3130,10 @@ export default function ChartPage() {
         pat_num: patient?.PatNum,
         tile_id: tile.id,
         tooth_num: tooth,
+        // The lit teeth, for tooth-range tiles. od-chart ignores this
+        // for every other shape, the same way it drops a region sent
+        // with a tooth tile.
+        teeth: teethSel,
         // The tile decides how the selection is read, so a quadrant
         // tile gets every lit quadrant and an arch tile gets the one
         // arch they make. od-chart applies the same rule from the
@@ -3081,6 +3155,7 @@ export default function ChartPage() {
           od_id: data.od_id ?? null,
           descript: data.descript ?? "",
           tooth_num: data.tooth_num ?? tooth,
+          tooth_range: "",
           surf: data.surf ?? "",
           fee: data.fee ?? null,
           prov_abbr: data.prov_abbr ?? "",
@@ -3105,7 +3180,11 @@ export default function ChartPage() {
           : String(line.label ?? tile.label),
         code: String(line.proc_code ?? ""),
         descript: String(line.descript ?? ""),
-        tooth: String(line.tooth_num ?? tooth),
+        tooth: String(line.tooth_num ?? "") !== ""
+          ? String(line.tooth_num)
+          : String(line.tooth_range ?? "") !== ""
+            ? String(line.tooth_range)
+            : tooth,
         surf: String(line.surf ?? ""),
         fee: line.fee === null || line.fee === undefined
           ? null
@@ -4252,7 +4331,7 @@ export default function ChartPage() {
                       // Missing is recorded against the permanent
                       // slot, so it never strikes through a letter.
                       const isMissing = !isLetter && missingSet.has(t);
-                      const selected = tooth === t;
+                      const selected = teethSel.includes(t);
                       const inRegion = !isLetter && regionTeeth.has(t);
 
                       return (
@@ -4296,6 +4375,20 @@ export default function ChartPage() {
           ))}
 
           <div className="mt-3 flex flex-wrap items-center gap-4 text-[11.5px] text-[#8AA6AB]">
+            {/* Tap-to-add for a span of teeth. Off is the ordinary
+                one-tooth behaviour; on, each tap adds or removes a
+                tooth, for the work charted on the teeth it replaces. */}
+            <button
+              type="button"
+              onClick={() => setMultiTeeth((m) => !m)}
+              className={`rounded-md border px-2.5 py-1 text-[11.5px] font-semibold transition-colors ${
+                multiTeeth
+                  ? "border-[#EDF3F1] bg-[#EDF3F1] text-[#0B1719]"
+                  : "border-[#2C4E54] bg-[#193034] text-[#8AA6AB] hover:bg-[#204045]"
+              }`}
+            >
+              {multiTeeth ? "Adding teeth — tap to stop" : "Several teeth"}
+            </button>
             <span className="flex items-center gap-1.5">
               <i className="inline-block h-2 w-2 rounded-full bg-[#79B4C4]" /> Existing
             </span>
@@ -4313,12 +4406,18 @@ export default function ChartPage() {
                 ? `${
                   letterSet.has(tooth) ? "Baby tooth" : "Tooth"
                 } ${tooth}${missingSet.has(tooth) ? " · missing" : ""} · ${toothProcedures.length} on record`
-                : !hasSelection
-                  ? "Nothing selected"
-                  : `${
-                    selectionLabel.charAt(0).toUpperCase() +
-                    selectionLabel.slice(1)
-                  }${regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""}`}
+                : teethSel.length > 1
+                  ? `Teeth ${teethSel.join(", ")}${
+                    teethSel.some((t) => letterSet.has(t))
+                      ? " · baby teeth cannot join a span"
+                      : ""
+                  }`
+                  : !hasSelection
+                    ? "Nothing selected"
+                    : `${
+                      selectionLabel.charAt(0).toUpperCase() +
+                      selectionLabel.slice(1)
+                    }${regionTeeth.size > 0 ? ` · ${regionTeeth.size} teeth` : ""}`}
             </span>
           </div>
         </section>
@@ -5074,7 +5173,10 @@ export default function ChartPage() {
                               <div className="text-[#EDF3F1]">{nameOf(row)}</div>
                               <div className="mt-0.5 font-mono text-[11px] text-[#8AA6AB]">
                                 {row.proc_code}
-                                {row.tooth !== "" && ` · tooth ${row.tooth}`}
+                                {row.tooth !== "" &&
+                                  ` · ${
+                                    row.tooth.includes(",") ? "teeth" : "tooth"
+                                  } ${row.tooth}`}
                                 {row.surf !== "" && ` ${row.surf}`}
                               </div>
                             </td>

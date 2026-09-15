@@ -6,8 +6,19 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 15
+// Version: 16
 // Changelog:
+//   v16 Tooth-range procedures write.
+//
+//       Partial dentures are TreatArea 7 in OpenDental — charted on
+//       the teeth they replace — and were refused here. The commit
+//       body now takes teeth: a list of permanent tooth numbers,
+//       deduplicated, sorted, and written as ToothRange the way
+//       OpenDental's own Chart module writes the selected teeth. At
+//       least one tooth is required, which is OpenDental's rule too.
+//       The delivery line carries the same range as the lab line,
+//       and the range is read back with everything else.
+//
 //   v15 A tooth-state tile is a toggle.
 //
 //       Marking a tooth primary could not be undone. The tile only
@@ -171,7 +182,7 @@
 //         4     quadrant   Surf holds UR, UL, LR or LL. No ToothNum
 //         6     arch       Surf holds U or L. No ToothNum
 //         0, 3  mouth      neither field written
-//         7     tooth range  refused for now, nothing writes ToothRange
+//         7     tooth range  ToothRange holds the teeth (since v16)
 //
 //       A caller cannot override this. A tooth sent with a whole-mouth
 //       tile is dropped, and a region sent with a tooth tile is dropped,
@@ -902,6 +913,20 @@ function normalizeSurfaces(input: unknown): string[] {
   return SURFACE_ORDER.filter((s) => seen.has(s));
 }
 
+// The teeth a tooth-range procedure covers. Permanent numbers only —
+// a partial replaces adult teeth, and OpenDental's ToothRange column
+// holds numbers. Deduplicated and sorted, so 30,19 stores as 19,30
+// however the teeth were tapped.
+function normalizeTeeth(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<number>();
+  for (const raw of input) {
+    const n = Number(String(raw).trim());
+    if (Number.isInteger(n) && n >= 1 && n <= 32) seen.add(n);
+  }
+  return [...seen].sort((a, b) => a - b).map(String);
+}
+
 // =====================================================================
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -947,6 +972,7 @@ Deno.serve(async (req: Request) => {
     region?: string;
     regions?: unknown;
     surfaces?: unknown;
+    teeth?: unknown;
     addon_ids?: unknown;
     prov_num?: number;
     fee_override?: number;
@@ -1662,6 +1688,7 @@ Deno.serve(async (req: Request) => {
     const toothNum = (body.tooth_num ?? "").trim();
     const regions = normalizeRegions(body.regions, body.region);
     const surfaces = normalizeSurfaces(body.surfaces);
+    const teeth = normalizeTeeth(body.teeth);
 
     // Read the tile through RLS, and confirm it belongs to this caller's
     // organization and is offered at this office.
@@ -1875,6 +1902,7 @@ Deno.serve(async (req: Request) => {
 
     let effectiveTooth = "";
     let effectiveSurfaces: string[] = [];
+    let effectiveToothRange = "";
 
     // Which regions this call writes to. A quadrant tile fans out across
     // every quadrant sent; everything else writes exactly once, and the
@@ -1924,10 +1952,17 @@ Deno.serve(async (req: Request) => {
 
       effectiveRegions = arches;
     } else if (shape === "range") {
-      return json({
-        ok: false,
-        error: `${tile.label} covers a span of teeth, which cannot be charted here yet. Enter it in OpenDental.`,
-      }, 400);
+      // OpenDental's own rule: at least one tooth must be selected
+      // before a tooth-range procedure is entered. The lit teeth
+      // become the range, exactly as its Chart module does it.
+      if (teeth.length === 0) {
+        return json({
+          ok: false,
+          error: `${tile.label} is charted on the teeth it replaces. Tap them first — one or several.`,
+        }, 400);
+      }
+
+      effectiveToothRange = teeth.join(",");
     }
 
     if (tile.needs_surfaces === true && effectiveSurfaces.length === 0) {
@@ -1986,6 +2021,7 @@ Deno.serve(async (req: Request) => {
 
       if (effectiveTooth !== "") p.ToothNum = effectiveTooth;
       if (region !== "") p.Surf = region;
+      if (effectiveToothRange !== "") p.ToothRange = effectiveToothRange;
 
       if (typeof body.prov_num === "number" && body.prov_num > 0) {
         p.ProvNum = body.prov_num;
@@ -2171,6 +2207,7 @@ Deno.serve(async (req: Request) => {
       od_id: number | null;
       descript: string;
       tooth_num: string;
+      tooth_range: string;
       surf: string;
       status: string;
       fee: unknown;
@@ -2219,6 +2256,7 @@ Deno.serve(async (req: Request) => {
         od_id: procNum,
         descript: String(cb.descript ?? ""),
         tooth_num: String(cb.ToothNum ?? effectiveTooth),
+        tooth_range: String(cb.ToothRange ?? effectiveToothRange),
         surf: String(cb.Surf ?? ""),
         status: String(cb.ProcStatus ?? procStatus),
         fee: cb.ProcFee ?? null,

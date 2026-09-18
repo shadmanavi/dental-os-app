@@ -1,11 +1,23 @@
 "use client";
 
-// Production Dashboard — v5
+// Production Dashboard — v6
 // A month of production, a day to a row: what the book promised in
 // dollars, how many patients it named, how many came, what was actually
 // produced — and who left no note behind.
 //
 // Changelog:
+//   v6  Net production and a Collected column.
+//
+//       The Actual column read higher than OpenDental because it was
+//       gross. od-production v6 proved OpenDental's Production and
+//       Income arithmetic against real data and now serves net: fees
+//       less capitation write-offs, plus adjustments, less insurance
+//       write-offs on the day insurance paid. The column is renamed
+//       Net prod so nobody mistakes which figure it is, and Collected
+//       arrives beside it — patient plus insurance money, each on the
+//       day it landed. The day panel's header now says net and
+//       collected for the date.
+//
 //   v5  The totals line up with their columns. The realized percentage
 //       was riding beside the Actual total and pushing it off its
 //       column; it now sits under Realized, where the day rows put
@@ -40,9 +52,10 @@
 // Why the numbers are what they are, in short — the long version is in
 // the Edge Function:
 //
-//   Actual is gross production: every procedure completed that day,
-//   fee times units, on the provider who did it. No write-offs, no
-//   adjustments — the figure OpenDental's own report leads with.
+//   Net prod is OpenDental's Production and Income arithmetic: fees
+//   less capitation write-offs (procedure date), plus adjustments
+//   (their date), less insurance write-offs (payment date). Collected
+//   is patient plus insurance money on the day it arrived.
 //
 //   Scheduled is what the book promised: every fee attached to the
 //   day's appointments. For a day gone, the appointments held at
@@ -69,12 +82,14 @@ type DayRow = {
   showed: number;
   missed: number;
   actual: number;
+  collected: number;
   nonote: number;
   provs: {
     prov_num: number;
     name: string;
     patients: number;
     production: number;
+    collected: number;
     nonote: number;
   }[];
 };
@@ -85,6 +100,7 @@ type MonthTotals = {
   showed: number;
   missed: number;
   actual: number;
+  collected: number;
   nonote: number;
   providers: number;
   provider_days: number;
@@ -123,6 +139,16 @@ type DayDetail = {
     showed: number;
     missed: number;
     nonote: number;
+  };
+  // The report's arithmetic on this one date. Optional so the screen
+  // survives an od-production still answering without it.
+  money?: {
+    gross: number;
+    cap_writeoff: number;
+    adjustments: number;
+    writeoff: number;
+    net: number;
+    collected: number;
   };
 };
 
@@ -423,9 +449,10 @@ export default function ProductionPage() {
 
         {totals !== null && !loading && (
           <p className="px-1 text-[11px] text-[#4A6165]">
-            Scheduled is what the book promised; Actual is gross production as
-            completed. Undocumented is a patient seen that day with no clinical
-            note on any of it.
+            Scheduled is what the book promised; Net prod is OpenDental&apos;s own
+            arithmetic — fees less write-offs plus adjustments — and Collected
+            is the money that arrived. Undocumented is a patient seen that day
+            with no clinical note on any of it.
           </p>
         )}
 
@@ -445,7 +472,8 @@ export default function ProductionPage() {
                   <th className="px-3.5 pt-2.5 text-right">Patients</th>
                   <th className="px-3.5 pt-2.5 text-right">Showed</th>
                   <th className="px-3.5 pt-2.5 text-right">Missed</th>
-                  <th className="px-3.5 pt-2.5 text-right">Actual</th>
+                  <th className="px-3.5 pt-2.5 text-right">Net prod</th>
+                  <th className="px-3.5 pt-2.5 text-right">Collected</th>
                   <th className="w-32 px-3.5 pt-2.5 text-left">Realized</th>
                   <th className="px-3.5 pt-2.5 text-right">Undocumented</th>
                 </tr>
@@ -467,6 +495,7 @@ export default function ProductionPage() {
                     />
                     <Total value={String(totals.missed)} tone="warn" />
                     <Total value={usd(totals.actual)} tone="good" />
+                    <Total value={usd(totals.collected)} tone="good" />
                     {/* The month's realized rate, under the column
                         whose day cells carry the same figure. */}
                     <th className="px-3.5 pb-2 pt-0.5 text-left align-top">
@@ -495,7 +524,7 @@ export default function ProductionPage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={8} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
+                    <td colSpan={9} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
                       Reading the month…
                     </td>
                   </tr>
@@ -515,7 +544,7 @@ export default function ProductionPage() {
                           <span className="inline-block min-w-[22px] font-mono text-[15px]">{d}</span>
                           <span className="text-xs">{weekday}</span>
                         </td>
-                        <td colSpan={7} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
+                        <td colSpan={8} className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-left font-mono text-sm">
                           —
                         </td>
                       </tr>
@@ -641,6 +670,18 @@ export default function ProductionPage() {
                         )}
                       </td>
 
+                      {/* Money in that day — patient splits on their
+                          pay date, insurance on theirs. */}
+                      <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
+                        {!been ? (
+                          <span className="text-[#4A6165]">—</span>
+                        ) : (row.collected ?? 0) === 0 ? (
+                          <span className="text-[#4A6165]">$0</span>
+                        ) : (
+                          <span className="text-[#8FD0A8]">{usd(row.collected)}</span>
+                        )}
+                      </td>
+
                       <td className="border-b border-[#2C4E54]/45 px-3.5 py-2">
                         {been && row.sched > 0 ? (
                           <>
@@ -678,7 +719,7 @@ export default function ProductionPage() {
                         already narrowed to them. */}
                     {opened && (
                       <tr className="bg-[#0E1D20]">
-                        <td colSpan={8} className="border-b border-[#2C4E54]/45 px-3.5 py-2">
+                        <td colSpan={9} className="border-b border-[#2C4E54]/45 px-3.5 py-2">
                           {row.provs.length === 0 ? (
                             <p className="pl-6 text-xs text-[#4A6165]">Nothing completed yet.</p>
                           ) : (
@@ -696,6 +737,9 @@ export default function ProductionPage() {
                                     </span>{" "}
                                     <span className="font-mono text-xs tabular-nums text-[#79B4C4]">
                                       {usd(p.production)}
+                                    </span>{" "}
+                                    <span className="font-mono text-xs tabular-nums text-[#8FD0A8]">
+                                      {usd(p.collected ?? 0)} in
                                     </span>
                                     {p.nonote > 0 && (
                                       <span className="ml-2 font-mono text-xs font-bold tabular-nums text-[#E4674F]">
@@ -743,7 +787,12 @@ export default function ProductionPage() {
                 {detail !== null && (
                   <span className="flex flex-wrap items-baseline gap-x-3 font-mono text-[11px] tabular-nums text-[#8AA6AB]">
                     <span>{usd(detail.counts.sched)} booked</span>
-                    <span className="text-[#79B4C4]">{usd(detail.counts.actual)} done</span>
+                    <span className="text-[#79B4C4]">
+                      {usd(detail.money?.net ?? detail.counts.actual)} net
+                    </span>
+                    {detail.money && (
+                      <span className="text-[#8FD0A8]">{usd(detail.money.collected)} in</span>
+                    )}
                     <span>{detail.counts.showed} showed</span>
                     <span className="text-[#F3B0A2]">{detail.counts.missed} missed</span>
                     <span className="text-[#E4674F]">{detail.counts.nonote} undocumented</span>
@@ -877,7 +926,7 @@ export default function ProductionPage() {
                       : panel.focus === "missed"
                         ? "Held at midnight and completed nothing. "
                         : panel.focus === "production"
-                          ? "Gross production per patient — fee times units, no write-offs. "
+                          ? "Gross production per patient — fee times units. The day's write-offs and adjustments sit in the net figure above, not on any one patient. "
                           : ""}
                     Read from OpenDental now; nothing is stored here.
                   </p>
@@ -890,9 +939,14 @@ export default function ProductionPage() {
         <p className="px-1 text-[11px] text-[#4A6165]">
           Scheduled sums every fee attached to the day&apos;s appointments — the
           midnight book for a day gone, the live book for a day ahead — because
-          the misses are re-dated on their way into the Cancelled column. Actual
-          is gross production on the day it was completed, on the provider who
-          did it. Missed is booked less seen, never counted on its own.
+          the misses are re-dated on their way into the Cancelled column. Net
+          prod is OpenDental&apos;s Production and Income arithmetic, matched to
+          the penny: completed fees less capitation write-offs on the
+          procedure&apos;s date, plus adjustments on their date, less insurance
+          write-offs on the date insurance paid — so a past month keeps moving
+          as claims pay, exactly as OpenDental reports it. Collected is patient
+          payments plus insurance payments, each on the day the money arrived.
+          Missed is booked less seen, never counted on its own.
         </p>
       </div>
     </main>

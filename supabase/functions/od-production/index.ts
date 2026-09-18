@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-production/index.ts
-// Version: 5
+// Version: 6
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -17,6 +17,26 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v6  Production is net, and collection arrives.
+//
+//       The dashboard read higher than OpenDental's Annual Production
+//       and Income report because it summed gross fees. The report's
+//       arithmetic was proved against real data (Dr. Duong, Downey,
+//       Jan-Sep 2026, every column to the penny) and is now applied:
+//       gross less capitation write-offs on the procedure's date, plus
+//       adjustments on their own date, less insurance write-offs on
+//       the date insurance paid. Day rows, day provider strips, month
+//       provider totals and the providers action all switch to net,
+//       and each carries a new collected figure: patient paysplits on
+//       their pay date plus insurance payments on theirs.
+//
+//       Because write-offs sit on the payment date, a past month keeps
+//       moving as insurance pays. That is OpenDental's own behaviour,
+//       kept deliberately so the two screens always agree.
+//
+//       The day action returns a money block: gross, cap write-off,
+//       adjustments, write-off, net, collected for that one date.
 //
 //   v5  providers carries exams and diagnosis. Exams is the completed
 //       exam procedures on the provider's number this month. Diagnosis
@@ -54,8 +74,9 @@
 //     SUM of ProcFee times its units for every procedurelog row with
 //     ProcStatus 2 and that ProcDate. Units are UnitQty plus BaseUnits,
 //     floored at 1 because a row with neither still charged its fee.
-//     This is gross production - no write-offs, no adjustments - the
-//     same figure OpenDental's own production report leads with.
+//     Since v6 this gross figure becomes NET the way the report does
+//     it: capitation write-offs off (procedure date), adjustments on
+//     (their own date), insurance write-offs off (payment date).
 //
 //     It follows the procedure's provider (procedurelog.ProvNum), not
 //     the appointment's, so an exam the dentist did inside a hygiene
@@ -128,6 +149,119 @@ const fee = (pl: string) =>
 const attachedFee = (aptCol: string) =>
   `(SELECT COALESCE(SUM(${fee("pl")}), 0) FROM procedurelog pl ` +
   `WHERE pl.AptNum = ${aptCol})`;
+
+// ---------------------------------------------------------------------
+// Net production and collection — OpenDental's own arithmetic
+//
+// Proved column by column against the Annual Production and Income
+// report (Dr. Duong, Downey, Jan–Sep 2026): every month, every column,
+// to the penny. The rules that fell out:
+//
+//   Production  = gross completed fees on the procedure's date, LESS
+//                 capitation write-offs (claimproc Status 7), also on
+//                 the procedure's date
+//   Adjustments = adjustment.AdjAmt on its own AdjDate, on the
+//                 adjustment's own provider, attached or not
+//   Write-offs  = claimproc.WriteOff, Status 1 (Received) and 4
+//                 (Supplemental), on DateCP — the day insurance paid,
+//                 NOT the procedure's day
+//   Collection  = patient paysplits on DatePay (earned and unearned)
+//                 plus claimproc.InsPayAmt on DateCP
+//
+// Net production = production + adjustments − write-offs. Because the
+// write-offs sit on the payment date, a past month keeps moving as
+// insurance pays. That is how OpenDental itself reports it.
+// ---------------------------------------------------------------------
+type MoneyParts = {
+  cap: Map<string, number>; // capitation write-offs, by `${day}:${prov}`
+  adj: Map<string, number>; // adjustments
+  wo: Map<string, number>; // insurance write-offs
+  coll: Map<string, number>; // patient + insurance money in
+};
+
+// deno-lint-ignore no-explicit-any
+async function readMoneyParts(
+  auth: string,
+  first: string,
+  afterLast: string,
+  // deno-lint-ignore no-explicit-any
+  runner: (auth: string, sql: string) => Promise<any>,
+): Promise<{ parts?: MoneyParts; failed?: OdCall | null }> {
+  const intoMap = (rows: Record<string, unknown>[], amt: string) => {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+      const key = `${Number(r.D)}:${Number(r.P)}`;
+      m.set(key, (m.get(key) ?? 0) + Number(r[amt] ?? 0));
+    }
+    return m;
+  };
+
+  const cap = await runner(
+    auth,
+    `SELECT DAYOFMONTH(pl.ProcDate) AS D, pl.ProvNum AS P, ` +
+      `SUM(cp.WriteOff) AS Amt ` +
+      `FROM claimproc cp JOIN procedurelog pl ON pl.ProcNum = cp.ProcNum ` +
+      `WHERE cp.Status = 7 AND cp.WriteOff != 0 ` +
+      `AND pl.ProcStatus = ${PROC_COMPLETE} ` +
+      `AND pl.ProcDate >= '${first}' AND pl.ProcDate < '${afterLast}' ` +
+      `GROUP BY DAYOFMONTH(pl.ProcDate), pl.ProvNum`,
+  );
+  if (cap.failed) return { failed: cap.failed };
+
+  const adj = await runner(
+    auth,
+    `SELECT DAYOFMONTH(a.AdjDate) AS D, a.ProvNum AS P, ` +
+      `SUM(a.AdjAmt) AS Amt FROM adjustment a ` +
+      `WHERE a.AdjDate >= '${first}' AND a.AdjDate < '${afterLast}' ` +
+      `AND a.AdjAmt != 0 ` +
+      `GROUP BY DAYOFMONTH(a.AdjDate), a.ProvNum`,
+  );
+  if (adj.failed) return { failed: adj.failed };
+
+  const wo = await runner(
+    auth,
+    `SELECT DAYOFMONTH(cp.DateCP) AS D, cp.ProvNum AS P, ` +
+      `SUM(cp.WriteOff) AS Amt FROM claimproc cp ` +
+      `WHERE cp.Status IN (1, 4) AND cp.WriteOff != 0 ` +
+      `AND cp.DateCP >= '${first}' AND cp.DateCP < '${afterLast}' ` +
+      `GROUP BY DAYOFMONTH(cp.DateCP), cp.ProvNum`,
+  );
+  if (wo.failed) return { failed: wo.failed };
+
+  const pt = await runner(
+    auth,
+    `SELECT DAYOFMONTH(ps.DatePay) AS D, ps.ProvNum AS P, ` +
+      `SUM(ps.SplitAmt) AS Amt FROM paysplit ps ` +
+      `WHERE ps.DatePay >= '${first}' AND ps.DatePay < '${afterLast}' ` +
+      `AND ps.SplitAmt != 0 ` +
+      `GROUP BY DAYOFMONTH(ps.DatePay), ps.ProvNum`,
+  );
+  if (pt.failed) return { failed: pt.failed };
+
+  const ins = await runner(
+    auth,
+    `SELECT DAYOFMONTH(cp.DateCP) AS D, cp.ProvNum AS P, ` +
+      `SUM(cp.InsPayAmt) AS Amt FROM claimproc cp ` +
+      `WHERE cp.Status IN (1, 4) AND cp.InsPayAmt != 0 ` +
+      `AND cp.DateCP >= '${first}' AND cp.DateCP < '${afterLast}' ` +
+      `GROUP BY DAYOFMONTH(cp.DateCP), cp.ProvNum`,
+  );
+  if (ins.failed) return { failed: ins.failed };
+
+  const coll = intoMap(pt.rows, "Amt");
+  for (const [key, amt] of intoMap(ins.rows, "Amt")) {
+    coll.set(key, (coll.get(key) ?? 0) + amt);
+  }
+
+  return {
+    parts: {
+      cap: intoMap(cap.rows, "Amt"),
+      adj: intoMap(adj.rows, "Amt"),
+      wo: intoMap(wo.rows, "Amt"),
+      coll,
+    },
+  };
+}
 
 // Whether the procedure's latest note version has anything in it.
 // procnote files a new row per edit and keeps the old text, so only
@@ -372,6 +506,13 @@ Deno.serve(async (req: Request) => {
 
     if (prod.failed) return fail("Could not read this month's completed work.", prod.failed);
 
+    // The money that turns gross into net, and the money collected.
+    const money = await readMoneyParts(auth, first, afterLast, shortQueryAll);
+    if (money.failed || !money.parts) {
+      return fail("Could not read this month's adjustments and write-offs.", money.failed ?? null);
+    }
+    const parts = money.parts;
+
     // Names, whole, and the specialty each provider is filed under.
     const names = await shortQueryAll(
       auth,
@@ -484,26 +625,50 @@ Deno.serve(async (req: Request) => {
       days: Set<number>;
       patients: Set<number>;
       production: number;
+      collected: number;
       unnoted: Set<string>;
     };
 
     const byProv = new Map<number, ProvFold>();
+    const provFoldFor = (provNum: number): ProvFold => {
+      let m = byProv.get(provNum);
+      if (!m) {
+        m = {
+          days: new Set(), patients: new Set(), production: 0,
+          collected: 0, unnoted: new Set(),
+        };
+        byProv.set(provNum, m);
+      }
+      return m;
+    };
 
     for (const r of prod.rows) {
       const d = num(r.D);
       if (d < 1 || d > days) continue;
-      const provNum = num(r.ProvNum);
-      let m = byProv.get(provNum);
-      if (!m) {
-        m = { days: new Set(), patients: new Set(), production: 0, unnoted: new Set() };
-        byProv.set(provNum, m);
-      }
+      const m = provFoldFor(num(r.ProvNum));
       m.days.add(d);
       m.patients.add(num(r.PatNum));
       m.production += num(r.Prod);
       const key = `${d}:${num(r.PatNum)}`;
       if (!notedByDayPatient.get(key)) m.unnoted.add(key);
     }
+
+    // Net production: cap write-offs off, adjustments on, insurance
+    // write-offs off — each on its own date, per the report. Collected
+    // is added as its own figure. A provider with money movement but
+    // no completed work this month still appears, or the office total
+    // would not equal the report.
+    const applyParts = (map: Map<string, number>, sign: 1 | -1, into: "production" | "collected") => {
+      for (const [key, amt] of map) {
+        const provNum = Number(key.split(":")[1]);
+        const m = provFoldFor(provNum);
+        m[into] += sign * amt;
+      }
+    };
+    applyParts(parts.cap, -1, "production");
+    applyParts(parts.adj, 1, "production");
+    applyParts(parts.wo, -1, "production");
+    applyParts(parts.coll, 1, "collected");
 
     const providers = [...byProv.entries()]
       .map(([provNum, m]) => {
@@ -526,6 +691,7 @@ Deno.serve(async (req: Request) => {
           dx_count: dxOf.get(provNum)?.count ?? 0,
           dx_fees: Math.round((dxOf.get(provNum)?.fees ?? 0) * 100) / 100,
           production: Math.round(m.production * 100) / 100,
+          collected: Math.round(m.collected * 100) / 100,
           nonote: m.unnoted.size,
         };
       })
@@ -571,6 +737,18 @@ Deno.serve(async (req: Request) => {
     );
 
     if (procs.failed) return fail("Could not read that day's completed work.", procs.failed);
+
+    // The day's money besides the fees: cap write-offs and insurance
+    // write-offs off, adjustments on, and what was collected — each on
+    // its own date, per the report.
+    const afterDate = new Date(Date.UTC(year, month - 1, dayAsked + 1))
+      .toISOString().slice(0, 10);
+    const money = await readMoneyParts(auth, date, afterDate, shortQueryAll);
+    if (money.failed || !money.parts) {
+      return fail("Could not read that day's adjustments and write-offs.", money.failed ?? null);
+    }
+    const sumOf = (m: Map<string, number>) =>
+      [...m.values()].reduce((s, v) => s + v, 0);
 
     // The book as it stands now: completed visits, and on a day ahead
     // the appointments still to come.
@@ -824,6 +1002,19 @@ Deno.serve(async (req: Request) => {
         missed: visits.filter((v) => v.state === "missed").length,
         nonote: visits.filter((v) => v.state === "showed" && !v.noted).length,
       },
+      // gross − cap + adjustments − write-offs = net, the report's
+      // arithmetic on this one day; collected is the day's money in.
+      money: {
+        gross: Math.round(actual * 100) / 100,
+        cap_writeoff: Math.round(sumOf(money.parts.cap) * 100) / 100,
+        adjustments: Math.round(sumOf(money.parts.adj) * 100) / 100,
+        writeoff: Math.round(sumOf(money.parts.wo) * 100) / 100,
+        net: Math.round(
+          (actual - sumOf(money.parts.cap) + sumOf(money.parts.adj) -
+            sumOf(money.parts.wo)) * 100,
+        ) / 100,
+        collected: Math.round(sumOf(money.parts.coll) * 100) / 100,
+      },
       read_at: new Date().toISOString(),
     });
   }
@@ -850,6 +1041,13 @@ Deno.serve(async (req: Request) => {
   );
 
   if (prod.failed) return fail("Could not read this month's completed work.", prod.failed);
+
+  // ---- 1b. The money that turns gross into net, and the money in ----
+  const money = await readMoneyParts(auth, first, afterLast, shortQueryAll);
+  if (money.failed || !money.parts) {
+    return fail("Could not read this month's adjustments and write-offs.", money.failed ?? null);
+  }
+  const parts = money.parts;
 
   // ---- 2. The live book ----
   const liveBook = await shortQueryAll(
@@ -907,6 +1105,7 @@ Deno.serve(async (req: Request) => {
 
   type DayFold = {
     actual: number;
+    collected: number;
     prodProvs: Set<number>;
     prodPatients: Set<number>;
     notedByPatient: Map<number, boolean>;
@@ -924,6 +1123,7 @@ Deno.serve(async (req: Request) => {
     if (!f) {
       f = {
         actual: 0,
+        collected: 0,
         prodProvs: new Set(),
         prodPatients: new Set(),
         notedByPatient: new Map(),
@@ -944,13 +1144,17 @@ Deno.serve(async (req: Request) => {
     days: Set<number>;
     patients: Set<number>;
     production: number;
+    collected: number;
     unnoted: Set<string>;
   };
   const provMonth = new Map<number, ProvMonth>();
   const provMonthFor = (p: number): ProvMonth => {
     let m = provMonth.get(p);
     if (!m) {
-      m = { days: new Set(), patients: new Set(), production: 0, unnoted: new Set() };
+      m = {
+        days: new Set(), patients: new Set(), production: 0,
+        collected: 0, unnoted: new Set(),
+      };
       provMonth.set(p, m);
     }
     return m;
@@ -962,6 +1166,7 @@ Deno.serve(async (req: Request) => {
   type DayProv = {
     patients: Set<number>;
     production: number;
+    collected: number;
     unnoted: Set<number>;
   };
   const provByDay = new Map<number, Map<number, DayProv>>();
@@ -973,7 +1178,7 @@ Deno.serve(async (req: Request) => {
     }
     let w = dayMap.get(p);
     if (!w) {
-      w = { patients: new Set(), production: 0, unnoted: new Set() };
+      w = { patients: new Set(), production: 0, collected: 0, unnoted: new Set() };
       dayMap.set(p, w);
     }
     return w;
@@ -1005,6 +1210,37 @@ Deno.serve(async (req: Request) => {
     dp.production += num(r.Prod);
     if (!isTrue(r.Noted)) dp.unnoted.add(patient);
   }
+
+  // Net production and collection, folded onto the same days and
+  // providers. A day or provider with money movement but no completed
+  // work still gets its entry, or the month would not equal the
+  // report. Days worked and patient counts stay procedure-based.
+  const applyMoney = (
+    map: Map<string, number>,
+    sign: 1 | -1,
+    into: "production" | "collected",
+  ) => {
+    for (const [key, amt] of map) {
+      const [dStr, pStr] = key.split(":");
+      const d = Number(dStr);
+      if (d < 1 || d > days) continue;
+      const provNum = Number(pStr);
+
+      const f = foldFor(d);
+      if (into === "production") f.actual += sign * amt;
+      else f.collected += sign * amt;
+
+      const m = provMonthFor(provNum);
+      m[into] += sign * amt;
+
+      const dp = dayProvFor(d, provNum);
+      dp[into] += sign * amt;
+    }
+  };
+  applyMoney(parts.cap, -1, "production");
+  applyMoney(parts.adj, 1, "production");
+  applyMoney(parts.wo, -1, "production");
+  applyMoney(parts.coll, 1, "collected");
 
   // A provider's unnoted set was gathered per group; drop the pairs
   // another provider's note redeems. A visit is documented when anyone
@@ -1053,6 +1289,7 @@ Deno.serve(async (req: Request) => {
     showed: number;
     missed: number;
     actual: number;
+    collected: number;
     nonote: number;
     // Who produced what that day, so the screen can open the row in
     // place. Empty on a day still ahead - nothing is produced yet.
@@ -1061,6 +1298,7 @@ Deno.serve(async (req: Request) => {
       name: string;
       patients: number;
       production: number;
+      collected: number;
       nonote: number;
     }[];
   };
@@ -1105,6 +1343,7 @@ Deno.serve(async (req: Request) => {
       showed: been ? seen.size : 0,
       missed: been ? missed : 0,
       actual: been ? Math.round(f.actual * 100) / 100 : 0,
+      collected: been ? Math.round(f.collected * 100) / 100 : 0,
       nonote: been ? nonote : 0,
       provs: [...(provByDay.get(d) ?? new Map<number, DayProv>()).entries()]
         .map(([provNum, w]) => ({
@@ -1112,6 +1351,7 @@ Deno.serve(async (req: Request) => {
           name: abbrOf.get(provNum) || "—",
           patients: w.patients.size,
           production: Math.round(w.production * 100) / 100,
+          collected: Math.round(w.collected * 100) / 100,
           nonote: w.unnoted.size,
         }))
         .sort((a, b) => b.production - a.production),
@@ -1125,13 +1365,14 @@ Deno.serve(async (req: Request) => {
       showed: t.showed + r.showed,
       missed: t.missed + r.missed,
       actual: t.actual + r.actual,
+      collected: t.collected + r.collected,
       nonote: t.nonote + r.nonote,
       provider_days: t.provider_days + r.providers,
       days_open: t.days_open + 1,
     }),
     {
       sched: 0, patients: 0, showed: 0, missed: 0,
-      actual: 0, nonote: 0, provider_days: 0, days_open: 0,
+      actual: 0, collected: 0, nonote: 0, provider_days: 0, days_open: 0,
     },
   );
 
@@ -1142,6 +1383,7 @@ Deno.serve(async (req: Request) => {
       days: m.days.size,
       patients: m.patients.size,
       production: Math.round(m.production * 100) / 100,
+      collected: Math.round(m.collected * 100) / 100,
       nonote: m.unnoted.size,
     }))
     .sort((a, b) => b.production - a.production);
@@ -1158,6 +1400,7 @@ Deno.serve(async (req: Request) => {
       ...totals,
       sched: Math.round(totals.sched * 100) / 100,
       actual: Math.round(totals.actual * 100) / 100,
+      collected: Math.round(totals.collected * 100) / 100,
       providers: monthProvs.size,
     },
     providers,

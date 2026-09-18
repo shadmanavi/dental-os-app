@@ -1,6 +1,15 @@
 "use client";
 
-// Provider Summary — v4
+// Provider Summary — v5
+//
+// Changelog (this file's own):
+//   v5  Production is net and Collected arrives, both from
+//       od-production v6: net is OpenDental's Production and Income
+//       arithmetic (fees less cap write-offs, plus adjustments, less
+//       insurance write-offs on the day insurance paid), proved to the
+//       penny against the report; Collected is patient plus insurance
+//       money on the day it landed. Per day stays production over days
+//       worked, now on the net figure.
 // A month by provider, one row each: the days OpenDental scheduled
 // them against the days they actually produced, patients seen, what it
 // added to, what a working day averaged, and how many of their
@@ -62,6 +71,7 @@ type ProvRow = {
   dx_count: number;
   dx_fees: number;
   production: number;
+  collected: number;
   nonote: number;
 };
 
@@ -199,9 +209,10 @@ export default function ProviderSummaryPage() {
     (t, p) => ({
       patients: t.patients + p.patients,
       production: t.production + p.production,
+      collected: t.collected + (p.collected ?? 0),
       nonote: t.nonote + p.nonote,
     }),
-    { patients: 0, production: 0, nonote: 0 },
+    { patients: 0, production: 0, collected: 0, nonote: 0 },
   );
 
   // Three tables in one — general practice, the specialists, and the
@@ -286,6 +297,7 @@ export default function ProviderSummaryPage() {
                   <th className="px-3.5 py-2 text-right">Exams</th>
                   <th className="px-3.5 py-2 text-right">Dx/exam</th>
                   <th className="px-3.5 py-2 text-right">Production</th>
+                  <th className="px-3.5 py-2 text-right">Collected</th>
                   <th className="px-3.5 py-2 text-right">Per day</th>
                   <th className="px-3.5 py-2 text-right">Undocumented</th>
                 </tr>
@@ -293,7 +305,7 @@ export default function ProviderSummaryPage() {
               <tbody>
                 {loading && (
                   <tr>
-                    <td colSpan={9} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
+                    <td colSpan={10} className="px-3.5 py-8 text-center text-sm text-[#8AA6AB]">
                       Reading the month…
                     </td>
                   </tr>
@@ -337,6 +349,9 @@ export default function ProviderSummaryPage() {
                     </td>
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right text-[#79B4C4]">
                       {usd(g.rows.reduce((s, p) => s + p.production, 0))}
+                    </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right text-[#8FD0A8]">
+                      {usd(g.rows.reduce((s, p) => s + (p.collected ?? 0), 0))}
                     </td>
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5" />
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-1.5 text-right">
@@ -390,6 +405,9 @@ export default function ProviderSummaryPage() {
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right text-[#79B4C4]">
                       {usd(p.production)}
                     </td>
+                    <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right text-[#8FD0A8]">
+                      {usd(p.collected ?? 0)}
+                    </td>
                     <td className="border-b border-[#2C4E54]/45 px-3.5 py-2 text-right">
                       {p.days_worked > 0 ? (
                         usd(p.production / p.days_worked)
@@ -424,6 +442,9 @@ export default function ProviderSummaryPage() {
                     <td className="px-3.5 py-2 text-right text-[#79B4C4]">
                       {usd(totals.production)}
                     </td>
+                    <td className="px-3.5 py-2 text-right text-[#8FD0A8]">
+                      {usd(totals.collected)}
+                    </td>
                     <td className="px-3.5 py-2" />
                     <td className="px-3.5 py-2 text-right">
                       {totals.nonote === 0 ? (
@@ -445,7 +466,11 @@ export default function ProviderSummaryPage() {
           day with completed work on their number, and Per day is production
           over days worked. Exams is completed exam procedures on the doctor&apos;s
           number, and Dx/exam is the dollars they treatment-planned this month
-          over those exams — what an exam turns into, on average. Production
+          over those exams — what an exam turns into, on average. Production is
+          net, matched to OpenDental&apos;s Production and Income report: fees less
+          write-offs plus adjustments, with insurance write-offs counted on the
+          day insurance paid — so a past month keeps moving as claims pay.
+          Collected is patient plus insurance money on the day it arrived. It
           follows the procedure&apos;s provider, so an exam a dentist did inside a
           hygiene visit lands on the dentist. The patients total counts each
           provider&apos;s patients once each — a patient two providers saw is in

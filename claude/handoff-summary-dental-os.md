@@ -260,6 +260,8 @@ decided. Do not proceed on posting until he does.**
 | `app/chart/page.tsx` | v19.7 and v19.8: the Financing tab takes a payment, with the payment type read live from the office | It was a placeholder reading "Not built yet" |
 | `supabase/functions/od-hygiene/index.ts` | New. A month of hygiene per office | Slots from the roster, booked from the midnight snapshot, missed as the subtraction |
 | `app/hygiene/page.tsx`, `app/page.tsx`, `app/components/TopNav.tsx` | New Hygiene Dashboard, its home tile and its nav entry | Third tile on the home page |
+| `supabase/functions/od-kpi/index.ts` | New (18 Sep 2026). One read per office and year: net production and Adj by department, collection split patient/insurance, exams new/recall, hygiene visits, next-hyg ratio, per-provider months, today's aging snapshot | Maria's "KPI Office Numbers" workbook, live instead of hand-keyed |
+| `app/kpi/page.tsx`, `app/components/TopNav.tsx` v5 | New `/kpi` page in the workbook's shape — months across, KPIs down, an office to a tab | Same session. Goals, Itero scans, prime/non-prime slots, ortho starts, membership and reviews are NOT in OpenDental and stay manual; a later version needs a DOS table to key them in. Aging is a today-only snapshot — OpenDental keeps no bucket history. The per-month figures were not yet checked against Maria's sheet when this shipped |
 
 **Fixed on the way past:** every tooth-state entry was being added to the missing list, so marking a tooth primary would have struck it through as though it had been extracted.
 

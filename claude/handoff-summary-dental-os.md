@@ -73,6 +73,8 @@ the last one.
 
 2. **Settle how procedures get posted** — open since 21 August and now blocking more than one thing. The 5 options are in section 3a and Shad has not chosen. Claims and preauthorizations both wait on it, the Production Dashboard's note checking depends on it, and the Hygiene Dashboard has already found the symptom: 16 appointments in August completed at Downey with nothing posted to the account at all, and another 62 with only exams and x-rays
 
+2b. **Production Dashboard shows gross, OpenDental shows net** — each doctor reads higher here by their write-offs less adjustments. Full fix spec in FROM-CHAT-2026-09-18.md at the repo root; waits on Shad naming the OpenDental report he compares against, and on which chat applies it
+
 3. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
 4. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
 5. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced

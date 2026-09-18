@@ -6,8 +6,25 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 16
+// Version: 17
 // Changelog:
+//   v17 Providers get a display name.
+//
+//       The screens showed OpenDental's Abbr — "GP - CD" — which is
+//       an office code, not a name. Every provider now carries
+//       display: first initial, last name, credential. The credential
+//       is the Suffix column when the office filled it in (DDS, DMD);
+//       a hygienist without one reads RDH, because that is what a
+//       hygienist is; anyone else without one shows no credential
+//       rather than being guessed into a degree. "GP - CD" becomes
+//       "C. Duong DDS", "HG - CP" becomes "C. Pham RDH".
+//
+//       The providers action reads each provider's specialty by name
+//       (definition category 35, the way od-production does) in one
+//       extra ShortQuery, paid once per office selection. providerName
+//       — the Today tab's format — moves to the same display shape,
+//       and the hygienist column falls back to RDH.
+//
 //   v16 Tooth-range procedures write.
 //
 //       Partial dentures are TreatArea 7 in OpenDental — charted on
@@ -414,9 +431,11 @@ function presenceOf(row: Record<string, unknown>): string {
   return "not_arrived";
 }
 
-// "Kaur, Yasmin, DDS" from three columns that may each be empty. An
-// empty string is returned rather than a placeholder, so the screen can
-// fall back to initials rather than printing something meaningless.
+// "C. Duong DDS" from columns that may each be empty. First initial,
+// last name, credential. A corporate row has no first name and reads
+// as its last name alone. An empty string is returned rather than a
+// placeholder, so the screen can fall back to initials rather than
+// printing something meaningless.
 function providerName(first: unknown, last: unknown, suffix: unknown): string {
   const f = String(first ?? "").trim();
   const l = String(last ?? "").trim();
@@ -424,8 +443,8 @@ function providerName(first: unknown, last: unknown, suffix: unknown): string {
 
   if (l === "" && f === "") return "";
 
-  const name = l === "" ? f : f === "" ? l : `${l}, ${f}`;
-  return s === "" ? name : `${name}, ${s}`;
+  const name = f === "" ? l : l === "" ? f : `${f[0]}. ${l}`;
+  return s === "" ? name : `${name} ${s}`;
 }
 
 // A birthdate typed in a hurry. Accepts the ISO form OpenDental wants
@@ -688,23 +707,79 @@ function codesInRule(rule: unknown): string[] {
 // business in a picker.
 function visibleProviderList(
   providers: Record<string, unknown>[],
+  specialtyOf: Map<number, string>,
 ): {
   ProvNum: number | null;
   Abbr: string;
   LName: string;
   FName: string;
   Suffix: string;
+  Specialty: string;
+  display: string;
 }[] {
   return providers
     .filter((prov) => String(prov.IsHidden ?? "false") !== "true")
-    .map((prov) => ({
-      ProvNum: (prov.ProvNum as number) ?? null,
-      Abbr: String(prov.Abbr ?? ""),
-      LName: String(prov.LName ?? ""),
-      FName: String(prov.FName ?? ""),
-      Suffix: String(prov.Suffix ?? ""),
-    }))
+    .map((prov) => {
+      const provNum = (prov.ProvNum as number) ?? null;
+      const specialty = provNum === null ? "" : specialtyOf.get(provNum) ?? "";
+      const suffix = String(prov.Suffix ?? "").trim();
+      // A hygienist without a Suffix on file is still an RDH; anyone
+      // else without one shows no credential rather than a guess.
+      const credential = suffix !== ""
+        ? suffix
+        : specialty.toLowerCase().startsWith("hygien")
+        ? "RDH"
+        : "";
+      return {
+        ProvNum: provNum,
+        Abbr: String(prov.Abbr ?? ""),
+        LName: String(prov.LName ?? ""),
+        FName: String(prov.FName ?? ""),
+        Suffix: suffix,
+        Specialty: specialty,
+        display: providerName(prov.FName, prov.LName, credential),
+      };
+    })
     .sort((a, b) => a.Abbr.localeCompare(b.Abbr));
+}
+
+// Each provider's specialty by name. The DefNums differ per office,
+// so they are read by name every time, as od-production does.
+async function fetchSpecialtyNames(
+  auth: string,
+): Promise<Map<number, string>> {
+  const call = await odFetch(auth, "PUT", "/queries/ShortQuery", {
+    SqlCommand: `SELECT p.ProvNum, COALESCE(d.ItemName, '') AS Spec ` +
+      `FROM provider p ` +
+      `LEFT JOIN definition d ON d.DefNum = p.Specialty ` +
+      `WHERE p.IsHidden = 0`,
+  });
+
+  const map = new Map<number, string>();
+  const first = Array.isArray(call.body)
+    ? (call.body as Record<string, unknown>[])
+    : [];
+  for (const r of first) {
+    map.set(Number(r.ProvNum ?? 0), String(r.Spec ?? "").trim());
+  }
+
+  // ShortQuery caps a page at 100; the second call returns the rest.
+  if (first.length >= 100) {
+    const rest = await odFetch(auth, "PUT", "/queries/ShortQuery?Offset=100", {
+      SqlCommand: `SELECT p.ProvNum, COALESCE(d.ItemName, '') AS Spec ` +
+        `FROM provider p ` +
+        `LEFT JOIN definition d ON d.DefNum = p.Specialty ` +
+        `WHERE p.IsHidden = 0`,
+    });
+    const rows = Array.isArray(rest.body)
+      ? (rest.body as Record<string, unknown>[])
+      : [];
+    for (const r of rows) {
+      map.set(Number(r.ProvNum ?? 0), String(r.Spec ?? "").trim());
+    }
+  }
+
+  return map;
 }
 
 async function fetchAllProviders(
@@ -1077,13 +1152,14 @@ Deno.serve(async (req: Request) => {
   // ===================================================================
   if (action === "providers") {
     const providers = await fetchAllProviders(auth);
+    const specialtyOf = await fetchSpecialtyNames(auth);
 
     return json({
       ok: true,
       office: officeRow.name,
       office_slug: officeRow.slug,
       count: providers.length,
-      providers: visibleProviderList(providers),
+      providers: visibleProviderList(providers, specialtyOf),
     });
   }
 
@@ -1116,7 +1192,8 @@ Deno.serve(async (req: Request) => {
       `p.LName, p.FName, p.Preferred, o.OpName, o.Abbrev, o.IsHidden, ` +
       `dr.Abbr AS DrAbbr, dr.LName AS DrLName, dr.FName AS DrFName, ` +
       `dr.Suffix AS DrSuffix, ` +
-      `hy.Abbr AS HygAbbr, hy.LName AS HygLName, hy.FName AS HygFName ` +
+      `hy.Abbr AS HygAbbr, hy.LName AS HygLName, hy.FName AS HygFName, ` +
+      `hy.Suffix AS HygSuffix ` +
       `FROM appointment a ` +
       `LEFT JOIN patient p ON p.PatNum = a.PatNum ` +
       `LEFT JOIN operatory o ON o.OperatoryNum = a.Op ` +
@@ -1183,7 +1260,13 @@ Deno.serve(async (req: Request) => {
         prov_name: providerName(r.DrFName, r.DrLName, r.DrSuffix),
         prov_hyg: Number(r.ProvHyg ?? 0),
         hyg_abbr: String(r.HygAbbr ?? "").trim(),
-        hyg_name: providerName(r.HygFName, r.HygLName, ""),
+        // The ProvHyg column only ever names a hygienist, so a blank
+        // Suffix still reads RDH.
+        hyg_name: providerName(
+          r.HygFName,
+          r.HygLName,
+          String(r.HygSuffix ?? "").trim() !== "" ? r.HygSuffix : "RDH",
+        ),
         is_hygiene: Number(r.IsHygiene ?? 0) === 1,
         procedures: String(r.ProcDescript ?? "").trim(),
         last_name: last,

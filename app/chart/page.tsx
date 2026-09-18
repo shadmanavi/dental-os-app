@@ -1,10 +1,28 @@
 "use client";
 
-// Chairside charting — v20
+// Chairside charting — v21
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v21 Provider names, and a note on every planned procedure.
+//
+//       Providers read as names, not office codes: "GP - CD" becomes
+//       "C. Duong DDS". The credential is OpenDental's own Suffix
+//       column; a hygienist without one reads RDH; anyone else
+//       without one shows no credential rather than a guess. Needs
+//       od-chart v17, which serves each provider's display name and
+//       specialty.
+//
+//       Each Diags row grows a Notes link. Nothing written, it reads
+//       "Notes"; something written, it shows the opening words.
+//       Tapping it opens the full note for editing — fetched whole
+//       from OpenDental first, never edited from the preview, because
+//       saving back a truncated note would destroy the rest of it.
+//       Saving files a new procnote version, which is OpenDental's
+//       own edit behaviour: the previous text stays in its history.
+//       Needs od-plan v13.
+//
 //   v20 Partials, and a span of teeth to chart them on.
 //
 //       Partial dentures had no way in: OpenDental charts them on the
@@ -884,7 +902,7 @@
 //     This screen never calculates one.
 //   - Undo removes the entry from OpenDental, not just from the list.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { buildTreatmentPlanPdf } from "@/lib/treatmentPlanPdf";
@@ -937,6 +955,10 @@ type Provider = {
   LName: string;
   FName: string;
   Suffix: string;
+  // From od-chart v17: the specialty by name, and "C. Duong DDS".
+  // Absent against an older od-chart, so the screen falls back.
+  Specialty?: string;
+  display?: string;
 };
 
 type Procedure = {
@@ -1093,6 +1115,9 @@ type PlanRow = {
   layman?: string;
   prov_abbr: string;
   proc_date: string;
+  // The opening of the procedure's latest note, from od-plan v13.
+  // Absent against an older od-plan; empty when nothing is written.
+  note_preview?: string;
   priority_num: number;
   priority_label: string;
   // OpenDental's Dx: the clinical finding behind the procedure. Zero
@@ -1683,6 +1708,17 @@ export default function ChartPage() {
 
   // Inline editing on a pending row.
   const [editingPlanFee, setEditingPlanFee] = useState<number | null>(null);
+
+  // The note editor: which procedure's note is open, the full text as
+  // loaded from OpenDental — never the row's preview, because editing
+  // a truncated note and saving it back would destroy the rest.
+  const [noteEditor, setNoteEditor] = useState<{
+    od_id: number;
+    text: string;
+    loading: boolean;
+    saving: boolean;
+    error: string;
+  } | null>(null);
   const [planFeeDraft, setPlanFeeDraft] = useState("");
   const [savingRow, setSavingRow] = useState<number | null>(null);
 
@@ -2345,6 +2381,78 @@ export default function ChartPage() {
       );
     } finally {
       setSavingRow(null);
+    }
+  }
+
+  // Open a procedure's note for editing. The full text is fetched
+  // first; the preview on the row is only ever the opening words.
+  async function openNote(row: PlanRow) {
+    if (patient === null) return;
+
+    setNoteEditor({
+      od_id: row.od_id, text: "", loading: true, saving: false, error: "",
+    });
+
+    try {
+      const data = await callPlan({
+        action: "get_note",
+        pat_num: patient.PatNum,
+        od_id: row.od_id,
+      });
+      const note = String((data as { note?: unknown }).note ?? "");
+      setNoteEditor((prev) =>
+        prev !== null && prev.od_id === row.od_id
+          ? { ...prev, text: note, loading: false }
+          : prev
+      );
+    } catch (caught) {
+      setNoteEditor((prev) =>
+        prev !== null && prev.od_id === row.od_id
+          ? {
+            ...prev,
+            loading: false,
+            error: caught instanceof Error
+              ? caught.message
+              : "Couldn't read that note.",
+          }
+          : prev
+      );
+    }
+  }
+
+  // Save files a new procnote version in OpenDental — its own edit
+  // behaviour — and the row's preview follows without a full reload.
+  async function saveNote() {
+    if (patient === null || noteEditor === null || noteEditor.saving) return;
+
+    const { od_id, text } = noteEditor;
+    setNoteEditor({ ...noteEditor, saving: true, error: "" });
+
+    try {
+      await callPlan({
+        action: "set_note",
+        pat_num: patient.PatNum,
+        od_id,
+        note: text,
+      });
+      setPlanRows((previous) =>
+        previous.map((r) =>
+          r.od_id === od_id ? { ...r, note_preview: text.slice(0, 120) } : r
+        )
+      );
+      setNoteEditor(null);
+    } catch (caught) {
+      setNoteEditor((prev) =>
+        prev !== null && prev.od_id === od_id
+          ? {
+            ...prev,
+            saving: false,
+            error: caught instanceof Error
+              ? caught.message
+              : "Couldn't save that note.",
+          }
+          : prev
+      );
     }
   }
 
@@ -3607,6 +3715,10 @@ export default function ChartPage() {
     const match = providers.find((p) => p.ProvNum === provNum);
     if (match === undefined) return resolvedProv?.provAbbr ?? "";
 
+    // od-chart v17 sends "C. Duong DDS" ready-made. Against an older
+    // od-chart the name is assembled here the way it used to be.
+    if ((match.display ?? "") !== "") return match.display as string;
+
     const name = [match.LName, match.FName].filter((s) => s !== "").join(", ");
     const full = [name, match.Suffix].filter((s) => s !== "").join(" ").trim();
 
@@ -4203,8 +4315,9 @@ export default function ChartPage() {
               </option>
               {providers.map((p) => (
                 <option key={p.ProvNum} value={p.ProvNum}>
-                  {p.Abbr} — {p.LName}
-                  {p.FName ? `, ${p.FName}` : ""}
+                  {(p.display ?? "") !== ""
+                    ? p.display
+                    : `${p.Abbr} — ${p.LName}${p.FName ? `, ${p.FName}` : ""}`}
                 </option>
               ))}
             </select>
@@ -4811,8 +4924,8 @@ export default function ChartPage() {
               const editing = editingPlanFee === row.od_id;
 
               return (
+                <Fragment key={row.od_id}>
                 <div
-                  key={row.od_id}
                   className={`flex items-center gap-3 px-4 py-2.5 ${
                     deleted ? "opacity-45" : settled ? "opacity-55" : ""
                   } ${ticked ? "bg-[#16292D]" : ""} ${
@@ -4869,11 +4982,34 @@ export default function ChartPage() {
                         </span>
                       )}
                     </p>
-                    <p className="mt-0.5 flex flex-wrap gap-x-3 font-mono text-[11px] text-[#8AA6AB]">
+                    <p className="mt-0.5 flex flex-wrap items-baseline gap-x-3 font-mono text-[11px] text-[#8AA6AB]">
                       {row.proc_date !== "" && <span>{usDate(row.proc_date)}</span>}
                       {row.no_bill_ins && (
                         <span className="text-[#F0A93B]">not billed to insurance</span>
                       )}
+                      {/* The note, or the door to one. Empty it reads
+                          "Notes"; written it shows the opening words.
+                          Either way the tap fetches the whole text —
+                          the preview is never what gets edited. */}
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => openNote(row)}
+                        title={
+                          (row.note_preview ?? "") === ""
+                            ? "Write a note on this procedure"
+                            : "Read or change this procedure's note"
+                        }
+                        className={`rounded underline decoration-dotted underline-offset-2 hover:text-[#EDF3F1] disabled:opacity-40 ${
+                          (row.note_preview ?? "") === ""
+                            ? "text-[#5E7B80]"
+                            : "text-[#79B4C4]"
+                        }`}
+                      >
+                        {(row.note_preview ?? "") === ""
+                          ? "Notes"
+                          : `${(row.note_preview ?? "").slice(0, 7)}…`}
+                      </button>
                     </p>
                   </div>
 
@@ -4998,6 +5134,64 @@ export default function ChartPage() {
                     {deleted ? "Gone" : busy ? "…" : "Delete"}
                   </button>
                 </div>
+
+                {/* The note, whole, under its own row. Rendered only
+                    once loaded — a textarea seeded with an empty
+                    string while the real text is still on its way
+                    would invite typing over a note that exists. */}
+                {noteEditor !== null && noteEditor.od_id === row.od_id && (
+                  <div className="border-t border-[#1B3439] bg-[#0E1E21] px-4 py-3">
+                    {noteEditor.loading ? (
+                      <p className="font-mono text-xs text-[#8AA6AB]">
+                        reading the note…
+                      </p>
+                    ) : (
+                      <>
+                        <textarea
+                          autoFocus
+                          value={noteEditor.text}
+                          onChange={(e) =>
+                            setNoteEditor((prev) =>
+                              prev !== null && prev.od_id === row.od_id
+                                ? { ...prev, text: e.target.value }
+                                : prev
+                            )}
+                          rows={3}
+                          placeholder="Nothing written yet."
+                          className="w-full rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 text-sm text-[#EDF3F1] placeholder:text-[#5E7B80] focus:border-[#F0A93B] focus:outline-none"
+                        />
+                        {noteEditor.error !== "" && (
+                          <p className="mt-1 text-xs text-[#E4674F]">
+                            {noteEditor.error}
+                          </p>
+                        )}
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={saveNote}
+                            disabled={noteEditor.saving}
+                            className="rounded-lg bg-[#F0A93B] px-4 py-1.5 text-xs font-semibold text-[#0B1719] hover:bg-[#F5BE63] disabled:opacity-40"
+                          >
+                            {noteEditor.saving ? "Saving…" : "Save note"}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setNoteEditor(null)}
+                            disabled={noteEditor.saving}
+                            className="rounded-lg border border-[#2C4E54] px-4 py-1.5 text-xs hover:bg-[#193034] disabled:opacity-40"
+                          >
+                            Cancel
+                          </button>
+                          <span className="ml-auto font-mono text-[11px] text-[#5E7B80]">
+                            Saved as a new version — the old text stays in
+                            OpenDental&apos;s history.
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+                </Fragment>
               );
             })}
           </div>

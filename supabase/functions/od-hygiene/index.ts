@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-hygiene/index.ts
-// Version: 15
+// Version: 16
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -16,6 +16,13 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v16 Hygienists read as names, not office codes: "HG - CP" becomes
+//       "C. Pham RDH". First initial, last name, and the Suffix
+//       column when the office filled it in — RDH otherwise, because
+//       everyone this function names is a hygienist by construction:
+//       the roster is filtered to the hygiene specialty and the
+//       appointment joins are on ProvHyg.
 //
 //   v15 New action month_list: a clicked month total, listed by patient
 //       with how many times each is counted and on which days. Times
@@ -321,6 +328,17 @@ const dayOf = (v: unknown): number => {
 };
 
 const pad = (n: number) => String(n).padStart(2, "0");
+
+// "C. Pham RDH" straight from SQL: first initial, last name, and the
+// Suffix column when the office filled it in — RDH otherwise, because
+// everyone this is applied to is a hygienist by construction. A LEFT
+// JOIN with no provider goes NULL through CONCAT and comes out NULL,
+// so no stray credential is invented for an empty seat.
+const hygDisplay = (pr: string) =>
+  `TRIM(CONCAT(` +
+  `CASE WHEN ${pr}.FName != '' THEN CONCAT(LEFT(${pr}.FName, 1), '. ') ELSE '' END, ` +
+  `${pr}.LName, ` +
+  `CASE WHEN ${pr}.Suffix != '' THEN CONCAT(' ', ${pr}.Suffix) ELSE ' RDH' END))`;
 
 // MySQL hands a boolean back as 1 or 0, sometimes as a string.
 const isTrue = (v: unknown): boolean =>
@@ -665,7 +683,8 @@ Deno.serve(async (req: Request) => {
     // Who was on, and in which columns.
     const shift = await shortQueryAll(
       auth,
-      `SELECT p.Abbr, TIME(s.StartTime) AS St, TIME(s.StopTime) AS Sp, ` +
+      `SELECT p.Abbr, ${hygDisplay("p")} AS Disp, ` +
+        `TIME(s.StartTime) AS St, TIME(s.StopTime) AS Sp, ` +
         `(SELECT GROUP_CONCAT(o.OpName ORDER BY o.OperatoryNum SEPARATOR ' + ') ` +
         ` FROM scheduleop so JOIN operatory o ON o.OperatoryNum = so.OperatoryNum ` +
         ` WHERE so.ScheduleNum = s.ScheduleNum) AS Cols, ` +
@@ -740,7 +759,9 @@ Deno.serve(async (req: Request) => {
     const dayAppts = await shortQueryAll(
       auth,
       `SELECT a.AptNum, a.PatNum, ${patientName} AS Patient, ` +
-        `TIME(a.AptDateTime) AS T, o.OpName, pr.Abbr AS Hyg, a.AptStatus, ` +
+        `TIME(a.AptDateTime) AS T, o.OpName, ` +
+        `COALESCE(NULLIF(${hygDisplay("pr")}, ''), pr.Abbr) AS Hyg, ` +
+        `a.AptStatus, ` +
         `${has(cleanList)} AS Clean, ${has(examList)} AS Exam, ` +
         `${has(srpList)} AS Srp, ${postedAny} AS Posted, ${codes} AS Codes ` +
         `FROM appointment a ` +
@@ -762,7 +783,8 @@ Deno.serve(async (req: Request) => {
     const held = await shortQueryAll(
       auth,
       `SELECT h.AptNum, h.PatNum, TIME(h.AptDateTime) AS T, o.OpName, ` +
-        `${patientName} AS Patient, pr.Abbr AS Hyg ` +
+        `${patientName} AS Patient, ` +
+        `COALESCE(NULLIF(${hygDisplay("pr")}, ''), pr.Abbr) AS Hyg ` +
         `FROM histappointment h ` +
         `JOIN patient pt ON pt.PatNum = h.PatNum ` +
         `LEFT JOIN operatory o ON o.OperatoryNum = h.Op ` +
@@ -894,7 +916,7 @@ Deno.serve(async (req: Request) => {
       office_name: officeRow.name,
       date,
       hygienists: shift.rows.map((r) => ({
-        name: String(r.Abbr ?? "").trim(),
+        name: String(r.Disp ?? "").trim() || String(r.Abbr ?? "").trim(),
         from: String(r.St ?? ""),
         to: String(r.Sp ?? ""),
         columns: String(r.Cols ?? "").trim(),

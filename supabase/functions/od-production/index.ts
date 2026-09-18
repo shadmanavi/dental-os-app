@@ -8,7 +8,7 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-production/index.ts
-// Version: 6
+// Version: 7
 //
 // Actions:
 //   { "office":"downey", "action":"month", "year":2026, "month":8 }
@@ -17,6 +17,16 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v7  Providers read as names, not office codes.
+//
+//       Every provider name this function serves — the month strip,
+//       the day panel, the providers action — is now "C. Duong DDS":
+//       first initial, last name, credential. The credential is the
+//       Suffix column when the office filled it in; a hygienist
+//       without one reads RDH; anyone else without one shows no
+//       credential rather than being guessed into a degree. abbr
+//       still travels beside it for anything that keys on it.
 //
 //   v6  Production is net, and collection arrives.
 //
@@ -142,6 +152,19 @@ const PROC_COMPLETE = 2;
 // charged its fee. The alias is the procedurelog table in the query.
 const fee = (pl: string) =>
   `(${pl}.ProcFee * GREATEST(${pl}.UnitQty + ${pl}.BaseUnits, 1))`;
+
+// "C. Duong DDS" straight from SQL: first initial, last name, and the
+// credential — the Suffix column when the office filled it in, RDH
+// for a hygienist without one, nothing otherwise. `pr` is the
+// provider alias; the query must LEFT JOIN definition `spd` on
+// pr.Specialty for the hygienist fallback to see the specialty name.
+const provDisplay = (pr: string, spd: string) =>
+  `TRIM(CONCAT(` +
+  `CASE WHEN ${pr}.FName != '' THEN CONCAT(LEFT(${pr}.FName, 1), '. ') ELSE '' END, ` +
+  `${pr}.LName, ` +
+  `CASE WHEN ${pr}.Suffix != '' THEN CONCAT(' ', ${pr}.Suffix) ` +
+  `WHEN LOWER(COALESCE(${spd}.ItemName, '')) LIKE 'hygien%' THEN ' RDH' ` +
+  `ELSE '' END))`;
 
 // Everything attached to an appointment, whatever its status. The
 // attachment is the promise; before the visit the rows are treatment
@@ -516,7 +539,7 @@ Deno.serve(async (req: Request) => {
     // Names, whole, and the specialty each provider is filed under.
     const names = await shortQueryAll(
       auth,
-      `SELECT ProvNum, Abbr, FName, LName, Specialty FROM provider`,
+      `SELECT ProvNum, Abbr, FName, LName, Suffix, Specialty FROM provider`,
     );
 
     if (names.failed) return fail("Could not read this office's providers.", names.failed);
@@ -594,14 +617,26 @@ Deno.serve(async (req: Request) => {
       dxOf.set(num(r.ProvNum), { count: num(r.DxCount), fees: num(r.DxFees) });
     }
 
+    // "C. Duong DDS": Suffix when filled in, RDH for a hygienist
+    // without one, no credential otherwise.
     const nameOf = new Map<number, { abbr: string; full: string; specialty: string }>();
     for (const r of names.rows) {
       const abbr = String(r.Abbr ?? "").trim();
-      const full = `${String(r.FName ?? "").trim()} ${String(r.LName ?? "").trim()}`.trim();
+      const fname = String(r.FName ?? "").trim();
+      const lname = String(r.LName ?? "").trim();
+      const suffix = String(r.Suffix ?? "").trim();
+      const specialty = specNameOf.get(num(r.Specialty)) ?? "";
+      const credential = suffix !== ""
+        ? suffix
+        : specialty.toLowerCase().startsWith("hygien")
+        ? "RDH"
+        : "";
+      const base = fname === "" ? lname : `${fname[0]}. ${lname}`;
+      const display = `${base} ${credential}`.trim();
       nameOf.set(num(r.ProvNum), {
         abbr,
-        full: full !== "" ? full : abbr,
-        specialty: specNameOf.get(num(r.Specialty)) ?? "",
+        full: display !== "" ? display : abbr,
+        specialty,
       });
     }
 
@@ -726,12 +761,14 @@ Deno.serve(async (req: Request) => {
     const procs = await shortQueryAll(
       auth,
       `SELECT pl.ProcNum, pl.PatNum, ${patientName} AS Patient, ` +
-        `pl.ProvNum, COALESCE(pr.Abbr, '') AS Prov, pc.ProcCode, ` +
+        `pl.ProvNum, COALESCE(${provDisplay("pr", "spd")}, '') AS Prov, ` +
+        `pc.ProcCode, ` +
         `${fee("pl")} AS Fee, ${NOTED} AS Noted ` +
         `FROM procedurelog pl ` +
         `JOIN patient pt ON pt.PatNum = pl.PatNum ` +
         `JOIN procedurecode pc ON pc.CodeNum = pl.CodeNum ` +
         `LEFT JOIN provider pr ON pr.ProvNum = pl.ProvNum ` +
+        `LEFT JOIN definition spd ON spd.DefNum = pr.Specialty ` +
         `WHERE pl.ProcStatus = ${PROC_COMPLETE} AND pl.ProcDate = '${date}' ` +
         `ORDER BY pl.PatNum, pc.ProcCode`,
     );
@@ -756,11 +793,13 @@ Deno.serve(async (req: Request) => {
       auth,
       `SELECT a.AptNum, a.PatNum, ${patientName} AS Patient, ` +
         `TIME(a.AptDateTime) AS T, a.AptStatus, ` +
-        `COALESCE(pr.Abbr, '') AS Prov, COALESCE(o.OpName, '') AS OpName, ` +
+        `COALESCE(${provDisplay("pr", "spd")}, '') AS Prov, ` +
+        `COALESCE(o.OpName, '') AS OpName, ` +
         `${attachedFee("a.AptNum")} AS Fee ` +
         `FROM appointment a ` +
         `JOIN patient pt ON pt.PatNum = a.PatNum ` +
         `LEFT JOIN provider pr ON pr.ProvNum = a.ProvNum ` +
+        `LEFT JOIN definition spd ON spd.DefNum = pr.Specialty ` +
         `LEFT JOIN operatory o ON o.OperatoryNum = a.Op ` +
         `WHERE a.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
         `AND DATE(a.AptDateTime) = '${date}' ` +
@@ -774,12 +813,14 @@ Deno.serve(async (req: Request) => {
     const held = await shortQueryAll(
       auth,
       `SELECT h.AptNum, MAX(h.PatNum) AS PatNum, MAX(${patientName}) AS Patient, ` +
-        `MAX(TIME(h.AptDateTime)) AS T, MAX(COALESCE(pr.Abbr, '')) AS Prov, ` +
+        `MAX(TIME(h.AptDateTime)) AS T, ` +
+        `MAX(COALESCE(${provDisplay("pr", "spd")}, '')) AS Prov, ` +
         `MAX(COALESCE(o.OpName, '')) AS OpName, ` +
         `MAX(${attachedFee("h.AptNum")}) AS Fee ` +
         `FROM histappointment h ` +
         `JOIN patient pt ON pt.PatNum = h.PatNum ` +
         `LEFT JOIN provider pr ON pr.ProvNum = h.ProvNum ` +
+        `LEFT JOIN definition spd ON spd.DefNum = pr.Specialty ` +
         `LEFT JOIN operatory o ON o.OperatoryNum = h.Op ` +
         `WHERE h.AptStatus IN (${APT_SCHEDULED}, ${APT_COMPLETE}) ` +
         `AND DATE(h.AptDateTime) = '${date}' ` +
@@ -1085,14 +1126,20 @@ Deno.serve(async (req: Request) => {
   // ---- 4. Provider names, for the month strip ----
   const provNames = await shortQueryAll(
     auth,
-    `SELECT ProvNum, Abbr FROM provider`,
+    `SELECT p.ProvNum, p.Abbr, ${provDisplay("p", "spd")} AS Disp ` +
+      `FROM provider p ` +
+      `LEFT JOIN definition spd ON spd.DefNum = p.Specialty`,
   );
 
   if (provNames.failed) return fail("Could not read this office's providers.", provNames.failed);
 
   const abbrOf = new Map<number, string>();
   for (const r of provNames.rows) {
-    abbrOf.set(num(r.ProvNum), String(r.Abbr ?? "").trim());
+    const disp = String(r.Disp ?? "").trim();
+    abbrOf.set(
+      num(r.ProvNum),
+      disp !== "" ? disp : String(r.Abbr ?? "").trim(),
+    );
   }
 
   // ---- 5. Fold it all by day ----

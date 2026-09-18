@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 12
+// Version: 13
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -18,9 +18,35 @@
 //     "od_id":1081990, "fee":123.45 }
 //   { "office":"downey", "action":"set_dx", "pat_num":17,
 //     "od_id":1081990, "dx":115 }
+//   { "office":"downey", "action":"get_note", "pat_num":17,
+//     "od_id":1081990 }
+//   { "office":"downey", "action":"set_note", "pat_num":17,
+//     "od_id":1081990, "note":"Assistant: Joe. Pt anxious." }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v13 Procedure notes, readable and writable.
+//
+//       Every plan row now carries note_preview — the first 120
+//       characters of the procedure's latest note version — so the
+//       screen can show a Notes link that says whether anything is
+//       written. get_note returns the full latest text for editing;
+//       the preview is never edited directly, because saving back a
+//       truncated note would silently destroy the rest of it.
+//
+//       set_note writes free text. procnote is versioned, so this
+//       files a new row rather than overwriting one — the previous
+//       text stays readable in OpenDental's history, which is
+//       exactly how OpenDental's own note editing behaves. This is
+//       different from the token set_note that v10 removed: that one
+//       stacked fixed markers on top of the note; this one is the
+//       note.
+//
+//       Both check the procedure belongs to the patient first, so an
+//       od_id from a stale screen cannot annotate someone else's
+//       chart, and the write is read back from the database rather
+//       than trusted.
 //
 //   v12 A family plan no longer multiplies the estimate.
 //
@@ -542,6 +568,8 @@ Deno.serve(async (req: Request) => {
     "set_priority",
     "set_fee",
     "set_dx",
+    "get_note",
+    "set_note",
   ];
 
   if (!ACTIONS.includes(action)) {
@@ -705,6 +733,14 @@ Deno.serve(async (req: Request) => {
       // inferred — a reason read from the source of truth beats one
       // this app guesses at.
       `COALESCE(MAX(cp.EstimateNote), '') AS EstimateNote, ` +
+      // The opening of the procedure's latest note version, so the
+      // screen can show a Notes link without hauling whole notes for
+      // every row. procnote is versioned; the newest row is the note
+      // as it reads today. MAX() over a per-group constant, to stay
+      // inside the GROUP BY.
+      `COALESCE(MAX((SELECT LEFT(pn.Note, 120) FROM procnote pn ` +
+      `WHERE pn.ProcNum = pl.ProcNum ` +
+      `ORDER BY pn.ProcNoteNum DESC LIMIT 1)), '') AS NotePreview, ` +
       // A hand-typed override. OpenDental stores -1 for "none", so
       // anything else means a human decided this number and no
       // reallocation may touch it.
@@ -995,6 +1031,11 @@ Deno.serve(async (req: Request) => {
         prov_abbr: String(r.ProvAbbr ?? "").trim(),
         proc_date: String(r.ProcDate ?? "").slice(0, 10),
 
+        // The opening of the latest note, or empty. The full text
+        // comes from get_note when the link is opened, never from
+        // here — editing a truncated note would destroy the rest.
+        note_preview: String(r.NotePreview ?? "").trim(),
+
         // Priority carries both the sequence and, by the office's
         // forward convention, acceptance: 1-8 means accepted, blank
         // means not. Legacy rows do not follow it, so the label is
@@ -1232,6 +1273,137 @@ Deno.serve(async (req: Request) => {
       error: honoured
         ? undefined
         : "OpenDental accepted the change and kept its own value.",
+      changed_by: userData.user.email,
+      changed_at: new Date().toISOString(),
+    });
+  }
+
+  // ===================================================================
+  // get_note / set_note — the procedure's note, whole
+  //
+  // procnote is versioned: every edit files a new row and the old text
+  // stays. get_note returns the newest version for editing; set_note
+  // files the edited text as a new version, which is OpenDental's own
+  // edit behaviour. Neither touches any other row.
+  // ===================================================================
+  if (action === "get_note" || action === "set_note") {
+    const noteProcId = body.od_id;
+
+    if (typeof noteProcId !== "number" || noteProcId <= 0) {
+      return json({ ok: false, error: "od_id is required." }, 400);
+    }
+
+    // The procedure has to belong to this patient. An od_id from a
+    // stale screen could otherwise annotate someone else's chart.
+    const owner = await odFetch(auth, "GET", `/procedurelogs/${noteProcId}`);
+
+    if (owner.http_status === 404) {
+      return json({
+        ok: false,
+        error: "That procedure is no longer in OpenDental.",
+      }, 404);
+    }
+
+    if (owner.http_status < 200 || owner.http_status >= 300) {
+      return json({
+        ok: false,
+        error: "OpenDental could not read that procedure.",
+        detail: owner.body,
+      }, 502);
+    }
+
+    const ownerBody = (owner.body ?? {}) as Record<string, unknown>;
+
+    if (Number(ownerBody.PatNum ?? 0) !== patNum) {
+      return json({
+        ok: false,
+        error: "That procedure belongs to a different patient.",
+      }, 403);
+    }
+
+    // The newest version, by its own key — /procnotes does not promise
+    // an order.
+    const readLatest = async (): Promise<string> => {
+      const existing = await odFetch(
+        auth,
+        "GET",
+        `/procnotes?ProcNum=${noteProcId}`,
+      );
+      const noteRows = Array.isArray(existing.body)
+        ? (existing.body as Record<string, unknown>[])
+        : [];
+
+      let latest = "";
+      let latestNum = -1;
+      for (const row of noteRows) {
+        const n = Number(row.ProcNoteNum ?? 0);
+        if (n > latestNum) {
+          latestNum = n;
+          latest = String(row.Note ?? "");
+        }
+      }
+      return latest;
+    };
+
+    if (action === "get_note") {
+      return json({
+        ok: true,
+        od_id: noteProcId,
+        note: await readLatest(),
+      });
+    }
+
+    const asked = String(body.note ?? "");
+
+    // A note is clinical record; an accidental megabyte is not.
+    if (asked.length > 10000) {
+      return json({
+        ok: false,
+        error: "That note is too long. Keep it under 10,000 characters.",
+      }, 400);
+    }
+
+    const current = await readLatest();
+    if (current === asked) {
+      return json({
+        ok: true,
+        od_id: noteProcId,
+        note: current,
+        wrote: false,
+        changed_by: userData.user.email,
+        changed_at: new Date().toISOString(),
+      });
+    }
+
+    const posted = await odFetch(auth, "POST", "/procnotes", {
+      PatNum: patNum,
+      ProcNum: noteProcId,
+      Note: asked,
+    });
+
+    if (posted.http_status < 200 || posted.http_status >= 300) {
+      return json({
+        ok: false,
+        error: "OpenDental would not accept that note.",
+        detail: posted.body,
+      }, 502);
+    }
+
+    // Proof, not the response body. OpenDental rewrites line endings on
+    // the way in (the payment lesson), so the comparison normalises
+    // them before calling the write a failure.
+    const stored = await readLatest();
+    const normal = (s: string) => s.replace(/\r\n/g, "\n").trim();
+    const honoured = normal(stored) === normal(asked);
+
+    return json({
+      ok: honoured,
+      od_id: noteProcId,
+      note: stored,
+      wrote: true,
+      error: honoured
+        ? undefined
+        : "OpenDental accepted the note and kept different text.",
       changed_by: userData.user.email,
       changed_at: new Date().toISOString(),
     });

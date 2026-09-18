@@ -9,7 +9,11 @@
 // Reads only. Nothing is written to OpenDental or to Supabase.
 //
 // Deploy path: supabase/functions/od-kpi/index.ts
-// Version: 1
+// Version: 2
+//
+// v2: provider names read "C. Duong DDS" — first initial, last name,
+// and the Suffix column when the office filled it in, RDH for a
+// hygienist without one, no credential otherwise.
 //
 // Actions:
 //   { "office":"downey", "action":"year", "year":2026 }
@@ -318,7 +322,7 @@ Deno.serve(async (req: Request) => {
   // ---- Who the providers are, and what their specialty means ----
   const names = await shortQueryAll(
     auth,
-    `SELECT ProvNum, Abbr, FName, LName, Specialty FROM provider`,
+    `SELECT ProvNum, Abbr, FName, LName, Suffix, Specialty FROM provider`,
   );
   if (names.failed) return fail("Could not read this office's providers.", names.failed);
 
@@ -335,15 +339,30 @@ Deno.serve(async (req: Request) => {
     specNameOf.set(num(r.DefNum), String(r.ItemName ?? "").trim());
   }
 
+  // "C. Duong DDS": Suffix when filled in, RDH for a hygienist
+  // without one, no credential otherwise.
   const provInfo = new Map<number, { name: string; specialty: string; bucket: Bucket }>();
   const hygProvNums: number[] = [];
   for (const r of names.rows) {
     const provNum = num(r.ProvNum);
     const abbr = String(r.Abbr ?? "").trim();
-    const full = `${String(r.FName ?? "").trim()} ${String(r.LName ?? "").trim()}`.trim();
+    const fname = String(r.FName ?? "").trim();
+    const lname = String(r.LName ?? "").trim();
+    const suffix = String(r.Suffix ?? "").trim();
     const specialty = specNameOf.get(num(r.Specialty)) ?? "";
     const bucket = bucketOf(specialty);
-    provInfo.set(provNum, { name: full !== "" ? full : abbr || "—", specialty, bucket });
+    const credential = suffix !== ""
+      ? suffix
+      : bucket === "Hyg"
+      ? "RDH"
+      : "";
+    const base = fname === "" ? lname : `${fname[0]}. ${lname}`;
+    const display = `${base} ${credential}`.trim();
+    provInfo.set(provNum, {
+      name: display !== "" ? display : abbr || "—",
+      specialty,
+      bucket,
+    });
     if (bucket === "Hyg") hygProvNums.push(provNum);
   }
 

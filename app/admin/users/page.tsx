@@ -393,11 +393,11 @@ export default function AdminUsersPage() {
                     <p className="mt-2 text-xs text-[#A4361F]">
                       Skipped: {syncResult.skipped.map((s) => `${s.od_username} (${s.reason})`).join("; ")}
                     </p>
-                    {syncResult.skipped.some((s) => s.reason.includes("users row failed")) && (
+                    {syncResult.skipped.length > 0 && (
                       <div className="mt-3 flex items-center gap-3 rounded-lg border border-[#E4674F]/40 bg-[#FBEAE7] px-3 py-2">
                         <p className="text-xs text-[#A4361F]">
-                          Those accounts were created but left broken — clean them
-                          up, then Sync again to finish them properly.
+                          A skip can mean a half-finished account from an
+                          earlier run — safe to check, even if nothing needs it.
                         </p>
                         <button
                           type="button"

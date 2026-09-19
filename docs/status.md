@@ -58,11 +58,12 @@
 - `od-consent` deployed ACTIVE at v3 source (platform reports v4 — an
   intermediate redeploy while iterating on `get_form_text`'s row
   grouping, not a second logical version).
-- Dev server reloaded in the Browser pane; `/chart` still returns 200
-  with no new console/server errors, redirecting to `/login` with no
-  session as before. The sign-and-file pipeline itself was not
-  exercised behind a real login this session — it needs a live
-  patient, ticked procedures, and a chosen form to reach at all.
+- **Live, real end-to-end run by Shad**: picked a patient, ticked a
+  diagnosed procedure, ran Consent through pick → read → sign → file.
+  Reported back "worked" — no specifics on which form or any rough
+  edges in the wording/PDF/note yet, so treat this as "the pipeline
+  runs, doesn't error" rather than "every form's text reads cleanly
+  and every layout edge case is fine."
 
 **What is still open**
 - Not yet tested end-to-end against a real patient: whether the

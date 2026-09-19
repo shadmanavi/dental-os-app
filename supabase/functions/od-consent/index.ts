@@ -274,6 +274,7 @@ Deno.serve(async (req: Request) => {
         .from("chart_categories")
         .select("id, label")
         .eq("organization_id", officeRow.organization_id)
+        .eq("bucket", "diagnosed")
         .eq("is_active", true);
 
       if (categoriesError) {
@@ -288,7 +289,6 @@ Deno.serve(async (req: Request) => {
         : await supabase
           .from("chart_tiles")
           .select("code_rule, category_id")
-          .eq("bucket", "diagnosed")
           .eq("is_active", true)
           .in("category_id", categoryIds);
 

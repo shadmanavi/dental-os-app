@@ -106,14 +106,24 @@
 
 **What was verified**
 - `npm run build`: green.
-- `od-consent` deployed ACTIVE (v1).
+- `od-consent` deployed ACTIVE, then committed (`4a72193`) and pushed
+  to `main` at Shad's request.
 - Dev server started in the Browser pane and `/chart` returned 200;
   bounced to `/login` as expected with no session, matching how every
   other login-gated screen in this app has been left for Shad to
-  verify live. `od-consent` itself was not exercised behind a real
-  session this session.
+  verify live.
 - All four temporary `od-consent-probe` redeploys were retired back to
   their 410 stub immediately after use; none were committed.
+- **Live on Vercel, Shad clicked it for real and hit a bug**: the
+  category lookup failed outright — "Tile lookup failed: column
+  chart_tiles.bucket does not exist." `bucket` lives on
+  `chart_categories`, not `chart_tiles` (confirmed against the schema
+  pulled earlier this session); v1 filtered the wrong table. Fixed in
+  `od-consent` → v2: the `bucket = "diagnosed"` filter moved onto the
+  `chart_categories` read, and `chart_tiles` is scoped correctly
+  already through the `category_id` list that query hands it. Deployed
+  live immediately, then committed and pushed separately from the v1
+  commit above.
 
 **What is still open**
 - The actual sign-and-file pipeline: signature capture on the tablet,

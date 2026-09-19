@@ -1,6 +1,6 @@
 "use client";
 
-// Top navigation — v6
+// Top navigation — v7
 // The one navigation bar for Dental OS. Rendered once in the root layout, so
 // every page gets it without owning a header of its own.
 //
@@ -20,6 +20,19 @@
 //   v1  Sections, sub-nav, session email, sign out.
 //   v2  Charting is built, so its section is live rather than greyed.
 //   v3  Adds the build badge.
+//   v7  The top bar shows only Home, for now.
+//
+//       Six sections plus Admin outgrew a single bar — Shad asked to
+//       hold everything else back to the home page's tile grid until
+//       a menu grouping is decided, rather than keep widening a
+//       horizontally-scrolling strip. The sections themselves are
+//       unchanged and still decide which page is "current" and
+//       whether its subnav shows — Fee Schedules still gets its
+//       Upload / Staged uploads tabs when you are actually on that
+//       page. showInTopNav just says whether a section also gets its
+//       own link in the bar itself, so undoing this is one flag per
+//       section, not a rewrite.
+//
 //   v6  Change password, and an Admin section.
 //
 //       Change password sits beside Sign out because that is where a
@@ -105,6 +118,11 @@ type Section = {
   ready: boolean;
   note?: string;
   subnav?: { href: string; label: string; exact: boolean }[];
+  // Whether this section also gets its own link in the top bar.
+  // Every section still decides "current" and its own subnav
+  // regardless of this flag — it only controls the bar itself.
+  // Defaults to true when omitted.
+  showInTopNav?: boolean;
 };
 
 const SECTIONS: Section[] = [
@@ -117,6 +135,7 @@ const SECTIONS: Section[] = [
     href: "/fee-schedules",
     label: "Fee schedules",
     ready: true,
+    showInTopNav: false,
     subnav: [
       { href: "/fee-schedules", label: "Upload", exact: true },
       { href: "/fee-schedules/uploads", label: "Staged uploads", exact: false },
@@ -126,26 +145,31 @@ const SECTIONS: Section[] = [
     href: "/chart",
     label: "Charting",
     ready: true,
+    showInTopNav: false,
   },
   {
     href: "/hygiene",
     label: "Hygiene",
     ready: true,
+    showInTopNav: false,
   },
   {
     href: "/production",
     label: "Production",
     ready: true,
+    showInTopNav: false,
   },
   {
     href: "/kpi",
     label: "KPI",
     ready: true,
+    showInTopNav: false,
   },
   {
     href: "/admin/users",
     label: "Admin",
     ready: true,
+    showInTopNav: false,
   },
 ];
 
@@ -257,7 +281,7 @@ export default function TopNav() {
         </Link>
 
         <nav className="flex items-center gap-1 overflow-x-auto">
-          {SECTIONS.map((section) => {
+          {SECTIONS.filter((section) => section.showInTopNav !== false).map((section) => {
             const active = isActive(pathname, section.href);
 
             if (!section.ready) {

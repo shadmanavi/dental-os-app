@@ -16,6 +16,11 @@
 //   v3  Charting is built; its tile is live rather than 'coming soon'.
 //   v4  The Production Dashboard tile.
 //   v5  The Provider Summary tile.
+//   v6  KPI and Admin tiles; every tile shrinks. TopNav now shows only
+//       Home, so this grid is the one way in to everything else until
+//       a menu grouping is settled — smaller tiles fit more of them
+//       above the fold, and a shorter blurb replaces the "Open" line
+//       the extra tiles didn't leave room for.
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -69,6 +74,22 @@ const TOOLS: Tool[] = [
     title: "Provider Summary",
     blurb:
       "A month by provider. Days scheduled against days actually worked, patients seen, production and production per day — and whose charts are missing notes.",
+    ready: true,
+  },
+  {
+    href: "/kpi",
+    eyebrow: "Owner",
+    title: "Office KPIs",
+    blurb:
+      "The KPI workbook, read live: net production and Adj by department, collection, exams, hygiene ratios, and today's aging.",
+    ready: true,
+  },
+  {
+    href: "/admin/users",
+    eyebrow: "Owner",
+    title: "Admin",
+    blurb:
+      "Bring OpenDental's users into Dental OS, reset a password, or change someone's role. Visible to everyone; only an Owner/Admin can act.",
     ready: true,
   },
 ];
@@ -125,27 +146,27 @@ export default function HomePage() {
           to it until you review and approve.
         </p>
 
-        <div className="mt-10 grid gap-4 sm:grid-cols-2">
+        <div className="mt-8 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {TOOLS.map((tool) => {
             if (!tool.ready) {
               return (
                 <div
                   key={tool.href}
                   aria-disabled="true"
-                  className="rounded-xl border border-dashed border-[#E3E1DB] bg-white/50 p-6"
+                  className="rounded-lg border border-dashed border-[#E3E1DB] bg-white/50 p-3.5"
                 >
-                  <div className="flex items-baseline justify-between gap-3">
-                    <p className="font-mono text-xs tracking-[0.14em] text-[#A5A49D] uppercase">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <p className="font-mono text-[11px] tracking-[0.12em] text-[#A5A49D] uppercase">
                       {tool.eyebrow}
                     </p>
-                    <span className="rounded-full border border-[#E3E1DB] bg-[#FBFAF8] px-3 py-1 text-xs font-medium text-[#A5A49D]">
+                    <span className="rounded-full border border-[#E3E1DB] bg-[#FBFAF8] px-2 py-0.5 text-[11px] font-medium text-[#A5A49D]">
                       Coming soon
                     </span>
                   </div>
-                  <h2 className="mt-3 text-lg font-semibold text-[#A5A49D]">
+                  <h2 className="mt-1.5 text-[15px] font-semibold text-[#A5A49D]">
                     {tool.title}
                   </h2>
-                  <p className="mt-2 text-sm leading-relaxed text-[#A5A49D]">
+                  <p className="mt-1 text-xs leading-snug text-[#A5A49D]">
                     {tool.blurb}
                   </p>
                 </div>
@@ -156,19 +177,16 @@ export default function HomePage() {
               <Link
                 key={tool.href}
                 href={tool.href}
-                className="group rounded-xl border border-[#E3E1DB] bg-white p-6 transition-colors hover:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+                className="group rounded-lg border border-[#E3E1DB] bg-white p-3.5 transition-colors hover:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
               >
-                <p className="font-mono text-xs tracking-[0.14em] text-[#0F6E56] uppercase">
+                <p className="font-mono text-[11px] tracking-[0.12em] text-[#0F6E56] uppercase">
                   {tool.eyebrow}
                 </p>
-                <h2 className="mt-3 text-lg font-semibold text-[#1C1C1A]">
+                <h2 className="mt-1.5 text-[15px] font-semibold text-[#1C1C1A]">
                   {tool.title}
                 </h2>
-                <p className="mt-2 text-sm leading-relaxed text-[#5C5C57]">
+                <p className="mt-1 text-xs leading-snug text-[#5C5C57]">
                   {tool.blurb}
-                </p>
-                <p className="mt-4 text-sm font-medium text-[#0F6E56] underline-offset-2 group-hover:underline">
-                  Open
                 </p>
               </Link>
             );

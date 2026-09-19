@@ -1,9 +1,13 @@
-// Treatment plan PDF — v7
+// Treatment plan PDF — v8
 //
 // Renders the plan the patient just agreed to, with their signature on
 // it, and hands back base64 for filing into OpenDental's Imaging module.
 //
 // Changelog:
+//   v8  officeLines and formatPhone are exported. The consent-form PDF
+//       (lib/consentPdf.ts) needs the same letterhead block and the
+//       same ten-digit phone formatting; duplicating either would let
+//       the two documents' letterheads drift apart silently.
 //   v7  One field per line, and no fax.
 //
 //       The block reads name, street, city/state/zip, phone, email —
@@ -217,7 +221,7 @@ const COLUMNS: Column[] = [
 // printed exactly as it was stored — an extension, an international
 // number or a typo is the office's to fix in OpenDental, and quietly
 // reformatting it here would hide it.
-function formatPhone(raw: string): string {
+export function formatPhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
 
   if (digits.length === 10) {
@@ -235,7 +239,7 @@ function formatPhone(raw: string): string {
 // city/state/zip, then phone, then email — one field per line. Blank
 // fields are dropped rather than printed, so the block tightens up
 // instead of leaving holes in it.
-function officeLines(office: PlanOffice): string[] {
+export function officeLines(office: PlanOffice): string[] {
   const lines: string[] = [];
 
   const street = [office.addressLine1, office.addressLine2]

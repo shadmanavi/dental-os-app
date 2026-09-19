@@ -943,6 +943,7 @@ import { createClient } from "@/lib/supabase/client";
 import { buildTreatmentPlanPdf } from "@/lib/treatmentPlanPdf";
 import type { PlanOffice } from "@/lib/treatmentPlanPdf";
 import { CONSENT_TEXT } from "@/lib/treatmentPlanPdf";
+import { buildConsentPdf } from "@/lib/consentPdf";
 import {
   allocateBenefit,
   type AllocatableRow,
@@ -1280,6 +1281,13 @@ type ConsentForm = {
   field: "toothNum" | "misc" | null;
 };
 
+// One piece of a printed line from od-consent's get_form_text: literal
+// wording, or an auto-fill token (patient.nameFL, dateTime.Today) this
+// screen resolves itself, since od-consent has no patient in scope.
+type ConsentFormSegment =
+  | { kind: "text"; text: string }
+  | { kind: "field"; token: string };
+
 // What a write into OpenDental came back with. Passed through from the
 // Edge Function untouched — honoured is false when OpenDental took the
 // call and kept its own value, which it has done on four separate
@@ -1505,6 +1513,15 @@ function usDate(value: string): string {
   return `${m}/${d}/${y}`;
 }
 
+// "4:00PM" - no space before the meridiem, matching how the consent-
+// signed note line reads. Used only for that line's timestamp; nothing
+// else in this file prints a clock time.
+function usTime(d: Date): string {
+  return d
+    .toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+    .replace(" ", "");
+}
+
 function humanDate(iso: string): string {
   const [y, m, d] = iso.split("-").map(Number);
   const date = new Date(y, (m ?? 1) - 1, d ?? 1);
@@ -1701,9 +1718,14 @@ export default function ChartPage() {
   // chart_tiles category, matched against each form's OpenDental
   // Description - a form only becomes the default once it is renamed to
   // read the same as that category, and nothing here decides the rename.
+  //
+  // step carries the flow forward: "pick" is the form list, "sign" is
+  // the form's own wording plus the signature pad, "done" is the filed
+  // result. rows is kept (not just proc_codes) because the sign step
+  // needs each row's od_id to write the procedure note, and its tooth
+  // to print the "Procedure(s)" list on the PDF.
   const [consentPicker, setConsentPicker] = useState<{
-    procCodes: string[];
-    toothCandidates: string[];
+    rows: PlanRow[];
     language: "en" | "es";
     loading: boolean;
     error: string;
@@ -1711,6 +1733,15 @@ export default function ChartPage() {
     targetCategory: string | null;
     chosenSheetDefNum: number | null;
     toothValue: string;
+    step: "pick" | "sign" | "done";
+    formLines: ConsentFormSegment[][];
+    formTextLoading: boolean;
+    formTextError: string;
+    signature: string | null;
+    signing: boolean;
+    signStep: string;
+    signError: string;
+    filed: { docNum: number | null; noteFailures: string[] } | null;
   } | null>(null);
 
   // Taking a payment. The amount is held as typed rather than as a
@@ -2671,7 +2702,7 @@ export default function ChartPage() {
           targetCategory: (data.target_category ?? null) as string | null,
           chosenSheetDefNum: defaultNum,
           toothValue: chosen?.field === "toothNum"
-            ? prev.toothCandidates.join(", ")
+            ? toothCandidatesFor(prev.rows).join(", ")
             : "",
         };
       });
@@ -2693,10 +2724,8 @@ export default function ChartPage() {
   function openConsentPicker() {
     const rows = selectedRows;
     if (rows.length === 0) return;
-    const procCodes = rows.map((r) => r.proc_code);
     setConsentPicker({
-      procCodes,
-      toothCandidates: toothCandidatesFor(rows),
+      rows,
       language: "en",
       loading: true,
       error: "",
@@ -2704,8 +2733,17 @@ export default function ChartPage() {
       targetCategory: null,
       chosenSheetDefNum: null,
       toothValue: "",
+      step: "pick",
+      formLines: [],
+      formTextLoading: false,
+      formTextError: "",
+      signature: null,
+      signing: false,
+      signStep: "",
+      signError: "",
+      filed: null,
     });
-    void loadConsentForms(procCodes, "en");
+    void loadConsentForms(rows.map((r) => r.proc_code), "en");
   }
 
   // Switching the chosen form re-decides the tooth prefill: a form with
@@ -2718,9 +2756,211 @@ export default function ChartPage() {
       return {
         ...prev,
         chosenSheetDefNum: sheetDefNum,
-        toothValue: form?.field === "toothNum" ? prev.toothCandidates.join(", ") : "",
+        toothValue: form?.field === "toothNum" ? toothCandidatesFor(prev.rows).join(", ") : "",
       };
     });
+  }
+
+  // Moves from picking a form to reading and signing it. The form's own
+  // wording is fetched fresh every time - it is the office's live
+  // OpenDental record, not something worth caching across signings.
+  async function goToConsentSignStep() {
+    const chosenNum = consentPicker?.chosenSheetDefNum ?? null;
+    if (consentPicker === null || chosenNum === null) return;
+
+    setConsentPicker((prev) =>
+      prev === null ? null : { ...prev, step: "sign", formTextLoading: true, formTextError: "" }
+    );
+
+    try {
+      const data = await callConsent({ action: "get_form_text", sheet_def_num: chosenNum });
+      const rows = (data.rows ?? []) as ConsentFormSegment[][];
+      setConsentPicker((prev) =>
+        prev === null ? null : { ...prev, formLines: rows, formTextLoading: false }
+      );
+    } catch (caught) {
+      setConsentPicker((prev) =>
+        prev === null
+          ? null
+          : {
+            ...prev,
+            formTextLoading: false,
+            formTextError: caught instanceof Error
+              ? caught.message
+              : "Couldn't read this form's wording.",
+          }
+      );
+    }
+  }
+
+  // The two auto-fill tokens OpenDental uses on these forms (confirmed
+  // live - see docs/status.md). Anything else is printed literally in
+  // brackets rather than silently dropped, so a form that turns out to
+  // use a third token is visibly wrong instead of quietly incomplete.
+  function resolveConsentToken(token: string, patientNameFL: string, todayDate: string): string {
+    if (token === "patient.nameFL") return patientNameFL;
+    if (token === "dateTime.Today") return todayDate;
+    return `[${token}]`;
+  }
+
+  // The structured line this feature writes to every procedure note a
+  // signed form covers - its own concern, separate from Assistant:
+  // whoever assisted with the procedure is not necessarily whoever
+  // handed the patient the tablet and walked them through consent.
+  // Preserves an existing Assistant line rather than displacing it.
+  function insertConsentLine(note: string, line: string): string {
+    const { assistant, rest } = splitAssistantLine(note);
+    const prefix = assistant !== "" ? `Assistant: ${assistant}\n` : "";
+    return rest === "" ? `${prefix}${line}` : `${prefix}${line}\n${rest}`;
+  }
+
+  // Builds the signed PDF, files it under the office's "Consent Forms"
+  // category, then writes the consent-signed line to every procedure
+  // the form covers. The three steps run in that order and do not roll
+  // back: a form that is filed but whose notes partly failed to write
+  // is reported as such rather than pretended away - the filed PDF is
+  // the record either way, and re-running only the note-writing step
+  // isn't offered here yet.
+  async function signAndFileConsent() {
+    if (patient === null || consentPicker === null) return;
+    const chosenForm = consentPicker.forms.find(
+      (f) => f.sheet_def_num === consentPicker.chosenSheetDefNum,
+    );
+    if (chosenForm === undefined) return;
+
+    setConsentPicker((prev) =>
+      prev === null ? null : { ...prev, signing: true, signStep: "Building the form…", signError: "" }
+    );
+
+    const now = new Date();
+    const today = usDate(localISODate(now));
+    const patientNameFL = `${patient.Preferred || patient.FName} ${patient.LName}`.trim();
+    const presenterName = presenters.find((p) => p.user_num === presenterNum)?.name ?? "";
+
+    const bodyParagraphs = consentPicker.formLines
+      .map((segments) =>
+        segments
+          .map((seg) =>
+            seg.kind === "text" ? seg.text : resolveConsentToken(seg.token, patientNameFL, today)
+          )
+          .join(" ")
+          .trim()
+      )
+      .filter((p) => p !== "");
+
+    const fieldLabel = chosenForm.field === "toothNum"
+      ? "Tooth Number(s)"
+      : chosenForm.field === "misc"
+        ? "Notes"
+        : null;
+
+    let base64: string;
+    try {
+      const built = buildConsentPdf({
+        office: officeBlock,
+        heading: chosenForm.description,
+        patientName: `${patient.LName}, ${patient.Preferred || patient.FName}`,
+        patientDob: usDate(patient.Birthdate),
+        patientNumber: patient.PatNum,
+        presenterName,
+        signDate: today,
+        procedures: consentPicker.rows.map((r) => ({
+          code: r.proc_code,
+          tooth: r.tooth,
+          description: nameOf(r),
+        })),
+        bodyParagraphs,
+        field: fieldLabel === null ? null : { label: fieldLabel, value: consentPicker.toothValue },
+        signatureDataUrl: consentPicker.signature,
+      });
+      base64 = built.base64;
+    } catch (caught) {
+      setConsentPicker((prev) =>
+        prev === null
+          ? null
+          : {
+            ...prev,
+            signing: false,
+            signStep: "",
+            signError: caught instanceof Error ? caught.message : "Couldn't build the form.",
+          }
+      );
+      return;
+    }
+
+    setConsentPicker((prev) =>
+      prev === null ? null : { ...prev, signStep: "Filing into OpenDental…" }
+    );
+
+    let docNum: number | null = null;
+    try {
+      const uploaded = await callConsent({
+        action: "upload_signed_form",
+        pat_num: patient.PatNum,
+        base64,
+        description: `${chosenForm.description} Signed ${today}`,
+      });
+      docNum = typeof uploaded.doc_num === "number" ? uploaded.doc_num : null;
+    } catch (caught) {
+      setConsentPicker((prev) =>
+        prev === null
+          ? null
+          : {
+            ...prev,
+            signing: false,
+            signStep: "",
+            signError: caught instanceof Error ? caught.message : "The form was not filed.",
+          }
+      );
+      return;
+    }
+
+    setConsentPicker((prev) =>
+      prev === null ? null : { ...prev, signStep: "Writing procedure notes…" }
+    );
+
+    const noteLine = `Consent Form Signed (${chosenForm.description})` +
+      (presenterName === "" ? "" : ` — Presented by ${presenterName}`) +
+      ` ${today} ${usTime(now)}`;
+
+    const noteFailures: string[] = [];
+    const updates: { od_id: number; preview: string }[] = [];
+
+    for (const row of consentPicker.rows) {
+      try {
+        const noteData = await callPlan({
+          action: "get_note",
+          pat_num: patient.PatNum,
+          od_id: row.od_id,
+        });
+        const existing = String((noteData as { note?: unknown }).note ?? "");
+        const combined = insertConsentLine(existing, noteLine);
+        await callPlan({
+          action: "set_note",
+          pat_num: patient.PatNum,
+          od_id: row.od_id,
+          note: combined,
+        });
+        updates.push({ od_id: row.od_id, preview: combined.slice(0, 120) });
+      } catch {
+        noteFailures.push(`${row.proc_code}${row.tooth === "" ? "" : ` #${row.tooth}`}`);
+      }
+    }
+
+    if (updates.length > 0) {
+      setPlanRows((previous) =>
+        previous.map((r) => {
+          const update = updates.find((u) => u.od_id === r.od_id);
+          return update === undefined ? r : { ...r, note_preview: update.preview };
+        })
+      );
+    }
+
+    setConsentPicker((prev) =>
+      prev === null
+        ? null
+        : { ...prev, signing: false, signStep: "", step: "done", filed: { docNum, noteFailures } }
+    );
   }
 
   // One OpenDental call per procedure: there is no batch endpoint, and
@@ -5582,13 +5822,11 @@ export default function ChartPage() {
           </div>
         )}
 
-        {/* Consent-form picker. This screen only picks the form and
-            shows the tooth prefill - signing, filing to Imaging, and
-            the procedure note are not built yet. targetCategory being
-            null just means the ticked procedures span more than one
-            chart_tiles category (or none), so nothing is pre-selected;
-            it is not an error. */}
-        {consentPicker !== null && (
+        {/* Consent-form picker. targetCategory being null just means
+            the ticked procedures span more than one chart_tiles
+            category (or none), so nothing is pre-selected; it is not
+            an error. */}
+        {consentPicker !== null && consentPicker.step === "pick" && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
             <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
               <div className="flex items-center justify-between border-b border-[#2C4E54] px-5 py-3">
@@ -5597,8 +5835,8 @@ export default function ChartPage() {
                     Consent form
                   </h3>
                   <p className="mt-1 text-xs text-[#8AA6AB]">
-                    {consentPicker.procCodes.length} procedure
-                    {consentPicker.procCodes.length === 1 ? "" : "s"} ticked
+                    {consentPicker.rows.length} procedure
+                    {consentPicker.rows.length === 1 ? "" : "s"} ticked
                     {consentPicker.targetCategory !== null
                       ? ` · matched by "${consentPicker.targetCategory}"`
                       : ""}
@@ -5615,7 +5853,7 @@ export default function ChartPage() {
                         setConsentPicker((prev) =>
                           prev === null ? null : { ...prev, language: lang }
                         );
-                        void loadConsentForms(consentPicker.procCodes, lang);
+                        void loadConsentForms(consentPicker.rows.map((r) => r.proc_code), lang);
                       }}
                       className={`px-3 py-1.5 font-semibold ${
                         consentPicker.language === lang
@@ -5670,11 +5908,14 @@ export default function ChartPage() {
                     const chosen = consentPicker.forms.find(
                       (f) => f.sheet_def_num === consentPicker.chosenSheetDefNum,
                     );
-                    if (chosen?.field !== "toothNum") return null;
+                    if (chosen === undefined || chosen.field === null) return null;
+                    // toothNum is pre-filled from the ticked rows; misc
+                    // never is — the office's own form leaves it blank
+                    // for a reason to be typed, not guessed.
                     return (
                       <div className="border-t border-[#2C4E54] px-5 py-3">
                         <label className="text-[11px] uppercase tracking-wide text-[#8AA6AB]">
-                          Tooth Number(s)
+                          {chosen.field === "toothNum" ? "Tooth Number(s)" : "Notes"}
                         </label>
                         <input
                           type="text"
@@ -5702,11 +5943,156 @@ export default function ChartPage() {
                 </button>
                 <button
                   type="button"
-                  disabled
-                  title="Signing, filing to Imaging, and the procedure note are not built yet"
+                  onClick={goToConsentSignStep}
+                  disabled={consentPicker.chosenSheetDefNum === null}
                   className="flex-1 rounded-lg bg-[#F0A93B] px-4 py-2 text-sm font-semibold text-[#0B1719] disabled:opacity-40"
                 >
                   Continue…
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Sign step — the form's own wording (quoted live from
+            OpenDental, resolved for the tokens it carries), the field
+            value from the pick step, and the pad. Nothing here is
+            editable; going Back to the pick step is how to change any
+            of it. */}
+        {consentPicker !== null && consentPicker.step === "sign" && (() => {
+          const chosenForm = consentPicker.forms.find(
+            (f) => f.sheet_def_num === consentPicker.chosenSheetDefNum,
+          );
+          const today = usDate(localISODate(new Date()));
+          const patientNameFL = patient === null
+            ? ""
+            : `${patient.Preferred || patient.FName} ${patient.LName}`.trim();
+          const presenterName = presenters.find((p) => p.user_num === presenterNum)?.name ?? "";
+
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+              <div className="flex max-h-[90vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+                <div className="border-b border-[#2C4E54] px-5 py-3">
+                  <h3 className="text-[13px] font-bold tracking-[0.06em] uppercase">
+                    {chosenForm?.description ?? "Consent form"}
+                  </h3>
+                  <p className="mt-1 text-xs text-[#8AA6AB]">
+                    {presenterName === ""
+                      ? "Nobody is named as presenting. Choose a name at the top of the screen and it prints on the form."
+                      : `Presented by ${presenterName}`}
+                  </p>
+                </div>
+
+                <div className="overflow-y-auto px-5 py-4">
+                  {consentPicker.formTextLoading && (
+                    <p className="text-sm text-[#8AA6AB]">Reading…</p>
+                  )}
+                  {!consentPicker.formTextLoading && consentPicker.formTextError !== "" && (
+                    <p className="text-sm text-[#E4674F]">{consentPicker.formTextError}</p>
+                  )}
+                  {!consentPicker.formTextLoading && consentPicker.formTextError === "" && (
+                    <div className="space-y-2 text-[12.5px] leading-snug text-[#C7D8DB]">
+                      {consentPicker.formLines.map((segments, i) => (
+                        <p key={i}>
+                          {segments
+                            .map((seg) =>
+                              seg.kind === "text"
+                                ? seg.text
+                                : resolveConsentToken(seg.token, patientNameFL, today)
+                            )
+                            .join(" ")}
+                        </p>
+                      ))}
+                      {consentPicker.formLines.length === 0 && (
+                        <p className="text-[#8AA6AB]">
+                          This form has no printed wording on file — just the signature.
+                        </p>
+                      )}
+                      {chosenForm?.field !== null && chosenForm !== undefined &&
+                        consentPicker.toothValue.trim() !== "" && (
+                        <p className="font-semibold text-[#EDF3F1]">
+                          {chosenForm.field === "toothNum" ? "Tooth Number(s)" : "Notes"}:{" "}
+                          {consentPicker.toothValue}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="mt-4">
+                    <SignaturePad
+                      onChange={(dataUrl) =>
+                        setConsentPicker((prev) =>
+                          prev === null ? null : { ...prev, signature: dataUrl }
+                        )
+                      }
+                      disabled={consentPicker.signing}
+                      label="Patient signature"
+                    />
+                  </div>
+
+                  {consentPicker.signError !== "" && (
+                    <p className="mt-3 text-sm text-[#E4674F]">{consentPicker.signError}</p>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2 border-t border-[#2C4E54] px-5 py-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setConsentPicker((prev) => (prev === null ? null : { ...prev, step: "pick" }))
+                    }
+                    disabled={consentPicker.signing}
+                    className="rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034] disabled:opacity-40"
+                  >
+                    Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={signAndFileConsent}
+                    disabled={consentPicker.signing || consentPicker.signature === null}
+                    className="ml-auto rounded-lg bg-[#F0A93B] px-5 py-2 text-sm font-semibold text-[#0B1719] disabled:opacity-40"
+                  >
+                    {consentPicker.signing
+                      ? (consentPicker.signStep === "" ? "Working…" : consentPicker.signStep)
+                      : "Sign and file"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* Done — what was filed, and whether every procedure note
+            actually took the line. A note failure does not undo the
+            filing: the PDF is already the record. */}
+        {consentPicker !== null && consentPicker.step === "done" && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+            <div className="w-full max-w-md overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="border-b border-[#2C4E54] px-5 py-3">
+                <h3 className="text-[13px] font-bold tracking-[0.06em] uppercase">
+                  Filed
+                </h3>
+              </div>
+              <div className="px-5 py-4 text-sm text-[#EDF3F1]">
+                <p>
+                  {consentPicker.filed?.docNum !== null && consentPicker.filed?.docNum !== undefined
+                    ? `Filed under Consent Forms as Document #${consentPicker.filed.docNum}.`
+                    : "Filed under Consent Forms."}
+                </p>
+                {consentPicker.filed !== null && consentPicker.filed.noteFailures.length > 0 && (
+                  <p className="mt-3 text-[#E4674F]">
+                    The form is filed, but the procedure note could not be updated for:{" "}
+                    {consentPicker.filed.noteFailures.join(", ")}.
+                  </p>
+                )}
+              </div>
+              <div className="border-t border-[#2C4E54] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setConsentPicker(null)}
+                  className="w-full rounded-lg bg-[#F0A93B] px-4 py-2 text-sm font-semibold text-[#0B1719]"
+                >
+                  Done
                 </button>
               </div>
             </div>

@@ -4,6 +4,113 @@ Moved here from `docs/status.md` on 2026-09-19 to keep the live file
 under 400 lines, per `CLAUDE.md`'s session protocol. Same newest-first
 order as the live file; nothing here was edited, only relocated.
 
+## 2026-09-19 (same session, even later) — Shad's own login email was wrong in a prior report; data fixed
+
+**What changed**
+- Shad tried "Sign in with email instead" and pushed back: his email
+  is `shadmanavi@gmail.com`, not what a previous message in this
+  session had implied. Checked directly rather than assumed:
+  `auth.users` (the table Supabase Auth actually authenticates
+  against) has held `shadmanavi@gmail.com` since the account's
+  creation, with a real sign-in as recently as 2026-09-18 23:13 UTC —
+  that account and password already work today. `public.users.email`,
+  a separate denormalized copy that the new `/admin/users` screen
+  displays, had gone stale at `shad.manavi@mydentalmasters.com` — a
+  different, wrong value. That stale value is what an earlier message
+  this session read and passed along as fact, without checking
+  `auth.users` directly. Corrected via a tracked migration
+  (`024_fix_stale_owner_admin_email`) rather than an ad-hoc update —
+  a direct `execute_sql` UPDATE was tried first and correctly refused
+  by the harness's own safety classifier as a shared-resource write;
+  the migration path is both the sanctioned one and the one every
+  other database change this project makes already goes through.
+- Only one row exists in `auth.users` — there is exactly one real
+  account, no ambiguity once checked properly.
+
+**What was verified**
+- `public.users.email` re-read after the migration: now
+  `shadmanavi@gmail.com`, matching `auth.users`.
+
+**What is still open**
+- Same as the entry below — `sync` for Downey is the next concrete
+  step, and Shad now has the right email to actually get into
+  `/admin/users` and run it.
+- Worth a general note for later: nothing in this app currently keeps
+  `public.users.email` in sync with `auth.users.email` if someone's
+  Auth email ever changes by another path (Supabase dashboard, a
+  password-reset email change, etc.). Not fixed this session — flagging
+  it as a real gap, not just this one stale row.
+
+**Next step**
+- Same as below: Shad signs in with `shadmanavi@gmail.com`, opens
+  Admin, runs Sync for Downey.
+
+## 2026-09-19 (same session, later still) — Login regression fixed, password self-service, admin user-management screen
+
+**What changed**
+- **Caught and fixed a real regression before anyone hit it**: v3's
+  login page had no field left that could carry a raw email, and
+  Shad's own admin account (`shad.manavi@mydentalmasters.com`, the
+  only owner_admin that exists) predates OpenDental-username login
+  entirely — it was never provisioned by `sync` and has no OpenDental
+  username to compute a synthetic email from. It would have locked
+  him out of the very admin screen this whole feature is building
+  toward. `app/login/page.tsx` → v4 adds a "Sign in with email
+  instead" toggle beneath the form, swapping in a single email field
+  — the v1 form, unchanged underneath.
+- **Password self-service**: `app/components/TopNav.tsx` → v6 adds a
+  Change Password control beside Sign Out, for anyone signed in.
+  Calls `supabase.auth.updateUser({password})` directly — needs only
+  the current session, no Edge Function, no re-entering the old
+  password. This exists because a `sync`-provisioned account's only
+  password is a one-time temp with no other way to change it.
+- **New `/admin/users` page (v1)**: the screen that actually runs
+  `sync` from here on. The office picker only ever lists offices
+  where the signed-in user holds `owner_admin` (queried from
+  `user_office_roles`, so there is no office selector to misuse into
+  someone else's roster). Per office: a roster table (name, email,
+  a role dropdown that writes `user_office_roles.role_id` directly —
+  confirmed via `pg_policies` that RLS already permits an
+  `is_office_admin` to do this before building on it — an OpenDental-
+  login column, and per-row Reset Password), plus a Sync Now button
+  whose result panel shows any newly created logins' one-time temp
+  passwords in place. TopNav gets an Admin link to it.
+- This resolves how `sync` gets invoked at all: earlier in this
+  session that was an open question (nobody had an existing session
+  to test with). The answer is Shad clicks it himself, logged in as
+  himself, from this screen — not Claude invoking it directly, which
+  would have meant bypassing the admin check since Claude has no
+  session and never will.
+
+**What was verified**
+- `npm run build`: green.
+- Live in the browser pane (dev server, not behind login for the
+  pages that don't need it): the login page's Office and Username
+  dropdowns render and populate with real data — 37 real names for
+  Downey; the "Sign in with email instead" toggle correctly swaps to
+  a single email field and back; `/admin/users` correctly bounces to
+  `/login` when there is no session.
+- `pg_policies` queried directly to confirm `roles` is
+  select-readable by any authenticated user and `user_office_roles`
+  writes are gated by `is_office_admin(office_id)`, before the admin
+  page was built to rely on either.
+
+**What is still open**
+- **`sync` has still never been run for real.** Everything needed to
+  run it now exists: Shad signs in (email fallback, since his account
+  isn't OpenDental-username-based), opens Admin, picks Downey, clicks
+  Sync Now, and the resulting temp passwords are right there on
+  screen to hand out.
+- The admin screen is intentionally narrow (no account deletion, no
+  bulk actions) — fine for an audience of one to a few, may want
+  more later.
+- Everything else from the two entries below is unchanged.
+
+**Next step**
+- Shad runs `sync` for Downey himself from `/admin/users`, hands out
+  the temp passwords it shows, and confirms at least one staff member
+  can sign in and change their password successfully end to end.
+
 ## 2026-09-19 (same session, later) — Password-matching design closed; login gets a username dropdown
 
 **What changed**

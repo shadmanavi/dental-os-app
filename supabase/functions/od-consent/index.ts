@@ -1,31 +1,49 @@
 // =====================================================================
 // Dental OS - Edge Function: od-consent
 //
-// Consent-form selection: given the diagnosed procedures a user has
-// ticked, list the office's live consent sheetdefs (read from
-// OpenDental) and compute which one to pre-select, using Dental OS's
-// own chart_tiles/chart_categories naming - the same category labels
-// (Fillings, Crown & Bridge, Endo, ...) the charting tile picker
-// already groups procedures under.
-//
-// The match is by name only: once a consent form's OpenDental
-// Description is renamed to read the same as a chart_categories.label,
-// it becomes the default automatically. No code change is needed to
-// add or change a match, only the rename in OpenDental - that rename
-// is deliberately not done by this function.
-//
-// Nothing is written here. list_forms only reads, from both OpenDental
-// and Dental OS's own tables.
+// The tablet consent-form feature. list_forms picks which consent
+// sheetdef applies; get_form_text reads what it actually says, quoted
+// from OpenDental (these are the office's insurance-approved forms —
+// nothing here writes new wording); upload_signed_form files the
+// rendered, signed PDF (built client-side by lib/consentPdf.ts) into
+// the patient's chart. None of this touches OpenDental's own Sheets
+// mechanism — the REST API cannot write a real signature into a SigBox
+// field on any version these offices run, confirmed twice this project
+// (docs/status.md), and a local desktop agent (the only way that would
+// work) was ruled out as too much ongoing maintenance. This is a plain
+// PDF with a signature image on it, same family as the treatment plan
+// PDF already filed by this app.
 //
 // Deploy path: supabase/functions/od-consent/index.ts
-// Version: 1
+// Version: 3
+// Changelog:
+//   v3  get_form_text and upload_signed_form — the rest of the
+//       sign-and-file pipeline, alongside v1's list_forms.
+//   v2  bucket lives on chart_categories, not chart_tiles - the v1
+//       category query filtered the wrong table and failed live
+//       ("column chart_tiles.bucket does not exist"). Moved the
+//       bucket="diagnosed" filter onto the chart_categories read;
+//       chart_tiles is scoped to the right bucket already, through
+//       the category_id list that query hands it.
 //
 // Actions:
-//   list_forms — { office, language?, proc_codes? } -> the office's
-//                 consent forms for that language, each form's fillable
-//                 field (toothNum, misc, or none), and which one (if
-//                 any) matches the ticked procedures' single shared
-//                 category.
+//   list_forms          — { office, language?, proc_codes? } -> the
+//                          office's consent forms for that language,
+//                          each form's fillable field (toothNum, misc,
+//                          or none), and which one (if any) matches
+//                          the ticked procedures' single shared
+//                          category.
+//   get_form_text       — { office, sheet_def_num } -> the form's own
+//                          wording, quoted from its sheetdef, in
+//                          reading order. Auto-fill fields (patient
+//                          name, today's date) come back as tokens for
+//                          the caller to resolve, since od-consent
+//                          does not otherwise know who the patient is.
+//   upload_signed_form  — { office, pat_num, base64, description } ->
+//                          files a PDF into the existing "Consent
+//                          Forms" Imaging category, same pattern
+//                          od-tp-doc already uses for "Treatment
+//                          Plans".
 // =====================================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.0";
@@ -161,6 +179,10 @@ Deno.serve(async (req: Request) => {
     action?: string;
     proc_codes?: unknown;
     language?: string;
+    sheet_def_num?: number;
+    pat_num?: number;
+    base64?: string;
+    description?: string;
   };
   try {
     body = await req.json();
@@ -171,7 +193,7 @@ Deno.serve(async (req: Request) => {
   const officeSlug = (body.office ?? "").toLowerCase().trim();
   const action = (body.action ?? "").toLowerCase().trim();
 
-  const ACTIONS = ["list_forms"];
+  const ACTIONS = ["list_forms", "get_form_text", "upload_signed_form"];
   if (!ACTIONS.includes(action)) {
     return json({ ok: false, error: `action must be one of: ${ACTIONS.join(", ")}.` }, 400);
   }
@@ -324,6 +346,131 @@ Deno.serve(async (req: Request) => {
       target_category: targetCategory,
       default_sheet_def_num: defaultSheetDefNum,
       forms,
+    });
+  }
+
+  // ===================================================================
+  // get_form_text
+  //
+  // A consent sheetdef's own wording, grouped into printed lines -
+  // StaticText verbatim, and OutputText auto-fill fields
+  // (patient.nameFL, dateTime.Today - the two OpenDental uses on these
+  // forms) returned as their raw FieldName rather than resolved here,
+  // since od-consent has no patient in scope at all and there is no
+  // reason to give it one just for this. The caller already has the
+  // patient's name and today's date on screen.
+  //
+  // Items within a few points of the same vertical position are
+  // grouped into one line: a label ("Patient:") and its auto-fill
+  // blank sit side by side on the printed form, not one above the
+  // other, and the sheetdef designer does not guarantee identical Y
+  // to the pixel between them.
+  // ===================================================================
+  if (action === "get_form_text") {
+    const sheetDefNum = Number(body.sheet_def_num);
+    if (!Number.isInteger(sheetDefNum) || sheetDefNum <= 0) {
+      return json({ ok: false, error: "sheet_def_num must be a positive whole number." }, 400);
+    }
+
+    const sql =
+      "SELECT FieldType, FieldName, FieldValue, XPos, YPos " +
+      "FROM sheetfielddef " +
+      `WHERE SheetDefNum=${sheetDefNum} AND FieldType IN (0,2) ` +
+      "ORDER BY YPos, XPos";
+    const rawRows = await shortQueryAll(auth, sql);
+
+    type Segment = { kind: "text"; text: string } | { kind: "field"; token: string };
+
+    const ROW_TOLERANCE = 6;
+    const rowsOut: Segment[][] = [];
+    let currentY: number | null = null;
+
+    for (const r of rawRows) {
+      const fieldType = Number(r.FieldType);
+      const y = Number(r.YPos);
+      const segment: Segment = fieldType === 0
+        ? { kind: "field", token: String(r.FieldName ?? "").trim() }
+        : { kind: "text", text: String(r.FieldValue ?? "") };
+
+      if (segment.kind === "text" && segment.text.trim() === "") continue;
+      if (segment.kind === "field" && segment.token === "") continue;
+
+      if (currentY !== null && Math.abs(y - currentY) <= ROW_TOLERANCE && rowsOut.length > 0) {
+        rowsOut[rowsOut.length - 1].push(segment);
+      } else {
+        rowsOut.push([segment]);
+        currentY = y;
+      }
+    }
+
+    return json({ ok: true, sheet_def_num: sheetDefNum, rows: rowsOut });
+  }
+
+  // ===================================================================
+  // upload_signed_form
+  //
+  // Files a signed consent PDF into the patient's chart. Same shape as
+  // od-tp-doc's upload action - the category is resolved by name at
+  // read time, not hardcoded, because these are separate OpenDental
+  // databases with separate numbering (confirmed: Downey's "Consent
+  // Forms" is DefNum 392, Maywood's is 324 - a coincidence they are
+  // close, not a guarantee they ever stay that way).
+  // ===================================================================
+  if (action === "upload_signed_form") {
+    const CATEGORY_NAME = "Consent Forms";
+
+    const patNum = Number(body.pat_num);
+    if (!Number.isInteger(patNum) || patNum <= 0) {
+      return json({ ok: false, error: "pat_num must be a positive whole number." }, 400);
+    }
+
+    const base64 = String(body.base64 ?? "");
+    if (base64.length < 100) {
+      return json({ ok: false, error: "base64 is missing or too small to be a document." }, 400);
+    }
+    if (!/^[A-Za-z0-9+/=\r\n]+$/.test(base64)) {
+      return json({ ok: false, error: "base64 contains characters that are not base64." }, 400);
+    }
+
+    const description = String(body.description ?? "Consent Form").trim();
+
+    const patientRows = await shortQueryAll(auth, `SELECT PatNum FROM patient WHERE PatNum=${patNum}`);
+    if (patientRows.length === 0) {
+      return json({ ok: false, error: `No patient ${patNum} at ${officeSlug}.` }, 404);
+    }
+
+    const catRows = await shortQueryAll(
+      auth,
+      `SELECT DefNum FROM definition WHERE Category=18 AND ItemName='${CATEGORY_NAME}' AND IsHidden=0 LIMIT 1`,
+    );
+    if (catRows.length === 0) {
+      return json({
+        ok: false,
+        error: `No visible "${CATEGORY_NAME}" Imaging category found at ${officeSlug}.`,
+      }, 500);
+    }
+    const docCategory = Number(catRows[0].DefNum);
+
+    const upload = await odFetch(auth, "POST", "/documents/Upload", {
+      PatNum: patNum,
+      DocCategory: docCategory,
+      extension: ".pdf",
+      rawBase64: base64,
+      Description: description,
+    });
+
+    if (!upload.ok) {
+      return json({ ok: false, error: "OpenDental refused the document.", detail: upload.body }, upload.status);
+    }
+
+    const created = (upload.body ?? {}) as Record<string, unknown>;
+    return json({
+      ok: true,
+      office: officeRow.slug,
+      pat_num: patNum,
+      doc_num: created.DocNum ?? null,
+      doc_category: docCategory,
+      description: created.Description ?? description,
     });
   }
 

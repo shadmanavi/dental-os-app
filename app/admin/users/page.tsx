@@ -55,6 +55,10 @@ export default function AdminUsersPage() {
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
   const [syncError, setSyncError] = useState("");
 
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState<{ removed: string[]; failed: { email: string; reason: string }[] } | null>(null);
+  const [cleanupError, setCleanupError] = useState("");
+
   const [resettingId, setResettingId] = useState<string | null>(null);
   const [resetResult, setResetResult] = useState<{ od_username: string; temp_password: string } | null>(null);
   const [resetError, setResetError] = useState("");
@@ -233,6 +237,25 @@ export default function AdminUsersPage() {
     }
   }
 
+  // ---- Clean up accounts a broken sync run left half-finished ----
+  async function runCleanup() {
+    if (officeSlug === "") return;
+
+    setCleaning(true);
+    setCleanupError("");
+    setCleanupResult(null);
+
+    try {
+      const data = await callStaffLogin({ action: "cleanup_orphans", office: officeSlug });
+      setCleanupResult({ removed: data.removed ?? [], failed: data.failed ?? [] });
+      await loadRoster();
+    } catch (caught) {
+      setCleanupError(caught instanceof Error ? caught.message : "Cleanup failed.");
+    } finally {
+      setCleaning(false);
+    }
+  }
+
   // ---- Reset one person's password ----
   async function resetPassword(row: Roster) {
     if (row.od_username === null || officeSlug === "") return;
@@ -366,8 +389,46 @@ export default function AdminUsersPage() {
                   </p>
                 )}
                 {syncResult.skipped.length > 0 && (
-                  <p className="mt-2 text-xs text-[#A4361F]">
-                    Skipped: {syncResult.skipped.map((s) => `${s.od_username} (${s.reason})`).join("; ")}
+                  <>
+                    <p className="mt-2 text-xs text-[#A4361F]">
+                      Skipped: {syncResult.skipped.map((s) => `${s.od_username} (${s.reason})`).join("; ")}
+                    </p>
+                    {syncResult.skipped.some((s) => s.reason.includes("users row failed")) && (
+                      <div className="mt-3 flex items-center gap-3 rounded-lg border border-[#E4674F]/40 bg-[#FBEAE7] px-3 py-2">
+                        <p className="text-xs text-[#A4361F]">
+                          Those accounts were created but left broken — clean them
+                          up, then Sync again to finish them properly.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={runCleanup}
+                          disabled={cleaning}
+                          className="ml-auto rounded-lg border border-[#A4361F] px-3 py-1.5 text-xs font-medium whitespace-nowrap text-[#A4361F] hover:bg-white disabled:opacity-50"
+                        >
+                          {cleaning ? "Cleaning up…" : "Clean up broken accounts"}
+                        </button>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {cleanupError !== "" && (
+              <p className="rounded-xl border border-[#E4674F]/40 bg-[#FBEAE7] px-4 py-3 text-sm text-[#A4361F]">
+                {cleanupError}
+              </p>
+            )}
+            {cleanupResult !== null && (
+              <div className="rounded-xl border border-[#E3E1DB] bg-white px-4 py-3 text-sm">
+                <p className="text-[#1C1C1A]">
+                  Removed {cleanupResult.removed.length} broken account
+                  {cleanupResult.removed.length === 1 ? "" : "s"}.
+                  {cleanupResult.removed.length > 0 && " Sync now to create them properly."}
+                </p>
+                {cleanupResult.failed.length > 0 && (
+                  <p className="mt-1 text-xs text-[#A4361F]">
+                    Could not remove: {cleanupResult.failed.map((f) => `${f.email} (${f.reason})`).join("; ")}
                   </p>
                 )}
               </div>

@@ -8,16 +8,37 @@
 // back to the OpenDental user it came from).
 //
 // Deploy path: supabase/functions/od-staff-login/index.ts
-// Version: 2
+// Version: 3
 //
 // Actions:
 //   { "action":"list_offices" }
 //   { "office":"downey", "action":"list_usernames" }
 //   { "office":"downey", "action":"sync" }
+//   { "office":"downey", "action":"cleanup_orphans" }
 //   { "office":"downey", "action":"reset_password", "od_username":"cduong" }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v3  Fixed a real bug in sync, and added cleanup_orphans for the
+//       accounts it already broke.
+//
+//       public.users has a trigger, trg_on_auth_user_created, that
+//       inserts a row for every new Auth account automatically. sync
+//       did not know that and tried to INSERT its own row on top —
+//       colliding on the primary key every single time. createUser
+//       had already succeeded by then, so the result was a real Auth
+//       account with a real (now-lost) temporary password, no role,
+//       and no od_staff_logins entry: unreachable, and with nothing
+//       recording it existed. The fix is upsert instead of insert,
+//       which fills in full_name and is_active on the row the trigger
+//       already made instead of fighting it.
+//
+//       cleanup_orphans finds every Auth account under an office's
+//       synthetic email domain with no matching ledger row — exactly
+//       the accounts the bug above left behind — and deletes them
+//       (auth.users cascades to users). Run it before re-running
+//       sync whenever sync has reported "users row failed" skips.
 //
 //   v2  list_usernames — a dropdown of names, the way OpenDental's own
 //       login screen shows one, instead of a free-text field asking
@@ -453,7 +474,7 @@ Deno.serve(async (req: Request) => {
         email: internalEmail,
         password: tempPassword,
         email_confirm: true,
-        user_metadata: { od_username: odUsername, office_slug: officeRow.slug },
+        user_metadata: { od_username: odUsername, office_slug: officeRow.slug, full_name: fullName },
       });
 
       if (createError || !created?.user) {
@@ -466,12 +487,20 @@ Deno.serve(async (req: Request) => {
 
       const newUserId = created.user.id;
 
-      const { error: usersError } = await serviceRole.from("users").insert({
+      // trg_on_auth_user_created already inserted this row the instant
+      // createUser ran (handle_new_auth_user(), on conflict do nothing).
+      // upsert rather than insert so this fills in full_name and
+      // is_active on top of that row instead of colliding with it —
+      // an earlier version used a plain insert here and every single
+      // row failed on the primary key, leaving real Auth accounts
+      // with no role and no ledger entry. Cleaned up via
+      // cleanup_orphans below; this is the actual fix.
+      const { error: usersError } = await serviceRole.from("users").upsert({
         id: newUserId,
         email: internalEmail,
         full_name: fullName,
         is_active: true,
-      });
+      }, { onConflict: "id" });
       if (usersError) {
         skipped.push({ od_username: odUsername, reason: `users row failed: ${usersError.message}` });
         continue;
@@ -548,6 +577,71 @@ Deno.serve(async (req: Request) => {
   }
 
   // ===================================================================
+  // cleanup_orphans — remove Auth accounts sync created but never
+  // finished provisioning.
+  //
+  // Written for the v1 bug: sync's own users-table insert collided
+  // with a trigger that had already created the row, so createUser
+  // succeeded (a real Auth account, a real password) but every run
+  // after it failed, and the account was left with no role and no
+  // od_staff_logins entry — unreachable, since nothing recorded which
+  // OpenDental user it was for or what its password had been. Finds
+  // every Auth account under this office's synthetic email domain
+  // with no matching ledger row, and deletes it (auth.users cascades
+  // to the users row). Safe to run whenever `sync` reports skipped
+  // rows whose reason mentions "users row failed" — run this, then
+  // sync again.
+  // ===================================================================
+  if (action === "cleanup_orphans") {
+    const domainSuffix = `@${INTERNAL_EMAIL_DOMAIN}`;
+    const prefix = `${officeRow.slug}.`;
+
+    const { data: ledgerRows, error: ledgerErr } = await serviceRole
+      .from("od_staff_logins")
+      .select("internal_email")
+      .eq("office_id", officeRow.id);
+
+    if (ledgerErr) {
+      return json({ ok: false, error: `Could not read the ledger: ${ledgerErr.message}` }, 500);
+    }
+
+    const knownEmails = new Set((ledgerRows ?? []).map((r) => String(r.internal_email ?? "")));
+
+    const removed: string[] = [];
+    const failed: { email: string; reason: string }[] = [];
+
+    for (let page = 1; page <= 20; page++) {
+      const { data: pageData, error: listError } = await serviceRole.auth.admin.listUsers({
+        page,
+        perPage: 200,
+      });
+      if (listError) {
+        return json({ ok: false, error: `Could not list accounts: ${listError.message}` }, 500);
+      }
+
+      const users = pageData?.users ?? [];
+      if (users.length === 0) break;
+
+      for (const u of users) {
+        const userEmail = u.email ?? "";
+        if (!userEmail.startsWith(prefix) || !userEmail.endsWith(domainSuffix)) continue;
+        if (knownEmails.has(userEmail)) continue; // provisioned correctly, leave it alone
+
+        const { error: deleteError } = await serviceRole.auth.admin.deleteUser(u.id);
+        if (deleteError) {
+          failed.push({ email: userEmail, reason: deleteError.message });
+        } else {
+          removed.push(userEmail);
+        }
+      }
+
+      if (users.length < 200) break;
+    }
+
+    return json({ ok: true, office: officeRow.name, removed, failed });
+  }
+
+  // ===================================================================
   // reset_password — a new temporary password for one existing login.
   // ===================================================================
   if (action === "reset_password") {
@@ -590,5 +684,8 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  return json({ ok: false, error: "action must be list_offices, sync, or reset_password." }, 400);
+  return json({
+    ok: false,
+    error: "action must be list_offices, list_usernames, sync, cleanup_orphans, or reset_password.",
+  }, 400);
 });

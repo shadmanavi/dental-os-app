@@ -1,5 +1,35 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-19 (same session, one more) — Cleanup button wasn't showing for the failure Shad actually hit
+
+**What changed**
+- Shad re-ran Sync per the previous entry's instructions. The
+  underlying fix held (no more "duplicate key" errors), but the
+  "Clean up broken accounts" button never appeared, because round 2
+  hit a *different* failure wording than round 1: `createUser` itself
+  now refuses with "A user with this email address has already been
+  registered" (since the 37 broken accounts from round 1 still exist
+  in `auth.users`), rather than the "users row failed" wording round
+  1 produced. The button's visibility check only watched for the
+  second wording. `app/admin/users/page.tsx`: now shows the button on
+  any skip at all, worded neutrally — running `cleanup_orphans` is
+  harmless when nothing actually needs removing.
+
+**What was verified**
+- `npm run build`: green.
+
+**What is still open**
+- Same as the entry below: the 37 broken Downey accounts are still
+  there. Shad needs one more pass — Sync, then the now-visible Clean
+  up broken accounts button, then Sync again.
+
+**Next step**
+- Shad: Sync → Clean up broken accounts → Sync again, on
+  `/admin/users` for Downey. Should this still not work, don't repeat
+  the exact log-and-fix cycle a third time — apply the same diagnostic
+  standard as the first bug (read the actual error, don't guess) before
+  changing more code.
+
 ## 2026-09-19 (same session, latest) — Real bug in sync's first live run, fixed; nav pared to Home + tiles
 
 **What changed**

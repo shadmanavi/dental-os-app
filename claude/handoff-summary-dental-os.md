@@ -84,7 +84,8 @@ the last one.
    - **Anything matching neither gets blocked, and an email goes to Shad** naming the IP, browser, and time, with an Approve / Deny link. The blocked device already holds its own pending token from the moment it first tried, so Shad can approve from any device (his laptop, not necessarily the blocked phone) — the blocked device just needs to retry once approval lands.
    - **Needs an admin screen to list and revoke approved devices** — a lost/stolen phone should be killable immediately, not trusted forever because it was approved once.
    - **Real new dependency: no email-sending capability exists anywhere in this app yet.** Needs an email provider set up (Resend suggested, not yet chosen) before the alert side can work at all.
-   - **Next step:** build this the evening the office is closed, per Shad's instruction — confirm the exact time with him before starting, and confirm the email provider choice at the same time.
+   - **Downey's office IP, given 19 Sep for the first whitelist entry: `76.53.131.94`.** Not yet used anywhere — nothing is built. Maywood's still needed before that office is covered. Worth confirming with Shad whether this address is static (ISP-guaranteed) or just what it happened to be on 19 Sep, since a dynamic residential-style business line would silently stop matching after the ISP reassigns it.
+   - **Next step:** build this the evening the office is closed, per Shad's instruction — confirm the exact time with him before starting, get Maywood's IP too, and confirm the email provider choice at the same time.
 
 **Group 3 — verification, no new code**
 

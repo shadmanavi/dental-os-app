@@ -1,8 +1,8 @@
 # Handoff Summary — Dental OS / TC Charting
 
 **Owner:** Shad
-**Last updated:** 29 August 2026
-**Session focus:** Moved onto Claude Code. Wrote the missing migration, built a PDF reader for payer fee schedules and loaded 6 of them into both offices, added payment recording from the tablet, and built the Hygiene Dashboard. A parallel chat built the Production Dashboard on 29 August.
+**Last updated:** 19 September 2026
+**Session focus (19 Sep):** KPI dashboard from Maria's workbook; provider names everywhere instead of OpenDental office codes; procedure notes with a dental-assistant picker; OpenDental-username login built, broken by a real bug on first live run, and fixed; a self-service password change and a `/admin/users` screen so Shad runs `sync` himself; the top nav trimmed to Home with everything else moved to (smaller) home-page tiles. §3 below is the current todo list — the table in §2 below it is 3 weeks stale and kept only for the older history it still holds; §7 has the detailed changelog and `docs/status.md` has the finer-grained session-by-session log.
 
 **Working from the repo now.** Claude Code runs inside
 `C:\Users\shadm\dental-os-app\dental-os-app`, so it reads the real files
@@ -67,18 +67,39 @@ the last one.
 
 ---
 
-## 3. Next steps (prioritized)
+## 3. Next steps (prioritized) — current as of 19 September 2026
 
-1. **Production Dashboard — built.** Landed 29 August by a parallel chat (`od-production` v1, `/production` v1, commit `6ad2e36`). Its note-vs-procedure checking still depends on the posting decision, item 2. Verify its numbers against the offices the way the hygiene ones were. Since 18 September it serves NET production and a Collected column (od-production v6), proved to the penny against the Annual Production and Income report — write-offs count on the day insurance paid, so past months keep moving as claims pay, exactly as OpenDental reports it.
+**Group 1 — the one decision that unblocks the most**
 
-2. **Settle how procedures get posted** — open since 21 August and now blocking more than one thing. The 5 options are in section 3a and Shad has not chosen. Claims and preauthorizations both wait on it, the Production Dashboard's note checking depends on it, and the Hygiene Dashboard has already found the symptom: 16 appointments in August completed at Downey with nothing posted to the account at all, and another 62 with only exams and x-rays
+1. **Settle how procedures get posted** — open since 21 August, still the single biggest blocker. The 5 options are in §3a; Shad has not chosen. Claims and preauthorizations both wait on it, and the Production Dashboard's note-vs-procedure checking depends on it. The Hygiene Dashboard already found the symptom: 16 appointments in August completed at Downey with nothing posted to the account at all, and another 62 with only exams and x-rays.
 
-3. **Guardian's fee schedule** — the copy we have is a fax. Pages 4 to 8 are scanned images with no text at all, so it cannot be read reliably. Get a real PDF from Guardian's provider portal
-4. **Downey D9988** — named the same as D2740 but is actually an all-ceramic upgrade code
-5. **Maywood D9955a** — named "Whitening Delivery" but never retired or replaced
-6. **Clear the stale Flouridex fees off Maywood M9955** — about 15 insurance schedules at $20, one Denti-Cal at $550, UCR Prior 2022 at $45
-7. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call to combine these
-8. **Session list layman's term** — deliberately skipped. Would cost an extra OpenDental call per patient open
+**Group 2 — needs a design decision before any code gets written**
+
+2. **Hygiene-assessment paper form** (referrals; Bleeding/Plaque Mild-Moderate-Severe; Perio status Healthy-Initial-Early-Moderate-Advanced-Severe; Calculus) — needs Shad's choice between Patient Fields (current-state only, queryable), Exam Sheets (OpenDental's own checkbox forms), or a per-visit note (history, not queryable).
+3. **Consent-form signature storage matching Topaz** (`FROM-CHAT-2026-09-18-B.md`, still sitting at the repo root, not re-read this session) — confirmed the API cannot write a real signature into a SigBox field on any OpenDental version. Down to: a desktop-side agent that saves through OpenDental itself, or accepting a PDF-in-Imaging format instead of true Topaz parity. Shad's call.
+4. **Maria's 3 unscoped tablet asks** — select-all, recording who took the pictures/x-rays, and a prognosis-notes field. None have enough detail yet to build; need a few sentences each from Shad or Maria.
+5. **Should `sync` guess a starting role from OpenDental's own user groups** (`userod.UserGroupNum`) instead of defaulting everyone to front_desk? Offered, not yet answered.
+
+**Group 3 — verification, no new code**
+
+6. **KPI dashboard numbers** — still not walked through against Maria's actual workbook for a settled month. Likeliest spots to need tuning: which exam codes count as New vs Recall, and whether the Adj row matches what her "-Adj" line represents.
+7. **Production Dashboard numbers** — NET production + Collected (od-production v6, since 18 Sep) was proved to the penny against one provider's Annual Production and Income report; worth a second look across providers now that other offices' staff will actually be looking at it through their own logins.
+8. **NH/NE no-RDH-day question** — Maywood 13 August showed 29 NH/NE that look like doctor production in hygiene chairs on a no-RDH day. Handoff doc has said "Shad is reviewing this with Maria, 29 August" for three weeks now — check whether that happened and what was decided.
+
+**Group 4 — standalone, external dependency, no urgency**
+
+9. **Guardian's fee schedule** — the copy on file is a fax with unreadable scanned pages (4–8). Need a real PDF from Guardian's provider portal.
+10. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call on timing.
+11. **Session list layman's term** — deliberately skipped, would cost an extra OpenDental call per patient open.
+
+**Done since the list above was last written, dropped from it:**
+- ~~Denture tiles not appearing~~ — confirmed working as designed (both quadrants of an arch needed for full/immediate dentures); no bug.
+- ~~Dental assistant on a procedure~~ — built: a dropdown (od-plan v15, reading `userod`) on the note editor writes "Assistant: Name" as the note's own first line.
+- ~~OpenDental-username login~~ — built (`od-staff-login`), including a username dropdown mirroring OpenDental's own login screen, self-service password change, and a `/admin/users` screen for running `sync`, resetting a password, or changing someone's role. A real bug on the first live run (a database trigger collision) broke 37 accounts on creation; fixed, cleaned up, and confirmed working by Shad.
+- ~~Password-matching against OpenDental's own table~~ — closed, will not be revisited (see [[dental-os-auth-design]] memory): OpenDental's API has no login-validation endpoint and never exposes a password hash: reusing the username with an app-owned password is the design.
+- ~~Downey D9988 / Maywood D9955a / Maywood M9955~~ — removed from the list at Shad's instruction (19 Sep); not otherwise resolved, just no longer tracked here.
+- ~~Mission Hills / Pico Rivera absent from the KPI page~~ — removed at Shad's instruction; those offices are no longer his company's, not a gap to fix.
+- ~~Nav/home page redesign~~ — done: top bar now shows only Home, everything else lives as a (smaller) home-page tile, "until a menu grouping is decided."
 
 **If the Hygiene Dashboard gets too slow, in this order:**
 
@@ -93,7 +114,8 @@ Together that takes a month read from 7 OpenDental round trips to 5, with the 2 
 
 - A staged fee upload has no lock. Two browsers pushing the same upload would both claim the same rows. Different offices in different tabs is safe and is how it is used
 - A failed row on a staged upload cannot be retried from the review screen. It has to be set back to pending in the database
-- Open question: should NH/NE count days with no RDH rostered? Maywood 13 August shows 29 NH/NE — really doctor production in hygiene chairs on a no-RDH day. Shad is reviewing it with Maria, 29 August; wait for his answer before changing anything
+- The NH/NE no-RDH-day question moved to §3, group 3, item 8 — still open, do not change anything until Shad answers it
+- New as of 19 Sep: nothing keeps `public.users.email` in sync if someone's Supabase Auth email ever changes by another path (dashboard, password-reset flow). Caught once already — Shad's own row had gone stale and fed a wrong answer back to him. Not fixed; a trigger mirroring `auth.users.email` → `public.users.email` on update would close it
 
 ---
 

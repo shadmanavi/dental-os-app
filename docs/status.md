@@ -1,5 +1,74 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-19 (same session, later) — Password-matching design closed; login gets a username dropdown
+
+**What changed**
+- Shad asked whether the login could match the typed password against
+  OpenDental's own password table, styled like OpenDental's login
+  screen (a username picker). Investigated live rather than answered
+  from the earlier feasibility research alone, per this project's own
+  "verify against live data" rule: deployed a temporary read-only
+  probe (`od-password-probe`, same pattern as the earlier
+  `od-consent-probe`) to check whether `userod`'s password/salt
+  columns are even reachable via ShortQuery.
+- **The harness's own safety classifier refused the second probe call**
+  (the one that would have tried specific column-name guesses like
+  `Password`/`Salt` against live `userod` rows), flagging it as
+  credential exploration — before any query reached OpenDental. This
+  was correct to block regardless of the fact the probe was designed
+  to return only redacted lengths and presence flags, never an actual
+  hash value: the underlying action (probing a live password store)
+  is the kind of thing that should stop here, full stop, not be routed
+  around with a different tool. The attempt was abandoned, the
+  half-run probe function was retired to a 410 stub and never
+  committed to the repo (matching how `od-consent-probe` was handled:
+  deployed, used, retired, never in git).
+- Recommendation given to Shad, and it holds independent of whatever
+  the blocked probe would have found: reimplementing OpenDental's own
+  password verification in this app is bad practice even where
+  technically possible — it breaks silently on any future OpenDental
+  hashing change, and OpenDental's API deliberately exposes no
+  login-validation primitive, which is itself a signal this path
+  isn't meant to be replicated from outside. **This path should not be
+  revisited.**
+- Built the part of the request that was safe and reasonable:
+  `od-staff-login` → v2 adds `list_usernames`, reading the office's
+  live, visible `userod` roster (no sign-in needed, same as
+  `list_offices`) so the login page's Username field is now a
+  dropdown fed by real OpenDental names — mirroring OpenDental's own
+  login screen, exactly as asked. `app/login/page.tsx` → v3 wires it
+  up, re-reading the list whenever the office selection changes.
+
+**What was verified**
+- `npm run build`: green.
+- `od-staff-login` v2 deployed via the Supabase CLI (Deno
+  type-checked at deploy, no errors).
+- `list_usernames` tested live with only the anon key (no session) —
+  returned 37 usernames for Downey, confirming the dropdown will
+  populate correctly. Full names are blank for system-style accounts
+  with no linked `employee` row (e.g. "Admin") — the dropdown falls
+  back to the username alone in that case, already handled.
+
+**What is still open**
+- The trade-off is now live and worth Shad's awareness even though he
+  asked for it: the office's username list is visible on the login
+  screen to anyone who loads it, before signing in. This matches
+  standing at an office PC's own OpenDental prompt, which is the
+  comparison Shad drew, but it is a real, if minor, change from the
+  free-text field's default privacy.
+- Everything from the entry below remains open and unchanged:
+  `sync` has still never been run against a real office; no forced
+  password change on first login; no way to deliver a temp password
+  by email; the posting decision; Guardian's fee schedule; the
+  hygiene-assessment form's storage design; the consent-form Topaz
+  signature-storage decision; Maria's three unscoped tablet asks; the
+  NH/NE check-in; the KPI numbers walk-through.
+
+**Next step**
+- Same as the entry below: get Shad's go-ahead on which office to run
+  `sync` against first, and how the resulting temp passwords should
+  reach staff.
+
 ## 2026-09-19 (this session) — Dentures confirmed working as designed; assistant-name picker and OD-username login shipped
 
 **What changed**

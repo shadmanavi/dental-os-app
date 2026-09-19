@@ -1,10 +1,26 @@
 "use client";
 
-// Sign in — v3
+// Sign in — v4
 // Office + OpenDental username + password, against Supabase Auth. On
 // success, sends the user to the home page.
 //
 // Changelog:
+//   v4  An email fallback, because v3 nearly locked out the one
+//       account that predates this whole feature.
+//
+//       Shad's own sign-in, shad.manavi@mydentalmasters.com, was
+//       created before OpenDental-username login existed and is not
+//       something `sync` ever touches — it has no OpenDental username
+//       to compute a synthetic email from. v3's form had no field left
+//       that could carry a raw email at all, which would have locked
+//       him out of the very admin screen this login protects.
+//
+//       A small "Sign in with email instead" link swaps the office
+//       and username fields for a single email field — the v1 form,
+//       unchanged underneath. Anyone provisioned through `sync` still
+//       uses the office + username picker above it; this exists for
+//       accounts that came from somewhere else.
+//
 //   v3  The username field becomes a dropdown, live off OpenDental —
 //       the same shape as OpenDental's own login screen, rather than
 //       a free-text box asking staff to remember exact spelling and
@@ -63,6 +79,11 @@ export default function LoginPage() {
   const [officesError, setOfficesError] = useState("");
   const [usersError, setUsersError] = useState("");
   const [usersLoading, setUsersLoading] = useState(false);
+
+  // The v1 fallback: a raw email, for an account that did not come
+  // from an OpenDental sync.
+  const [useEmail, setUseEmail] = useState(false);
+  const [email, setEmail] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -137,7 +158,11 @@ export default function LoginPage() {
   }, [officeSlug]);
 
   async function signIn() {
-    if (officeSlug === "" || username.trim() === "" || password === "") return;
+    if (useEmail) {
+      if (email.trim() === "" || password === "") return;
+    } else if (officeSlug === "" || username.trim() === "" || password === "") {
+      return;
+    }
 
     setBusy(true);
     setError("");
@@ -145,14 +170,16 @@ export default function LoginPage() {
     try {
       const supabase = createClient();
       const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: internalEmailFor(officeSlug, username),
+        email: useEmail ? email.trim() : internalEmailFor(officeSlug, username),
         password,
       });
 
       if (signInError) {
         setError(
           signInError.message === "Invalid login credentials"
-            ? "That username and password don't match an account at this office."
+            ? useEmail
+              ? "That email and password don't match an account."
+              : "That username and password don't match an account at this office."
             : signInError.message
         );
         setBusy(false);
@@ -169,7 +196,9 @@ export default function LoginPage() {
     }
   }
 
-  const canSubmit = officeSlug !== "" && username.trim() !== "" && password !== "";
+  const canSubmit = useEmail
+    ? email.trim() !== "" && password !== ""
+    : officeSlug !== "" && username.trim() !== "" && password !== "";
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#F7F6F3] px-6 py-14 text-[#1C1C1A]">
@@ -180,53 +209,74 @@ export default function LoginPage() {
         <h1 className="mt-3 text-3xl font-semibold tracking-tight">Sign in</h1>
 
         <div className="mt-8 rounded-xl border border-[#E3E1DB] bg-white p-6">
-          <div>
-            <label htmlFor="office" className="block text-sm font-medium text-[#1C1C1A]">
-              Office
-            </label>
-            <select
-              id="office"
-              value={officeSlug}
-              onChange={(e) => setOfficeSlug(e.target.value)}
-              disabled={offices.length === 0}
-              className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none disabled:bg-[#F7F6F3]"
-            >
-              {offices.length === 0 && <option value="">Loading…</option>}
-              {offices.map((o) => (
-                <option key={o.slug} value={o.slug}>
-                  {o.name}
-                </option>
-              ))}
-            </select>
-            {officesError !== "" && (
-              <p className="mt-1.5 text-xs text-[#A4361F]">{officesError}</p>
-            )}
-          </div>
+          {useEmail ? (
+            <div>
+              <label htmlFor="email" className="block text-sm font-medium text-[#1C1C1A]">
+                Email
+              </label>
+              <input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") signIn();
+                }}
+                autoComplete="username"
+                className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+              />
+            </div>
+          ) : (
+            <>
+              <div>
+                <label htmlFor="office" className="block text-sm font-medium text-[#1C1C1A]">
+                  Office
+                </label>
+                <select
+                  id="office"
+                  value={officeSlug}
+                  onChange={(e) => setOfficeSlug(e.target.value)}
+                  disabled={offices.length === 0}
+                  className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none disabled:bg-[#F7F6F3]"
+                >
+                  {offices.length === 0 && <option value="">Loading…</option>}
+                  {offices.map((o) => (
+                    <option key={o.slug} value={o.slug}>
+                      {o.name}
+                    </option>
+                  ))}
+                </select>
+                {officesError !== "" && (
+                  <p className="mt-1.5 text-xs text-[#A4361F]">{officesError}</p>
+                )}
+              </div>
 
-          <div className="mt-5">
-            <label htmlFor="username" className="block text-sm font-medium text-[#1C1C1A]">
-              Username
-            </label>
-            <select
-              id="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              disabled={usersLoading || users.length === 0}
-              className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none disabled:bg-[#F7F6F3]"
-            >
-              <option value="">
-                {usersLoading ? "Loading…" : "Choose your name"}
-              </option>
-              {users.map((u) => (
-                <option key={u.od_username} value={u.od_username}>
-                  {u.full_name !== "" ? `${u.full_name} (${u.od_username})` : u.od_username}
-                </option>
-              ))}
-            </select>
-            {usersError !== "" && (
-              <p className="mt-1.5 text-xs text-[#A4361F]">{usersError}</p>
-            )}
-          </div>
+              <div className="mt-5">
+                <label htmlFor="username" className="block text-sm font-medium text-[#1C1C1A]">
+                  Username
+                </label>
+                <select
+                  id="username"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  disabled={usersLoading || users.length === 0}
+                  className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none disabled:bg-[#F7F6F3]"
+                >
+                  <option value="">
+                    {usersLoading ? "Loading…" : "Choose your name"}
+                  </option>
+                  {users.map((u) => (
+                    <option key={u.od_username} value={u.od_username}>
+                      {u.full_name !== "" ? `${u.full_name} (${u.od_username})` : u.od_username}
+                    </option>
+                  ))}
+                </select>
+                {usersError !== "" && (
+                  <p className="mt-1.5 text-xs text-[#A4361F]">{usersError}</p>
+                )}
+              </div>
+            </>
+          )}
 
           <div className="mt-5">
             <label
@@ -259,6 +309,17 @@ export default function LoginPage() {
             className="mt-6 w-full rounded-lg bg-[#0F6E56] px-6 py-2.5 text-[15px] font-medium text-white hover:bg-[#0C5A46] focus:ring-2 focus:ring-[#0F6E56]/30 focus:outline-none disabled:cursor-not-allowed disabled:bg-[#D8D6CF] disabled:text-[#8F8E87]"
           >
             {busy ? "Signing in…" : "Sign in"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setUseEmail((prev) => !prev);
+              setError("");
+            }}
+            className="mt-4 w-full text-center text-xs text-[#5C5C57] underline decoration-dotted underline-offset-2 hover:text-[#1C1C1A]"
+          >
+            {useEmail ? "Sign in with office and username instead" : "Sign in with email instead"}
           </button>
         </div>
       </div>

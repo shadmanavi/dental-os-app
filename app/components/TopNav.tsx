@@ -1,6 +1,6 @@
 "use client";
 
-// Top navigation — v5
+// Top navigation — v6
 // The one navigation bar for Dental OS. Rendered once in the root layout, so
 // every page gets it without owning a header of its own.
 //
@@ -20,6 +20,22 @@
 //   v1  Sections, sub-nav, session email, sign out.
 //   v2  Charting is built, so its section is live rather than greyed.
 //   v3  Adds the build badge.
+//   v6  Change password, and an Admin section.
+//
+//       Change password sits beside Sign out because that is where a
+//       person looks for it, not because it belongs to navigation.
+//       It exists now because staff signing in with an OpenDental-
+//       username account (od-staff-login) start on a one-time
+//       temporary password with no other way to replace it.
+//       supabase.auth.updateUser() needs nothing but the current
+//       session, so this asks for the new password twice and nothing
+//       else — no Edge Function, no re-entering the old one.
+//
+//       Admin links to /admin/users, gated inside the page itself
+//       (is_office_admin) rather than here, the way every other
+//       permission check in this app lives beside the data it
+//       protects rather than in the nav that happens to link to it.
+//
 //   v5  The KPI section — the office KPI workbook, read live.
 //   v4  The Production section.
 //
@@ -126,6 +142,11 @@ const SECTIONS: Section[] = [
     label: "KPI",
     ready: true,
   },
+  {
+    href: "/admin/users",
+    label: "Admin",
+    ready: true,
+  },
 ];
 
 function isActive(pathname: string, href: string): boolean {
@@ -139,6 +160,13 @@ export default function TopNav() {
 
   const [email, setEmail] = useState("");
   const [signingOut, setSigningOut] = useState(false);
+
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordDone, setPasswordDone] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -168,6 +196,47 @@ export default function TopNav() {
       router.replace("/login");
     } catch {
       setSigningOut(false);
+    }
+  }
+
+  function openChangePassword() {
+    setNewPassword("");
+    setConfirmPassword("");
+    setPasswordError("");
+    setPasswordDone(false);
+    setChangingPassword(true);
+  }
+
+  async function savePassword() {
+    if (newPassword.length < 8) {
+      setPasswordError("Use at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("Those two don't match.");
+      return;
+    }
+
+    setPasswordSaving(true);
+    setPasswordError("");
+
+    try {
+      const supabase = createClient();
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+
+      if (error) {
+        setPasswordError(error.message);
+        setPasswordSaving(false);
+        return;
+      }
+
+      setPasswordDone(true);
+      setPasswordSaving(false);
+    } catch (caught) {
+      setPasswordError(
+        caught instanceof Error ? caught.message : "Something went wrong."
+      );
+      setPasswordSaving(false);
     }
   }
 
@@ -227,6 +296,14 @@ export default function TopNav() {
           )}
           <button
             type="button"
+            onClick={openChangePassword}
+            className="rounded text-sm font-medium whitespace-nowrap text-[#5C5C57] underline-offset-2 hover:text-[#1C1C1A] hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+          >
+            Change password
+          </button>
+
+          <button
+            type="button"
             onClick={signOut}
             disabled={signingOut}
             className="rounded text-sm font-medium whitespace-nowrap text-[#0F6E56] underline-offset-2 hover:underline focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none disabled:cursor-not-allowed disabled:text-[#A5A49D]"
@@ -266,6 +343,86 @@ export default function TopNav() {
                 </Link>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {changingPassword && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-sm overflow-hidden rounded-2xl border border-[#E3E1DB] bg-white">
+            <div className="border-b border-[#E3E1DB] px-5 py-3">
+              <h2 className="text-[13px] font-bold tracking-[0.06em] text-[#1C1C1A] uppercase">
+                Change password
+              </h2>
+            </div>
+
+            <div className="p-5">
+              {passwordDone ? (
+                <>
+                  <p className="text-sm text-[#1C1C1A]">
+                    Password changed. Use it the next time you sign in.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setChangingPassword(false)}
+                    className="mt-4 w-full rounded-lg bg-[#0F6E56] px-4 py-2 text-sm font-medium text-white hover:bg-[#0C5A46]"
+                  >
+                    Done
+                  </button>
+                </>
+              ) : (
+                <>
+                  <label className="block text-sm font-medium text-[#1C1C1A]">
+                    New password
+                    <input
+                      type="password"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      autoComplete="new-password"
+                      autoFocus
+                      className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+                    />
+                  </label>
+
+                  <label className="mt-4 block text-sm font-medium text-[#1C1C1A]">
+                    Confirm new password
+                    <input
+                      type="password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") savePassword();
+                      }}
+                      autoComplete="new-password"
+                      className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+                    />
+                  </label>
+
+                  {passwordError !== "" && (
+                    <p className="mt-3 text-sm text-[#A4361F]">{passwordError}</p>
+                  )}
+
+                  <div className="mt-5 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={savePassword}
+                      disabled={passwordSaving}
+                      className="flex-1 rounded-lg bg-[#0F6E56] px-4 py-2 text-sm font-medium text-white hover:bg-[#0C5A46] disabled:cursor-not-allowed disabled:bg-[#D8D6CF]"
+                    >
+                      {passwordSaving ? "Saving…" : "Save"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setChangingPassword(false)}
+                      disabled={passwordSaving}
+                      className="rounded-lg border border-[#D8D6CF] px-4 py-2 text-sm text-[#1C1C1A] hover:bg-[#F7F6F3]"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}

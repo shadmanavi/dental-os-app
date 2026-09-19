@@ -1,10 +1,21 @@
 "use client";
 
-// Chairside charting — v22
+// Chairside charting — v23
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v23 The Assistant dropdown's own failure is no longer invisible.
+//
+//       Shad opened a note and found the dropdown empty but for
+//       "— none —", with nothing on screen saying why. The fetch's
+//       catch block discarded the error instead of keeping it — an
+//       empty roster and a failed read looked identical, and a real
+//       office never actually has zero employees. Now the failure
+//       message shows beside the dropdown when the list comes back
+//       empty, so the next time this happens the actual OpenDental
+//       error is what's on screen, not silence.
+//
 //   v22 The note editor gets an Assistant picker.
 //
 //       procedurelog has no field for who assisted, and the "user" a
@@ -1749,6 +1760,11 @@ export default function ChartPage() {
   // The office's employee roster, for the note editor's Assistant
   // picker. Read once per office, alongside presenters.
   const [assistants, setAssistants] = useState<Assistant[]>([]);
+  // Surfaced rather than swallowed: an empty dropdown with no error
+  // looks identical to "this office has no employees," which is
+  // never actually true, so a silent failure here is indistinguishable
+  // from nothing being wrong.
+  const [assistantsError, setAssistantsError] = useState("");
 
   // Procedures written during this session, so a row can say so without
   // needing a list of its own.
@@ -2246,9 +2262,16 @@ export default function ChartPage() {
 
       try {
         const data = await callPlan({ action: "assistants" });
-        if (active) setAssistants((data.assistants ?? []) as Assistant[]);
-      } catch {
-        // A missing roster falls back to free text in the note editor.
+        if (active) {
+          setAssistants((data.assistants ?? []) as Assistant[]);
+          setAssistantsError("");
+        }
+      } catch (caught) {
+        if (active) {
+          setAssistantsError(
+            caught instanceof Error ? caught.message : "Couldn't read the employee list.",
+          );
+        }
       }
 
       try {
@@ -5242,6 +5265,11 @@ export default function ChartPage() {
                                 </option>
                               )}
                           </select>
+                          {assistantsError !== "" && assistants.length === 0 && (
+                            <span className="text-[#E4674F]">
+                              Couldn&apos;t load the employee list: {assistantsError}
+                            </span>
+                          )}
                         </label>
                         <textarea
                           autoFocus

@@ -1,5 +1,35 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-19 (same session, later) — Assistant dropdown was empty because employee is unused at Downey; switched to userod
+
+**What changed**
+- Shad reported the Assistant dropdown empty (just "— none —"). First
+  pass added error surfacing (chart v23) rather than guessing at a
+  fix, on the theory a silent failure was hiding the real cause.
+- Second report after that shipped: still empty, still no error text.
+  That absence of an error is itself the diagnosis — the query
+  succeeded, `employee` genuinely returned zero rows. That table is
+  OpenDental's separate payroll/HR module; this office has never used
+  it, which is common. `assistants` (od-plan → v15) now reads
+  `userod` instead — the same table `od-staff-login`'s username list
+  already proved has real names (37, at this office) — joined to
+  `employee` for a nicer full name on the rows where one happens to
+  exist. `app/chart/page.tsx` → v24 follows the response shape's field
+  rename (`employee_num` → `id`, since it's a UserNum now).
+
+**What was verified**
+- `npm run build`: green. `od-plan` v15 deployed.
+- Not yet re-verified live — Shad to reopen a note and check the
+  dropdown now populates.
+
+**What is still open**
+- Confirm the dropdown actually shows names now.
+- Everything else in this file is unchanged.
+
+**Next step**
+- Shad: reopen a procedure's Notes editor and check the Assistant
+  dropdown.
+
 ## 2026-09-19 (same session, one more) — Cleanup button wasn't showing for the failure Shad actually hit
 
 **What changed**

@@ -6,11 +6,12 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 13
+// Version: 14
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
 //   { "office":"downey", "action":"presenters" }
+//   { "office":"downey", "action":"assistants" }
 //   { "office":"downey", "action":"remove", "pat_num":17, "od_id":1081946 }
 //   { "office":"downey", "action":"set_priority", "pat_num":17,
 //     "od_id":1081990, "priority":153 }
@@ -25,6 +26,19 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v14 assistants — the office's own employee roster, for a dropdown.
+//
+//       procedurelog has no field for who assisted; the "user" a
+//       write is stamped with is whoever is signed in to OpenDental,
+//       not a chosen name. So the assistant's name is written as the
+//       note's own first line ("Assistant: Joe Martinez"), the way
+//       v13's Notes feature already lets the chart page read and
+//       write. This action gives the chart page a name to pick from
+//       instead of free text: OpenDental's own employee table
+//       (payroll/scheduling roster), not userod (system logins) —
+//       an assistant does not need her own OpenDental login to be
+//       named here.
 //
 //   v13 Procedure notes, readable and writable.
 //
@@ -564,6 +578,7 @@ Deno.serve(async (req: Request) => {
     "plan",
     "lists",
     "presenters",
+    "assistants",
     "remove",
     "set_priority",
     "set_fee",
@@ -692,6 +707,37 @@ Deno.serve(async (req: Request) => {
         user_num: Number(r.UserNum ?? 0),
         name: String(r.UserName ?? "").trim(),
       })).filter((u) => u.user_num > 0 && u.name !== ""),
+    });
+  }
+
+  // ===================================================================
+  // assistants — the office's employee roster, for the tablet's
+  // "Assistant" picker. employee, not userod: an assistant does not
+  // need her own OpenDental login to have been the one in the chair.
+  // ===================================================================
+  if (action === "assistants") {
+    const { rows, failed } = await shortQueryAll(
+      auth,
+      `SELECT EmployeeNum, LName, FName FROM employee ` +
+        `WHERE IsHidden = 0 ORDER BY LName, FName`,
+    );
+
+    if (failed !== null) {
+      return json({
+        ok: false,
+        error: "OpenDental could not read this office's employees.",
+        detail: failed.body,
+      }, 502);
+    }
+
+    return json({
+      ok: true,
+      office: officeRow.name,
+      count: rows.length,
+      assistants: rows.map((r) => ({
+        employee_num: Number(r.EmployeeNum ?? 0),
+        name: `${String(r.FName ?? "").trim()} ${String(r.LName ?? "").trim()}`.trim(),
+      })).filter((e) => e.employee_num > 0 && e.name !== ""),
     });
   }
 

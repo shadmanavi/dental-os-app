@@ -1,10 +1,25 @@
 "use client";
 
-// Chairside charting — v21
+// Chairside charting — v22
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v22 The note editor gets an Assistant picker.
+//
+//       procedurelog has no field for who assisted, and the "user" a
+//       write is stamped with is whoever is signed in to OpenDental —
+//       never a name typed from the tablet. The assistant's name is
+//       instead written as the note's own first line ("Assistant: Joe
+//       Martinez"), so it reads in OpenDental like any other note.
+//       The editor splits that line out into its own dropdown, fed by
+//       od-plan v14's `assistants` action (OpenDental's employee
+//       roster — not userod, so an assistant needs no OpenDental
+//       login of her own to be named here), and recombines it with
+//       the rest of the note on save. A name already on a note that
+//       has since left the roster still shows, so saving can never
+//       silently drop it.
+//
 //   v21 Provider names, and a note on every planned procedure.
 //
 //       Providers read as names, not office codes: "GP - CD" becomes
@@ -1101,6 +1116,27 @@ function nameOf(row: { layman?: string; descript: string }): string {
   return layman === "" ? row.descript : layman;
 }
 
+// The assistant's name is stored as the note's own first line —
+// "Assistant: Joe Martinez" — so it survives in OpenDental like any
+// other note, readable there even outside this app. These two
+// functions are the one place that line is written and read, so the
+// editor never has to reason about it twice.
+const ASSISTANT_LINE = /^Assistant: (.*)(?:\r?\n|$)/;
+
+function splitAssistantLine(note: string): { assistant: string; rest: string } {
+  const match = note.match(ASSISTANT_LINE);
+  if (!match) return { assistant: "", rest: note };
+  return {
+    assistant: match[1].trim(),
+    rest: note.slice(match[0].length),
+  };
+}
+
+function combineAssistantLine(assistant: string, rest: string): string {
+  if (assistant === "") return rest;
+  return rest === "" ? `Assistant: ${assistant}` : `Assistant: ${assistant}\n${rest}`;
+}
+
 // A planned procedure as od-plan returns it. Every money field came
 // from OpenDental; none of it is worked out here.
 type PlanRow = {
@@ -1230,6 +1266,14 @@ type OdWriteResult = {
 // An OpenDental user, for naming who presented the plan.
 type Presenter = {
   user_num: number;
+  name: string;
+};
+
+// od-plan v14's "assistants" action: the office's employee roster
+// (not userod), because an assistant does not need her own OpenDental
+// login to be named on a procedure note.
+type Assistant = {
+  employee_num: number;
   name: string;
 };
 
@@ -1702,6 +1746,10 @@ export default function ChartPage() {
   const [presenters, setPresenters] = useState<Presenter[]>([]);
   const [presenterNum, setPresenterNum] = useState<number | null>(null);
 
+  // The office's employee roster, for the note editor's Assistant
+  // picker. Read once per office, alongside presenters.
+  const [assistants, setAssistants] = useState<Assistant[]>([]);
+
   // Procedures written during this session, so a row can say so without
   // needing a list of its own.
   const [sessionIds, setSessionIds] = useState<Set<number>>(new Set());
@@ -1714,6 +1762,10 @@ export default function ChartPage() {
   // a truncated note and saving it back would destroy the rest.
   const [noteEditor, setNoteEditor] = useState<{
     od_id: number;
+    // assistant is split out of text: text is everything AFTER the
+    // "Assistant: Name" line, never including it. The two are
+    // recombined only when saving.
+    assistant: string;
     text: string;
     loading: boolean;
     saving: boolean;
@@ -2180,6 +2232,7 @@ export default function ChartPage() {
 
     let active = true;
     setPresenters([]);
+    setAssistants([]);
     setProviders([]);
 
     (async () => {
@@ -2189,6 +2242,13 @@ export default function ChartPage() {
       } catch {
         // A missing presenter list is not worth blocking the chair
         // over. The plan files without a name on it.
+      }
+
+      try {
+        const data = await callPlan({ action: "assistants" });
+        if (active) setAssistants((data.assistants ?? []) as Assistant[]);
+      } catch {
+        // A missing roster falls back to free text in the note editor.
       }
 
       try {
@@ -2390,7 +2450,7 @@ export default function ChartPage() {
     if (patient === null) return;
 
     setNoteEditor({
-      od_id: row.od_id, text: "", loading: true, saving: false, error: "",
+      od_id: row.od_id, assistant: "", text: "", loading: true, saving: false, error: "",
     });
 
     try {
@@ -2400,9 +2460,10 @@ export default function ChartPage() {
         od_id: row.od_id,
       });
       const note = String((data as { note?: unknown }).note ?? "");
+      const { assistant, rest } = splitAssistantLine(note);
       setNoteEditor((prev) =>
         prev !== null && prev.od_id === row.od_id
-          ? { ...prev, text: note, loading: false }
+          ? { ...prev, assistant, text: rest, loading: false }
           : prev
       );
     } catch (caught) {
@@ -2425,7 +2486,8 @@ export default function ChartPage() {
   async function saveNote() {
     if (patient === null || noteEditor === null || noteEditor.saving) return;
 
-    const { od_id, text } = noteEditor;
+    const { od_id, assistant, text } = noteEditor;
+    const combined = combineAssistantLine(assistant, text);
     setNoteEditor({ ...noteEditor, saving: true, error: "" });
 
     try {
@@ -2433,11 +2495,11 @@ export default function ChartPage() {
         action: "set_note",
         pat_num: patient.PatNum,
         od_id,
-        note: text,
+        note: combined,
       });
       setPlanRows((previous) =>
         previous.map((r) =>
-          r.od_id === od_id ? { ...r, note_preview: text.slice(0, 120) } : r
+          r.od_id === od_id ? { ...r, note_preview: combined.slice(0, 120) } : r
         )
       );
       setNoteEditor(null);
@@ -5147,6 +5209,40 @@ export default function ChartPage() {
                       </p>
                     ) : (
                       <>
+                        {/* Written as the note's own first line, so it
+                            reads in OpenDental too — not a field of
+                            ours sitting beside the real note. */}
+                        <label className="mb-1.5 flex items-center gap-2 text-xs text-[#8AA6AB]">
+                          Assistant
+                          <select
+                            value={noteEditor.assistant}
+                            onChange={(e) =>
+                              setNoteEditor((prev) =>
+                                prev !== null && prev.od_id === row.od_id
+                                  ? { ...prev, assistant: e.target.value }
+                                  : prev
+                              )}
+                            className="rounded-lg border border-[#2C4E54] bg-[#0B1719] px-2 py-1 text-xs text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none"
+                          >
+                            <option value="">— none —</option>
+                            {assistants.map((a) => (
+                              <option key={a.employee_num} value={a.name}>
+                                {a.name}
+                              </option>
+                            ))}
+                            {/* An assistant already on the note who has
+                                since left the roster (or the roster
+                                failed to load) still shows, so saving
+                                never silently drops a name typed
+                                earlier. */}
+                            {noteEditor.assistant !== "" &&
+                              !assistants.some((a) => a.name === noteEditor.assistant) && (
+                                <option value={noteEditor.assistant}>
+                                  {noteEditor.assistant}
+                                </option>
+                              )}
+                          </select>
+                        </label>
                         <textarea
                           autoFocus
                           value={noteEditor.text}

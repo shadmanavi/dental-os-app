@@ -1,5 +1,82 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-19 (this session) — Dentures confirmed working as designed; assistant-name picker and OD-username login shipped
+
+**What changed**
+- **Dentures, resolved, no code change**: Shad confirmed selecting
+  both upper (or both lower) quadrants brings up the full/immediate
+  denture tiles — working as designed. The earlier investigation's
+  hypothesis about a missing Existing-bucket category was not the
+  cause; nothing needed building.
+- **Assistant name on a procedure** — `od-plan/index.ts` → v14 (new
+  `assistants` action, reading OpenDental's `employee` table, not
+  `userod`, since an assistant needs no OpenDental login of her own)
+  and `app/chart/page.tsx` → v22 (the note editor's textarea grows an
+  Assistant dropdown above it). Picking a name writes "Assistant: Joe
+  Martinez" as the note's own first line and splits it back out on
+  open (`splitAssistantLine`/`combineAssistantLine`), so it reads in
+  OpenDental like any other note and the free-text Notes feature from
+  yesterday never has to know it exists. A name already on a note
+  whose employee has since left the roster still shows rather than
+  silently disappearing.
+- **OpenDental-username login** — new `supabase/functions/od-staff-login/index.ts`
+  (v1) and `supabase/migrations/20260919120000_023_od_staff_logins.sql`,
+  plus `app/login/page.tsx` → v2. Staff sign in with the username
+  OpenDental already knows them by instead of an invented email.
+  `sync` (admin-only, gated on `is_office_admin` via `supabase.rpc`,
+  one office at a time) reads `userod` joined to `employee` for a
+  display name, provisions a Supabase Auth account per visible user
+  — synthetic email `<office_slug>.<username>@dental-os.internal`,
+  a one-time random 16-character temp password, `front_desk` role by
+  default (least privilege; an admin promotes from there) — and
+  deprovisions (bans, does not delete) anyone OpenDental has since
+  hidden. `reset_password` issues a fresh temp password for one
+  existing login. `list_offices` needs no session at all — the login
+  page's office picker calls it before anyone is signed in. The
+  synthetic email is computed identically in two places (the Edge
+  Function and the login page) with no round trip between them; the
+  comment in both says so, because letting the two drift apart would
+  silently lock out every provisioned account.
+
+**What was verified**
+- `npm run build`: green after both features.
+- Both Edge Functions deployed via the Supabase CLI, which
+  type-checks under Deno at deploy time — both deployed without
+  error, the only type-checking available since `deno` isn't
+  installed locally.
+- `od-staff-login`'s `list_offices` action tested live with a plain
+  curl carrying only the project's anon key (no user session) —
+  correctly returned both active offices. The same anon-key-only
+  request against `sync` was correctly refused ("Invalid or expired
+  session."), confirming the admin gate holds before any real
+  provisioning is attempted.
+- Migration 023 applied directly via the Supabase MCP's
+  `apply_migration` (tracked, not a raw `execute_sql` DDL call).
+
+**What is still open**
+- **`sync` has never been run against a real office.** Deliberately —
+  it creates real Supabase Auth accounts with real temporary
+  passwords for real staff, and that first run should be a decision,
+  not a side effect of testing. Whoever runs it needs a way to see
+  the `provisioned` list's `{od_username, temp_password}` pairs and
+  hand them out; nothing currently displays that response anywhere
+  in the app (no admin screen calls `sync` yet — it has to be invoked
+  directly for now).
+- No forced password change on first login, and no way to deliver a
+  temp password by email (the synthetic domain isn't deliverable) —
+  both flagged as known gaps in the handoff doc, not started.
+- Everything else open from the entry two below this one is
+  unchanged: the posting decision, Guardian's fee schedule, the
+  hygiene-assessment form's storage design, the consent-form Topaz
+  signature-storage decision, Maria's three unscoped tablet asks
+  (select-all, who took the pictures/x-rays, prognosis notes), the
+  NH/NE no-RDH-day check-in, and the KPI numbers walk-through.
+
+**Next step**
+- Get Shad's go-ahead on which office to run `sync` against first,
+  and how the resulting temp passwords should reach staff (read off
+  the function's response directly, for now — no UI for it yet).
+
 ## 2026-09-18 (this session) — Full-repo review now that parallel sessions are closed; two corrections below
 
 **What changed**

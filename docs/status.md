@@ -1,5 +1,82 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-18 (this session) — Full-repo review now that parallel sessions are closed; two corrections below
+
+**What changed**
+- No application code touched. Cleaned `CLAUDE.md`'s markdown — the
+  session-protocol section had chat-export escaping (`\##`, `&#x20;`,
+  `\*\*`) throughout; content unchanged, only the escaping removed —
+  and committed it (it had sat uncommitted since another session
+  added it).
+- This note, correcting a self-contradiction below that's a direct
+  side effect of several sessions writing this file concurrently
+  without seeing each other's commits: the **20:56 entry** casts doubt
+  on whether `cb4dc1d` ("v7") ever reached `main` ("that commit is not
+  on main as of this entry"), while the **20:55 entry**'s own conflict
+  note says the opposite ("main's history shows it shipped"). For the
+  record, checked directly against `git log` with all sessions closed:
+  **`cb4dc1d` is on `main`**, pushed the same session as `0aaab6f` /
+  `b11a923` (the KPI dashboard) and followed by `043e6f0` — see the
+  entry two below this one for what it actually contains (od-chart
+  v17, od-plan v13, od-production v7, od-hygiene v16, od-kpi v2, chart
+  v21: provider display names and the procedure Notes feature). The
+  20:56 and 20:55 entries are left exactly as written, per this file's
+  own append-only rule; this note is the correction to read alongside
+  them.
+
+**What was verified**
+- `git status -sb` against `origin/main`: even, no divergence, only
+  `CLAUDE.md` locally modified (now committed) and four untracked
+  files (`.claude/`, `FROM-CHAT-2026-09-18-B.md`, `from-chat.md`, plus
+  `.claude/launch.json` inside the first — see below).
+- `npm run build`: green.
+- The three Edge Functions whose Supabase version counter reads ahead
+  of what's committed — `od-chart` (platform v19, header says v17),
+  `od-plan` (platform v14, header v13), `od-hygiene` (platform v18,
+  header v16) — were each pulled live via `get_edge_function` and
+  diffed byte-for-byte against the corresponding file in `main`. All
+  three are **identical**; the higher platform counters are from
+  redundant redeploys of unchanged code, not undocumented drift. No
+  action needed.
+- `od-consent-probe`, an Edge Function not in this repo, is genuinely
+  retired as an earlier entry claims — pulled its live source, it is a
+  4-line stub returning HTTP 410. Showing "ACTIVE" on the Supabase
+  dashboard just means it's deployed and answering, not that it does
+  anything.
+- Secrets check: `_session-sync.secrets.txt` is gitignored and has
+  never been committed (`git log --all` on the path returns nothing).
+- `open17.json` (repo root) **is** tracked, committed `cc438e4` on 13
+  Aug 2026. It's a saved OpenDental API response — patient 17, the
+  project's own standing test fixture (Shad's own chart, used
+  throughout the codebase's comments for exactly this purpose), so
+  this isn't a stranger's data. Still, it is a live API dump with a
+  real birthdate sitting in source control, and the same habit could
+  commit a different, non-consenting patient's PHI next time. Flagging
+  rather than acting — deleting it doesn't remove it from git history,
+  and that's Shad's call, not a session's.
+- No debug leftovers: `git grep` across `app/` and
+  `supabase/functions/` for `console.log`/`console.debug` and for
+  TODO/FIXME/XXX found nothing.
+
+**What is still open**
+- `open17.json`: Shad to decide whether it's fine as-is (his own
+  fixture data) or should be scrubbed from history.
+- `.claude/launch.json` (this session's dev-server config for the
+  Browser-pane preview) is untracked. Harmless and not secret; worth
+  a decision on whether to commit it for the next session's
+  convenience or leave it local.
+- Everything else already open in the entries below is unchanged by
+  this review: the three decisions awaiting Shad in the entry two rows
+  down (dentures Existing-bucket category, assistant-name approach,
+  hygiene-assessment storage), the KPI-numbers-vs-workbook check, and
+  the consent-forms thread (`FROM-CHAT-2026-09-18-B.md`, untouched —
+  this session still hasn't read it as working input, only confirmed
+  it's not stale).
+
+**Next step**
+- Get Shad's read on `open17.json` and whether to commit
+  `.claude/launch.json`; otherwise unchanged from the entry two below.
+
 ## 2026-09-18 (this session) — KPI dashboard shipped; provider display names and procedure notes across the app
 
 **What changed**

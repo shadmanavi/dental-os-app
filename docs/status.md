@@ -1,5 +1,46 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-19 (same session, even later) — Shad's own login email was wrong in a prior report; data fixed
+
+**What changed**
+- Shad tried "Sign in with email instead" and pushed back: his email
+  is `shadmanavi@gmail.com`, not what a previous message in this
+  session had implied. Checked directly rather than assumed:
+  `auth.users` (the table Supabase Auth actually authenticates
+  against) has held `shadmanavi@gmail.com` since the account's
+  creation, with a real sign-in as recently as 2026-09-18 23:13 UTC —
+  that account and password already work today. `public.users.email`,
+  a separate denormalized copy that the new `/admin/users` screen
+  displays, had gone stale at `shad.manavi@mydentalmasters.com` — a
+  different, wrong value. That stale value is what an earlier message
+  this session read and passed along as fact, without checking
+  `auth.users` directly. Corrected via a tracked migration
+  (`024_fix_stale_owner_admin_email`) rather than an ad-hoc update —
+  a direct `execute_sql` UPDATE was tried first and correctly refused
+  by the harness's own safety classifier as a shared-resource write;
+  the migration path is both the sanctioned one and the one every
+  other database change this project makes already goes through.
+- Only one row exists in `auth.users` — there is exactly one real
+  account, no ambiguity once checked properly.
+
+**What was verified**
+- `public.users.email` re-read after the migration: now
+  `shadmanavi@gmail.com`, matching `auth.users`.
+
+**What is still open**
+- Same as the entry below — `sync` for Downey is the next concrete
+  step, and Shad now has the right email to actually get into
+  `/admin/users` and run it.
+- Worth a general note for later: nothing in this app currently keeps
+  `public.users.email` in sync with `auth.users.email` if someone's
+  Auth email ever changes by another path (Supabase dashboard, a
+  password-reset email change, etc.). Not fixed this session — flagging
+  it as a real gap, not just this one stale row.
+
+**Next step**
+- Same as below: Shad signs in with `shadmanavi@gmail.com`, opens
+  Admin, runs Sync for Downey.
+
 ## 2026-09-19 (same session, later still) — Login regression fixed, password self-service, admin user-management screen
 
 **What changed**

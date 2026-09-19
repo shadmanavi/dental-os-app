@@ -8,12 +8,34 @@
 // back to the OpenDental user it came from).
 //
 // Deploy path: supabase/functions/od-staff-login/index.ts
-// Version: 1
+// Version: 2
 //
 // Actions:
 //   { "action":"list_offices" }
+//   { "office":"downey", "action":"list_usernames" }
 //   { "office":"downey", "action":"sync" }
 //   { "office":"downey", "action":"reset_password", "od_username":"cduong" }
+//
+// ---------------------------------------------------------------------
+// Changelog
+//
+//   v2  list_usernames — a dropdown of names, the way OpenDental's own
+//       login screen shows one, instead of a free-text field asking
+//       staff to remember exact spelling and case. Reads the live
+//       OpenDental roster directly (visible IsHidden=0 rows), not
+//       this app's own provisioning ledger, so it always matches what
+//       OpenDental itself would show today — including someone hired
+//       since the last sync, whose name appears here but whose sign-in
+//       will fail with the ordinary "doesn't match" message until an
+//       admin runs sync for them.
+//
+//       No sign-in exists yet when this is called, same as
+//       list_offices, and for the same reason it asks nothing of the
+//       caller: mirroring OpenDental's own login screen means the
+//       roster is visible before anyone signs in, exactly as it would
+//       be standing at an office PC's own OpenDental prompt. That is
+//       a deliberate trade against the free-text alternative, not an
+//       oversight.
 //
 // ---------------------------------------------------------------------
 // Why a synthetic email, and why the password can't come from OpenDental
@@ -220,6 +242,68 @@ Deno.serve(async (req: Request) => {
     }
 
     return json({ ok: true, offices: data ?? [] });
+  }
+
+  // ===================================================================
+  // list_usernames — the login page's own dropdown, live off
+  // OpenDental. No sign-in exists yet here either; see the changelog
+  // entry above for why that is a deliberate choice, not an oversight.
+  // ===================================================================
+  if (action === "list_usernames") {
+    const officeSlug = (body.office ?? "").toLowerCase().trim();
+    if (officeSlug === "") {
+      return json({ ok: false, error: "Provide office." }, 400);
+    }
+
+    const { data: officeRow, error: officeError } = await serviceRole
+      .from("offices")
+      .select("id, slug, opendental_customer_key_name, is_active")
+      .eq("slug", officeSlug)
+      .maybeSingle();
+
+    if (officeError) {
+      return json({ ok: false, error: `Office lookup failed: ${officeError.message}` }, 500);
+    }
+    if (!officeRow || officeRow.is_active !== true) {
+      return json({ ok: false, error: "That office was not found or is inactive." }, 404);
+    }
+
+    const secretName = officeRow.opendental_customer_key_name ?? "";
+    if (!ALLOWED_SECRET_NAMES.has(secretName)) {
+      return json({ ok: false, error: "This office has no recognized OpenDental key." }, 500);
+    }
+
+    const developerKey = Deno.env.get("OD_DEVELOPER_KEY");
+    const customerKey = Deno.env.get(secretName);
+    if (!developerKey || !customerKey) {
+      return json({ ok: false, error: "Missing Edge Function secrets." }, 500);
+    }
+
+    const { rows, failed } = await shortQueryAll(
+      `ODFHIR ${developerKey}/${customerKey}`,
+      `SELECT u.UserName, ` +
+        `TRIM(CONCAT(COALESCE(e.FName, ''), ' ', COALESCE(e.LName, ''))) AS FullName ` +
+        `FROM userod u LEFT JOIN employee e ON e.EmployeeNum = u.EmployeeNum ` +
+        `WHERE u.IsHidden = 0 ORDER BY u.UserName`,
+    );
+
+    if (failed !== null) {
+      return json({
+        ok: false,
+        error: "OpenDental could not list its users.",
+        detail: failed.body,
+      }, 502);
+    }
+
+    return json({
+      ok: true,
+      users: rows
+        .map((r) => ({
+          od_username: String(r.UserName ?? "").trim(),
+          full_name: String(r.FullName ?? "").trim(),
+        }))
+        .filter((u) => u.od_username !== ""),
+    });
   }
 
   // ---- Every other action requires a signed-in office admin. ----

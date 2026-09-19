@@ -1270,6 +1270,16 @@ type PendingAction =
   | { kind: "dx"; def_num: number; label: string }
   | { kind: "delete" };
 
+// One row of od-consent's list_forms response. field says which single
+// text field (if any) the office's own copy of that form carries -
+// some consent forms have none at all, and it is not the same field
+// from office to office even for a form with the same name.
+type ConsentForm = {
+  sheet_def_num: number;
+  description: string;
+  field: "toothNum" | "misc" | null;
+};
+
 // What a write into OpenDental came back with. Passed through from the
 // Edge Function untouched — honoured is false when OpenDental took the
 // call and kept its own value, which it has done on four separate
@@ -1686,6 +1696,23 @@ export default function ChartPage() {
   // The bulk action awaiting confirmation, and whether it is running.
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
 
+  // The consent-form list for the ticked procedures, and which one is
+  // picked. od-consent computes a default from the procedures' own
+  // chart_tiles category, matched against each form's OpenDental
+  // Description - a form only becomes the default once it is renamed to
+  // read the same as that category, and nothing here decides the rename.
+  const [consentPicker, setConsentPicker] = useState<{
+    procCodes: string[];
+    toothCandidates: string[];
+    language: "en" | "es";
+    loading: boolean;
+    error: string;
+    forms: ConsentForm[];
+    targetCategory: string | null;
+    chosenSheetDefNum: number | null;
+    toothValue: string;
+  } | null>(null);
+
   // Taking a payment. The amount is held as typed rather than as a
   // number, so a half-entered "12." does not become 12 under the
   // coordinator's fingers while she is still typing.
@@ -1950,6 +1977,38 @@ export default function ChartPage() {
     async (payload: Record<string, unknown>) => {
       const supabase = createClient();
       const { data, error } = await supabase.functions.invoke("od-plan", {
+        body: { office: officeSlug, ...payload },
+      });
+
+      if (error) {
+        const ctx = (error as { context?: Response }).context;
+        if (ctx && typeof ctx.json === "function") {
+          try {
+            const parsed = await ctx.json();
+            throw new Error(describeFailure(parsed));
+          } catch (inner) {
+            if (inner instanceof Error && inner.message !== "") throw inner;
+          }
+        }
+        throw new Error("The server didn't respond as expected.");
+      }
+
+      if (!data?.ok) throw new Error(describeFailure(data));
+      return data;
+    },
+    [officeSlug],
+  );
+
+  // -------------------------------------------------------------------
+  // Consent forms live in their own Edge Function - it reads OpenDental
+  // sheetdefs plus Dental OS's own chart_tiles/chart_categories, and
+  // neither of the other two functions has a reason to know about
+  // either.
+  // -------------------------------------------------------------------
+  const callConsent = useCallback(
+    async (payload: Record<string, unknown>) => {
+      const supabase = createClient();
+      const { data, error } = await supabase.functions.invoke("od-consent", {
         body: { office: officeSlug, ...payload },
       });
 
@@ -2566,6 +2625,102 @@ export default function ChartPage() {
     setSelected((previous) =>
       previous.size > 0 ? new Set() : new Set(planRows.map((r) => r.od_id))
     );
+  }
+
+  // Every distinct tooth on the ticked rows, in the order OpenDental's
+  // own tooth numbering runs - the prefill for a toothNum field. Rows
+  // with no tooth (a whole-mouth or non-per-tooth procedure) are simply
+  // left out rather than shown as blank entries in the list.
+  function toothCandidatesFor(rows: PlanRow[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const row of rows) {
+      if (row.tooth === "" || seen.has(row.tooth)) continue;
+      seen.add(row.tooth);
+      out.push(row.tooth);
+    }
+    return out;
+  }
+
+  // Opens the consent-form picker for whatever is currently ticked, and
+  // asks od-consent which form (if any) matches. Re-run whenever the
+  // language toggle changes, since the office's Spanish forms are a
+  // separate set of sheetdefs, not a translation applied in the app.
+  async function loadConsentForms(procCodes: string[], language: "en" | "es") {
+    setConsentPicker((prev) =>
+      prev === null
+        ? null
+        : { ...prev, loading: true, error: "" }
+    );
+    try {
+      const data = await callConsent({
+        action: "list_forms",
+        proc_codes: procCodes,
+        language,
+      });
+      setConsentPicker((prev) => {
+        if (prev === null) return null;
+        const forms = (data.forms ?? []) as ConsentForm[];
+        const defaultNum = (data.default_sheet_def_num ?? null) as number | null;
+        const chosen = forms.find((f) => f.sheet_def_num === defaultNum) ?? null;
+        return {
+          ...prev,
+          loading: false,
+          language,
+          forms,
+          targetCategory: (data.target_category ?? null) as string | null,
+          chosenSheetDefNum: defaultNum,
+          toothValue: chosen?.field === "toothNum"
+            ? prev.toothCandidates.join(", ")
+            : "",
+        };
+      });
+    } catch (caught) {
+      setConsentPicker((prev) =>
+        prev === null
+          ? null
+          : {
+            ...prev,
+            loading: false,
+            error: caught instanceof Error
+              ? caught.message
+              : "Couldn't read the consent forms.",
+          }
+      );
+    }
+  }
+
+  function openConsentPicker() {
+    const rows = selectedRows;
+    if (rows.length === 0) return;
+    const procCodes = rows.map((r) => r.proc_code);
+    setConsentPicker({
+      procCodes,
+      toothCandidates: toothCandidatesFor(rows),
+      language: "en",
+      loading: true,
+      error: "",
+      forms: [],
+      targetCategory: null,
+      chosenSheetDefNum: null,
+      toothValue: "",
+    });
+    void loadConsentForms(procCodes, "en");
+  }
+
+  // Switching the chosen form re-decides the tooth prefill: a form with
+  // no toothNum field has nothing to prefill, and picking a different
+  // toothNum form should not keep whatever was typed for the last one.
+  function chooseConsentForm(sheetDefNum: number) {
+    setConsentPicker((prev) => {
+      if (prev === null) return null;
+      const form = prev.forms.find((f) => f.sheet_def_num === sheetDefNum) ?? null;
+      return {
+        ...prev,
+        chosenSheetDefNum: sheetDefNum,
+        toothValue: form?.field === "toothNum" ? prev.toothCandidates.join(", ") : "",
+      };
+    });
   }
 
   // One OpenDental call per procedure: there is no batch endpoint, and
@@ -4898,6 +5053,16 @@ export default function ChartPage() {
               </button>
             )}
 
+            <button
+              type="button"
+              onClick={openConsentPicker}
+              disabled={selected.size === 0}
+              className="rounded-lg border border-[#2C4E54] px-4 py-1.5 text-xs font-semibold hover:bg-[#193034] disabled:opacity-40"
+              title="Pick a consent form to sign for the ticked procedures"
+            >
+              Consent {selected.size > 0 ? `(${selected.size})` : ""}
+            </button>
+
             <span className="font-mono text-xs text-[#8AA6AB]">
               {planLoading
                 ? "reading…"
@@ -5411,6 +5576,137 @@ export default function ChartPage() {
                       : pendingAction.kind === "dx"
                         ? "Set diagnosis"
                         : "Set priority"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Consent-form picker. This screen only picks the form and
+            shows the tooth prefill - signing, filing to Imaging, and
+            the procedure note are not built yet. targetCategory being
+            null just means the ticked procedures span more than one
+            chart_tiles category (or none), so nothing is pre-selected;
+            it is not an error. */}
+        {consentPicker !== null && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+            <div className="w-full max-w-lg overflow-hidden rounded-2xl border border-[#2C4E54] bg-[#122326]">
+              <div className="flex items-center justify-between border-b border-[#2C4E54] px-5 py-3">
+                <div>
+                  <h3 className="text-[13px] font-bold tracking-[0.06em] uppercase">
+                    Consent form
+                  </h3>
+                  <p className="mt-1 text-xs text-[#8AA6AB]">
+                    {consentPicker.procCodes.length} procedure
+                    {consentPicker.procCodes.length === 1 ? "" : "s"} ticked
+                    {consentPicker.targetCategory !== null
+                      ? ` · matched by "${consentPicker.targetCategory}"`
+                      : ""}
+                  </p>
+                </div>
+
+                <div className="flex overflow-hidden rounded-lg border border-[#2C4E54] text-xs">
+                  {(["en", "es"] as const).map((lang) => (
+                    <button
+                      key={lang}
+                      type="button"
+                      onClick={() => {
+                        if (lang === consentPicker.language) return;
+                        setConsentPicker((prev) =>
+                          prev === null ? null : { ...prev, language: lang }
+                        );
+                        void loadConsentForms(consentPicker.procCodes, lang);
+                      }}
+                      className={`px-3 py-1.5 font-semibold ${
+                        consentPicker.language === lang
+                          ? "bg-[#F0A93B] text-[#0B1719]"
+                          : "hover:bg-[#193034]"
+                      }`}
+                    >
+                      {lang === "en" ? "English" : "Español"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {consentPicker.loading && (
+                <p className="px-5 py-6 text-sm text-[#8AA6AB]">Reading…</p>
+              )}
+
+              {!consentPicker.loading && consentPicker.error !== "" && (
+                <p className="px-5 py-4 text-sm text-[#E4674F]">{consentPicker.error}</p>
+              )}
+
+              {!consentPicker.loading && consentPicker.error === "" && (
+                <>
+                  <ul className="max-h-72 divide-y divide-[#2C4E54] overflow-y-auto">
+                    {consentPicker.forms.map((form) => (
+                      <li key={form.sheet_def_num}>
+                        <label className="flex cursor-pointer items-center gap-3 px-5 py-2.5 text-sm hover:bg-[#193034]">
+                          <input
+                            type="radio"
+                            name="consent-form"
+                            checked={consentPicker.chosenSheetDefNum === form.sheet_def_num}
+                            onChange={() => chooseConsentForm(form.sheet_def_num)}
+                            className="h-4 w-4 accent-[#F0A93B]"
+                          />
+                          <span className="flex-1 text-[#EDF3F1]">{form.description}</span>
+                          {form.field !== null && (
+                            <span className="font-mono text-[10px] uppercase text-[#8AA6AB]">
+                              {form.field === "toothNum" ? "tooth #" : "misc"}
+                            </span>
+                          )}
+                        </label>
+                      </li>
+                    ))}
+                    {consentPicker.forms.length === 0 && (
+                      <li className="px-5 py-6 text-sm text-[#8AA6AB]">
+                        No consent forms found for this office and language.
+                      </li>
+                    )}
+                  </ul>
+
+                  {consentPicker.chosenSheetDefNum !== null && (() => {
+                    const chosen = consentPicker.forms.find(
+                      (f) => f.sheet_def_num === consentPicker.chosenSheetDefNum,
+                    );
+                    if (chosen?.field !== "toothNum") return null;
+                    return (
+                      <div className="border-t border-[#2C4E54] px-5 py-3">
+                        <label className="text-[11px] uppercase tracking-wide text-[#8AA6AB]">
+                          Tooth Number(s)
+                        </label>
+                        <input
+                          type="text"
+                          value={consentPicker.toothValue}
+                          onChange={(e) =>
+                            setConsentPicker((prev) =>
+                              prev === null ? null : { ...prev, toothValue: e.target.value }
+                            )
+                          }
+                          className="mt-1 w-full rounded-lg border border-[#2C4E54] bg-[#0B1719] px-3 py-2 text-sm text-[#EDF3F1] focus:border-[#F0A93B] focus:outline-none"
+                        />
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+
+              <div className="flex gap-2 border-t border-[#2C4E54] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setConsentPicker(null)}
+                  className="flex-1 rounded-lg border border-[#2C4E54] px-4 py-2 text-sm hover:bg-[#193034]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled
+                  title="Signing, filing to Imaging, and the procedure note are not built yet"
+                  className="flex-1 rounded-lg bg-[#F0A93B] px-4 py-2 text-sm font-semibold text-[#0B1719] disabled:opacity-40"
+                >
+                  Continue…
                 </button>
               </div>
             </div>

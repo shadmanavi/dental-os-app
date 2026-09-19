@@ -1,10 +1,19 @@
 "use client";
 
-// Chairside charting — v23
+// Chairside charting — v24
 // A tablet screen for recording existing conditions and diagnosed
 // treatment straight into OpenDental from the operatory.
 //
 // Changelog:
+//   v24 The Assistant dropdown reads od-plan v15's assistants — userod
+//       (system logins), not the employee table. v23's error surfacing
+//       showed nothing because there was nothing to show: the office's
+//       employee table genuinely returns zero rows, since that
+//       OpenDental module is unused there. Confirmed live rather than
+//       guessed at twice: the same "no error, still empty" report
+//       after v23 shipped is what pointed at an empty result rather
+//       than a hidden failure.
+//
 //   v23 The Assistant dropdown's own failure is no longer invisible.
 //
 //       Shad opened a note and found the dropdown empty but for
@@ -1280,11 +1289,12 @@ type Presenter = {
   name: string;
 };
 
-// od-plan v14's "assistants" action: the office's employee roster
-// (not userod), because an assistant does not need her own OpenDental
-// login to be named on a procedure note.
+// od-plan v15's "assistants" action: userod joined to employee for a
+// nicer name where one exists. v14 read employee alone, which came
+// back empty at the office this was tried on — the table just isn't
+// used there.
 type Assistant = {
-  employee_num: number;
+  id: number;
   name: string;
 };
 
@@ -1757,11 +1767,11 @@ export default function ChartPage() {
   const [presenters, setPresenters] = useState<Presenter[]>([]);
   const [presenterNum, setPresenterNum] = useState<number | null>(null);
 
-  // The office's employee roster, for the note editor's Assistant
+  // The office's staff roster, for the note editor's Assistant
   // picker. Read once per office, alongside presenters.
   const [assistants, setAssistants] = useState<Assistant[]>([]);
   // Surfaced rather than swallowed: an empty dropdown with no error
-  // looks identical to "this office has no employees," which is
+  // looks identical to "this office has no staff," which is
   // never actually true, so a silent failure here is indistinguishable
   // from nothing being wrong.
   const [assistantsError, setAssistantsError] = useState("");
@@ -5249,7 +5259,7 @@ export default function ChartPage() {
                           >
                             <option value="">— none —</option>
                             {assistants.map((a) => (
-                              <option key={a.employee_num} value={a.name}>
+                              <option key={a.id} value={a.name}>
                                 {a.name}
                               </option>
                             ))}

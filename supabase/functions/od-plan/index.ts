@@ -6,7 +6,7 @@
 // the treatment coordinator and the patient looking at one screen.
 //
 // Deploy path: supabase/functions/od-plan/index.ts
-// Version: 14
+// Version: 15
 //
 // Actions:
 //   { "office":"downey", "action":"plan", "pat_num":17 }
@@ -26,6 +26,19 @@
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v15 assistants reads userod, not employee.
+//
+//       Tried live at Downey: the employee table came back empty —
+//       zero rows, not a query failure — because the office has
+//       never used OpenDental's payroll/HR module, so nobody is
+//       recorded there at all. userod is what od-staff-login's own
+//       username list already proved has real names for this office
+//       (37 of them), so assistants now reads that instead, joined to
+//       employee for a nicer full name on the rows where one exists.
+//       The response's id field changed meaning (UserNum, not
+//       EmployeeNum) — harmless, since nothing had shipped depending
+//       on the old one.
 //
 //   v14 assistants — the office's own employee roster, for a dropdown.
 //
@@ -716,16 +729,25 @@ Deno.serve(async (req: Request) => {
   // need her own OpenDental login to have been the one in the chair.
   // ===================================================================
   if (action === "assistants") {
+    // employee (OpenDental's payroll/HR roster) came back empty at
+    // the office this was first tried on — not a query failure, the
+    // table is simply unused there, which is common when an office
+    // never touches that module. userod (system logins) is what
+    // od-staff-login's own username list already proved has real
+    // names, so this reads the same table, joined to employee for a
+    // nicer full name where one happens to exist.
     const { rows, failed } = await shortQueryAll(
       auth,
-      `SELECT EmployeeNum, LName, FName FROM employee ` +
-        `WHERE IsHidden = 0 ORDER BY LName, FName`,
+      `SELECT u.UserNum, u.UserName, ` +
+        `TRIM(CONCAT(COALESCE(e.FName, ''), ' ', COALESCE(e.LName, ''))) AS FullName ` +
+        `FROM userod u LEFT JOIN employee e ON e.EmployeeNum = u.EmployeeNum ` +
+        `WHERE u.IsHidden = 0 ORDER BY u.UserName`,
     );
 
     if (failed !== null) {
       return json({
         ok: false,
-        error: "OpenDental could not read this office's employees.",
+        error: "OpenDental could not read this office's users.",
         detail: failed.body,
       }, 502);
     }
@@ -734,10 +756,14 @@ Deno.serve(async (req: Request) => {
       ok: true,
       office: officeRow.name,
       count: rows.length,
-      assistants: rows.map((r) => ({
-        employee_num: Number(r.EmployeeNum ?? 0),
-        name: `${String(r.FName ?? "").trim()} ${String(r.LName ?? "").trim()}`.trim(),
-      })).filter((e) => e.employee_num > 0 && e.name !== ""),
+      assistants: rows.map((r) => {
+        const full = String(r.FullName ?? "").trim();
+        const userName = String(r.UserName ?? "").trim();
+        return {
+          id: Number(r.UserNum ?? 0),
+          name: full !== "" ? full : userName,
+        };
+      }).filter((e) => e.id > 0 && e.name !== ""),
     });
   }
 

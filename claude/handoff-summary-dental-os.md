@@ -79,23 +79,30 @@ the last one.
 3. **Consent-form signature storage matching Topaz** (`FROM-CHAT-2026-09-18-B.md`, still sitting at the repo root, not re-read this session) — confirmed the API cannot write a real signature into a SigBox field on any OpenDental version. Down to: a desktop-side agent that saves through OpenDental itself, or accepting a PDF-in-Imaging format instead of true Topaz parity. Shad's call.
 4. **Maria's 3 unscoped tablet asks** — select-all, recording who took the pictures/x-rays, and a prognosis-notes field. None have enough detail yet to build; need a few sentences each from Shad or Maria.
 5. **Should `sync` guess a starting role from OpenDental's own user groups** (`userod.UserGroupNum`) instead of defaulting everyone to front_desk? Offered, not yet answered.
+6. **Network access control — design agreed 19 Sep, deliberately not built yet.** Shad explicitly asked to hold this until the office is closed, since it touches login and could lock someone out mid-appointment if something goes wrong live. The agreed design:
+   - **Two ways in, either is enough:** an approved-office-IP list (covers every device that never leaves the building, no per-device approval needed), or an approved-device token (a long-lived random secret cookie issued to a browser once it's approved — the honest web-platform equivalent of what TeamViewer's own "trusted device" feature does under the hood; it identifies a specific browser, not physical hardware, so clearing cookies/switching browsers/incognito always counts as a new device needing re-approval).
+   - **Anything matching neither gets blocked, and an email goes to Shad** naming the IP, browser, and time, with an Approve / Deny link. The blocked device already holds its own pending token from the moment it first tried, so Shad can approve from any device (his laptop, not necessarily the blocked phone) — the blocked device just needs to retry once approval lands.
+   - **Needs an admin screen to list and revoke approved devices** — a lost/stolen phone should be killable immediately, not trusted forever because it was approved once.
+   - **Real new dependency: no email-sending capability exists anywhere in this app yet.** Needs an email provider set up (Resend suggested, not yet chosen) before the alert side can work at all.
+   - **Next step:** build this the evening the office is closed, per Shad's instruction — confirm the exact time with him before starting, and confirm the email provider choice at the same time.
 
 **Group 3 — verification, no new code**
 
-6. **KPI dashboard numbers** — still not walked through against Maria's actual workbook for a settled month. Likeliest spots to need tuning: which exam codes count as New vs Recall, and whether the Adj row matches what her "-Adj" line represents.
-7. **Production Dashboard numbers** — NET production + Collected (od-production v6, since 18 Sep) was proved to the penny against one provider's Annual Production and Income report; worth a second look across providers now that other offices' staff will actually be looking at it through their own logins.
-8. **NH/NE no-RDH-day question** — Maywood 13 August showed 29 NH/NE that look like doctor production in hygiene chairs on a no-RDH day. Handoff doc has said "Shad is reviewing this with Maria, 29 August" for three weeks now — check whether that happened and what was decided.
+7. **KPI dashboard numbers** — still not walked through against Maria's actual workbook for a settled month. Likeliest spots to need tuning: which exam codes count as New vs Recall, and whether the Adj row matches what her "-Adj" line represents.
+8. **Production Dashboard numbers** — NET production + Collected (od-production v6, since 18 Sep) was proved to the penny against one provider's Annual Production and Income report; worth a second look across providers now that other offices' staff will actually be looking at it through their own logins.
+9. **NH/NE no-RDH-day question** — Maywood 13 August showed 29 NH/NE that look like doctor production in hygiene chairs on a no-RDH day. Handoff doc has said "Shad is reviewing this with Maria, 29 August" for three weeks now — check whether that happened and what was decided.
 
 **Group 4 — standalone, external dependency, no urgency**
 
-9. **Guardian's fee schedule** — the copy on file is a fax with unreadable scanned pages (4–8). Need a real PDF from Guardian's provider portal.
-10. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call on timing.
-11. **Session list layman's term** — deliberately skipped, would cost an extra OpenDental call per patient open.
+10. **Guardian's fee schedule** — the copy on file is a fax with unreadable scanned pages (4–8). Need a real PDF from Guardian's provider portal.
+11. **The bundled chart build, tested with the OpenDental upgrade** — Shad's call on timing.
+12. **Session list layman's term** — deliberately skipped, would cost an extra OpenDental call per patient open.
 
 **Done since the list above was last written, dropped from it:**
 - ~~Denture tiles not appearing~~ — confirmed working as designed (both quadrants of an arch needed for full/immediate dentures); no bug.
-- ~~Dental assistant on a procedure~~ — built: a dropdown (od-plan v15, reading `userod`) on the note editor writes "Assistant: Name" as the note's own first line.
-- ~~OpenDental-username login~~ — built (`od-staff-login`), including a username dropdown mirroring OpenDental's own login screen, self-service password change, and a `/admin/users` screen for running `sync`, resetting a password, or changing someone's role. A real bug on the first live run (a database trigger collision) broke 37 accounts on creation; fixed, cleaned up, and confirmed working by Shad.
+- ~~Dental assistant on a procedure~~ — built: a dropdown on the note editor writes "Assistant: Name" as the note's own first line. Its source moved from `employee` (od-plan v14, came back empty — that OpenDental module is unused at this office) to `userod` (od-plan v15, proven to have real names).
+- ~~OpenDental-username login~~ — built (`od-staff-login`), including self-service password change and a `/admin/users` screen for running `sync`, resetting a password, or changing someone's role. A real bug on the first live run (a database trigger collision) broke 37 accounts on creation; fixed, cleaned up, and confirmed working by Shad.
+- ~~Login screen exposed the full staff roster~~ — the v3 username dropdown, fed by a live unauthenticated read, showed every staff member's name to anyone who opened the page. Reverted to a plain text field; the `list_usernames` action was deleted outright, not just left unused, since the endpoint itself was the exposure. Caught by Shad, not found proactively.
 - ~~Password-matching against OpenDental's own table~~ — closed, will not be revisited (see [[dental-os-auth-design]] memory): OpenDental's API has no login-validation endpoint and never exposes a password hash: reusing the username with an app-owned password is the design.
 - ~~Downey D9988 / Maywood D9955a / Maywood M9955~~ — removed from the list at Shad's instruction (19 Sep); not otherwise resolved, just no longer tracked here.
 - ~~Mission Hills / Pico Rivera absent from the KPI page~~ — removed at Shad's instruction; those offices are no longer his company's, not a gap to fix.

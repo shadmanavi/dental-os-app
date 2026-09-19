@@ -8,17 +8,27 @@
 // back to the OpenDental user it came from).
 //
 // Deploy path: supabase/functions/od-staff-login/index.ts
-// Version: 3
+// Version: 4
 //
 // Actions:
 //   { "action":"list_offices" }
-//   { "office":"downey", "action":"list_usernames" }
 //   { "office":"downey", "action":"sync" }
 //   { "office":"downey", "action":"cleanup_orphans" }
 //   { "office":"downey", "action":"reset_password", "od_username":"cduong" }
 //
 // ---------------------------------------------------------------------
 // Changelog
+//
+//   v4  list_usernames removed outright, not just unused.
+//
+//       It answered with no sign-in required, by design — the same
+//       choice list_offices makes, and the right one for office names.
+//       For a full staff roster it was the wrong call: anyone who
+//       found this endpoint directly, whether or not the login page
+//       still called it, could read every visible username at an
+//       office with no account of their own. The login page's
+//       Username field goes back to plain text (v5 there) rather than
+//       a dropdown fed by this.
 //
 //   v3  Fixed a real bug in sync, and added cleanup_orphans for the
 //       accounts it already broke.
@@ -263,68 +273,6 @@ Deno.serve(async (req: Request) => {
     }
 
     return json({ ok: true, offices: data ?? [] });
-  }
-
-  // ===================================================================
-  // list_usernames — the login page's own dropdown, live off
-  // OpenDental. No sign-in exists yet here either; see the changelog
-  // entry above for why that is a deliberate choice, not an oversight.
-  // ===================================================================
-  if (action === "list_usernames") {
-    const officeSlug = (body.office ?? "").toLowerCase().trim();
-    if (officeSlug === "") {
-      return json({ ok: false, error: "Provide office." }, 400);
-    }
-
-    const { data: officeRow, error: officeError } = await serviceRole
-      .from("offices")
-      .select("id, slug, opendental_customer_key_name, is_active")
-      .eq("slug", officeSlug)
-      .maybeSingle();
-
-    if (officeError) {
-      return json({ ok: false, error: `Office lookup failed: ${officeError.message}` }, 500);
-    }
-    if (!officeRow || officeRow.is_active !== true) {
-      return json({ ok: false, error: "That office was not found or is inactive." }, 404);
-    }
-
-    const secretName = officeRow.opendental_customer_key_name ?? "";
-    if (!ALLOWED_SECRET_NAMES.has(secretName)) {
-      return json({ ok: false, error: "This office has no recognized OpenDental key." }, 500);
-    }
-
-    const developerKey = Deno.env.get("OD_DEVELOPER_KEY");
-    const customerKey = Deno.env.get(secretName);
-    if (!developerKey || !customerKey) {
-      return json({ ok: false, error: "Missing Edge Function secrets." }, 500);
-    }
-
-    const { rows, failed } = await shortQueryAll(
-      `ODFHIR ${developerKey}/${customerKey}`,
-      `SELECT u.UserName, ` +
-        `TRIM(CONCAT(COALESCE(e.FName, ''), ' ', COALESCE(e.LName, ''))) AS FullName ` +
-        `FROM userod u LEFT JOIN employee e ON e.EmployeeNum = u.EmployeeNum ` +
-        `WHERE u.IsHidden = 0 ORDER BY u.UserName`,
-    );
-
-    if (failed !== null) {
-      return json({
-        ok: false,
-        error: "OpenDental could not list its users.",
-        detail: failed.body,
-      }, 502);
-    }
-
-    return json({
-      ok: true,
-      users: rows
-        .map((r) => ({
-          od_username: String(r.UserName ?? "").trim(),
-          full_name: String(r.FullName ?? "").trim(),
-        }))
-        .filter((u) => u.od_username !== ""),
-    });
   }
 
   // ---- Every other action requires a signed-in office admin. ----
@@ -686,6 +634,6 @@ Deno.serve(async (req: Request) => {
 
   return json({
     ok: false,
-    error: "action must be list_offices, list_usernames, sync, cleanup_orphans, or reset_password.",
+    error: "action must be list_offices, sync, cleanup_orphans, or reset_password.",
   }, 400);
 });

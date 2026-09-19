@@ -1,10 +1,23 @@
 "use client";
 
-// Sign in — v4
+// Sign in — v5
 // Office + OpenDental username + password, against Supabase Auth. On
 // success, sends the user to the home page.
 //
 // Changelog:
+//   v5  The username goes back to being typed, not picked.
+//
+//       v3's dropdown, fed by a live OpenDental read, meant anyone who
+//       opened this page — no account needed — saw the office's full
+//       staff roster by name. Shad caught it as a real exposure, not
+//       a nice-to-have: a login screen should not be handing out who
+//       works where. The username field is plain text again, and
+//       od-staff-login's `list_usernames` action is gone outright,
+//       not just unused — a live, unauthenticated endpoint that lists
+//       real names is the exposure, whether or not this page still
+//       calls it. The office picker stays: a practice's locations are
+//       not the same kind of information as its staff list.
+//
 //   v4  An email fallback, because v3 nearly locked out the one
 //       account that predates this whole feature.
 //
@@ -21,17 +34,8 @@
 //       uses the office + username picker above it; this exists for
 //       accounts that came from somewhere else.
 //
-//   v3  The username field becomes a dropdown, live off OpenDental —
-//       the same shape as OpenDental's own login screen, rather than
-//       a free-text box asking staff to remember exact spelling and
-//       case. Fed by od-staff-login v2's `list_usernames`, read fresh
-//       whenever the office changes. This is a deliberate trade: the
-//       roster is now visible on the login screen before anyone signs
-//       in, exactly as it would be standing at an office PC's own
-//       OpenDental prompt, in exchange for staff never having to type
-//       a username at all. A username with no matching account yet
-//       (not synced) still selects and still fails to sign in with
-//       the ordinary generic message — nothing about that changed.
+//   v3  The username field becomes a dropdown, live off OpenDental.
+//       Reverted in v5 — see above.
 //
 //   v2  Username, not email.
 //
@@ -56,7 +60,6 @@ import { useRouter } from "next/navigation";
 import { createClient } from "../../lib/supabase/client";
 
 type Office = { slug: string; name: string };
-type StaffUser = { od_username: string; full_name: string };
 
 // Mirrors od-staff-login's normalizeUsername() / internalEmailFor()
 // exactly. If this drifts from that function, every provisioned
@@ -71,14 +74,11 @@ export default function LoginPage() {
 
   const [offices, setOffices] = useState<Office[]>([]);
   const [officeSlug, setOfficeSlug] = useState("");
-  const [users, setUsers] = useState<StaffUser[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [officesError, setOfficesError] = useState("");
-  const [usersError, setUsersError] = useState("");
-  const [usersLoading, setUsersLoading] = useState(false);
 
   // The v1 fallback: a raw email, for an account that did not come
   // from an OpenDental sync.
@@ -115,47 +115,6 @@ export default function LoginPage() {
       active = false;
     };
   }, []);
-
-  // The username dropdown is read fresh every time the office
-  // changes — a different office's roster is a different list, and
-  // this is exactly the round trip OpenDental's own login screen
-  // makes when a different clinic is chosen.
-  useEffect(() => {
-    if (officeSlug === "") return;
-
-    let active = true;
-    setUsers([]);
-    setUsername("");
-    setUsersError("");
-    setUsersLoading(true);
-
-    (async () => {
-      try {
-        const supabase = createClient();
-        const { data, error: fnError } = await supabase.functions.invoke(
-          "od-staff-login",
-          { body: { action: "list_usernames", office: officeSlug } },
-        );
-
-        if (!active) return;
-
-        if (fnError || !data?.ok) {
-          setUsersError("Couldn't load this office's user list.");
-          return;
-        }
-
-        setUsers((data.users ?? []) as StaffUser[]);
-      } catch {
-        if (active) setUsersError("Couldn't load this office's user list.");
-      } finally {
-        if (active) setUsersLoading(false);
-      }
-    })();
-
-    return () => {
-      active = false;
-    };
-  }, [officeSlug]);
 
   async function signIn() {
     if (useEmail) {
@@ -255,25 +214,20 @@ export default function LoginPage() {
                 <label htmlFor="username" className="block text-sm font-medium text-[#1C1C1A]">
                   Username
                 </label>
-                <select
+                <input
                   id="username"
+                  type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  disabled={usersLoading || users.length === 0}
-                  className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none disabled:bg-[#F7F6F3]"
-                >
-                  <option value="">
-                    {usersLoading ? "Loading…" : "Choose your name"}
-                  </option>
-                  {users.map((u) => (
-                    <option key={u.od_username} value={u.od_username}>
-                      {u.full_name !== "" ? `${u.full_name} (${u.od_username})` : u.od_username}
-                    </option>
-                  ))}
-                </select>
-                {usersError !== "" && (
-                  <p className="mt-1.5 text-xs text-[#A4361F]">{usersError}</p>
-                )}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") signIn();
+                  }}
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  placeholder="Your OpenDental username"
+                  className="mt-2 w-full rounded-lg border border-[#D8D6CF] bg-white px-3 py-2.5 text-[15px] text-[#1C1C1A] focus:border-[#0F6E56] focus:ring-2 focus:ring-[#0F6E56]/20 focus:outline-none"
+                />
               </div>
             </>
           )}

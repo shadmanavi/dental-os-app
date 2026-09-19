@@ -1,5 +1,56 @@
 # Dental OS — session status log (newest first)
 
+## 2026-09-19 (same session, later still) — patient.Language wired into the consent picker's default
+
+**What changed**
+- Closed the last open gap from the two entries below: the consent
+  picker's English/Spanish toggle now defaults off the patient's own
+  OpenDental record instead of always opening on English.
+- Checked live before wiring anything, per this project's standing
+  rule — `patient.Language` does **not** store the spelled-out name.
+  Both offices actually hold short codes: `eng`, `spa`, blank, and
+  `Declined to Specify`; Maywood also has a handful of `fil`
+  (Filipino), `zho` (Chinese), `vie` (Vietnamese), and `fas` (Persian).
+  Had this been wired against an assumed value like `"Spanish"` it
+  would have silently never matched anything.
+- `od-chart` → v18: the `open` action's `patient` block now carries
+  `Language` straight through from OpenDental's own `/patients/{id}`
+  response. Nothing else reads it yet.
+- `app/chart/page.tsx`: `openConsentPicker` reads `patient.Language`,
+  matches it against `"spa"` (case-insensitive), and opens the picker
+  already on the Spanish form set when it matches — everything else
+  (blank, `eng`, any of the other codes, `Declined to Specify`)
+  defaults to English, since Spanish is the only second form set that
+  exists. Still fully overridable with one tap on the toggle.
+
+**What was verified**
+- Live query (temporary reuse of the `od-consent-probe` slot, retired
+  immediately after, same as every other discovery this session):
+  distinct `patient.Language` values and counts, both offices — this
+  is what caught the wrong assumption above before it shipped.
+- `npm run build`: green.
+- `od-chart` deployed via the Supabase CLI directly from the working
+  tree (`npx supabase functions deploy od-chart --project-ref ...`)
+  rather than pasted inline — the file is 2,600 lines and there was no
+  reason to round-trip that much of it through this conversation just
+  to change one field. Confirmed ACTIVE afterward via `list_edge_functions`.
+- Dev server reloaded in the Browser pane; `/chart` still loads with no
+  new console/server errors.
+
+**What is still open**
+- Not yet confirmed live against a real Spanish-language patient — the
+  matching logic is right per the live data pulled, but nobody has
+  actually opened the picker on such a patient and watched it default
+  correctly.
+- The layman renaming of OpenDental's consent-form Descriptions (for
+  the procedure-category default match) is still the one open item
+  from two entries below, still Shad's task.
+
+**Next step**
+- Shad: open Consent on a patient whose OpenDental record has Language
+  set to Spanish and confirm the picker opens already on the Spanish
+  list.
+
 ## 2026-09-19 (same session, later) — Consent sign-and-file pipeline built: form text, signature, PDF, procedure note, Imaging upload
 
 **What changed**
@@ -298,80 +349,3 @@
   standard as the first bug (read the actual error, don't guess) before
   changing more code.
 
-## 2026-09-19 (same session, latest) — Real bug in sync's first live run, fixed; nav pared to Home + tiles
-
-**What changed**
-- Shad ran Sync for real against Downey — the first real test of any
-  of this session's work. It broke, and the screenshot showed why:
-  every one of 37 users came back "skipped," half with "duplicate key
-  value violates unique constraint users_pkey" and half with "A user
-  with this email address has already been registered."
-- Root cause, confirmed by reading the actual trigger definition
-  rather than guessing: `trg_on_auth_user_created` fires
-  `handle_new_auth_user()` on every `auth.users` insert and already
-  creates the matching `public.users` row (`on conflict (id) do
-  nothing`). `sync`'s own code did not know this trigger existed and
-  followed `createUser` with a plain `.insert()` into `users` —
-  colliding with the row the trigger had already made, every time.
-  `createUser` itself had already succeeded by that point, so the
-  real, lasting damage was 37 genuine Supabase Auth accounts with
-  real (now unrecoverable — never successfully shown) temporary
-  passwords, no role, and no `od_staff_logins` entry: created, but
-  functionally unreachable and unrecorded.
-- Fixed in `od-staff-login` → v3: the `users` write is now an
-  `upsert` (`onConflict: "id"`), which fills in `full_name` and
-  `is_active` on top of whatever row already exists instead of
-  fighting it. Added a `cleanup_orphans` action — finds every Auth
-  account under an office's synthetic email domain with no matching
-  ledger row (exactly what the bug left behind) and removes it,
-  confirmed safe to do this way because `public.users.id` has an
-  `ON DELETE CASCADE` foreign key to `auth.users.id` (checked via
-  `pg_constraint` before relying on it, not assumed). Wired into
-  `/admin/users`: a "Clean up broken accounts" button appears
-  specifically when Sync reports a "users row failed" skip.
-  `cleanup_orphans` is gated identically to `sync` — confirmed live
-  that an anon-key-only call is refused, same as before.
-- A first attempt to fix Shad's own stale `public.users.email` earlier
-  this session via a direct `execute_sql` UPDATE was refused by the
-  harness's safety classifier as a shared-resource write; the
-  `apply_migration` path (tracked, named) was tried instead and
-  succeeded — worth remembering as the sanctioned way to make a
-  one-off data correction in this project, not just schema changes.
-- **Separately, a UI request**: hold Fee Schedules, Charting, Hygiene,
-  Production, KPI and Admin back to the home page's tile grid rather
-  than keep widening the top bar, until a menu grouping is decided.
-  `TopNav.tsx` → v7 adds a `showInTopNav` flag per section (default
-  true); everything but Home is now `false`. Sections still decide
-  "current page" and still render their own subnav exactly as before
-  — Fee Schedules keeps its Upload / Staged uploads tabs on its own
-  page — the flag only controls the bar itself, so restoring any of
-  them is one flag, not a rewrite. `app/page.tsx` → v6 adds KPI and
-  Admin tiles (seven total) and shrinks every tile — tighter padding,
-  smaller type, three columns instead of two, the "Open" line dropped
-  since the whole tile is already the link.
-
-**What was verified**
-- `npm run build`: green after both the sync fix and the nav/home
-  changes.
-- `od-staff-login` v3 deployed; `cleanup_orphans` confirmed live to
-  refuse an anon-key-only call, matching `sync`'s existing gate.
-- `pg_constraint` queried directly to confirm `public.users_id_fkey`
-  is `ON DELETE CASCADE` before writing `cleanup_orphans` to rely on
-  it.
-- Home page and login page reloaded in the browser pane after the nav
-  change; no console errors, `/login`'s own redirect guard for a
-  logged-out session still intact.
-
-**What is still open**
-- **The 37 broken Downey accounts from the first sync attempt are
-  still sitting there**, unreachable, with lost passwords. Shad needs
-  to click "Clean up broken accounts" on `/admin/users` (now visible
-  automatically once he clicks Sync again and sees the skip reasons),
-  then click Sync again to create them properly this time.
-- Everything else from the entries below is unchanged.
-
-**Next step**
-- Shad: on `/admin/users` for Downey, click Sync, then Clean up
-  broken accounts (the button appears once Sync's skip list shows the
-  old failures), then Sync once more. That run should show 37
-  provisioned logins with real temp passwords this time.

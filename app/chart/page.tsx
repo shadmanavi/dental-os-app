@@ -981,6 +981,10 @@ type PatientHit = {
   Preferred: string;
   Birthdate: string;
   ChartNumber: string;
+  // A short code ("eng", "spa", ...), blank, or "Declined to Specify" —
+  // OpenDental's own convention, not the spelled-out language name.
+  // Absent when talking to an od-chart older than v18.
+  Language?: string;
 };
 
 type Patient = PatientHit & { PriProv: number | null; priProvAbbr: string };
@@ -2724,9 +2728,15 @@ export default function ChartPage() {
   function openConsentPicker() {
     const rows = selectedRows;
     if (rows.length === 0) return;
+    // OpenDental's own short code, "spa" - not the spelled-out name,
+    // confirmed live. Everything else (blank, "eng", "Declined to
+    // Specify", any other language) defaults to English; only Spanish
+    // has a second set of forms to switch to.
+    const language: "en" | "es" =
+      (patient?.Language ?? "").trim().toLowerCase() === "spa" ? "es" : "en";
     setConsentPicker({
       rows,
-      language: "en",
+      language,
       loading: true,
       error: "",
       forms: [],
@@ -2743,7 +2753,7 @@ export default function ChartPage() {
       signError: "",
       filed: null,
     });
-    void loadConsentForms(rows.map((r) => r.proc_code), "en");
+    void loadConsentForms(rows.map((r) => r.proc_code), language);
   }
 
   // Switching the chosen form re-decides the tooth prefill: a form with

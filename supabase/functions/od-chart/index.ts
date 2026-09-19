@@ -6,8 +6,11 @@
 // Supabase and no PHI is written to the Dental OS database.
 //
 // Deploy path: supabase/functions/od-chart/index.ts
-// Version: 17
+// Version: 18
 // Changelog:
+//   v18 open's patient block carries Language. The consent-form
+//       picker needs it to default its English/Spanish toggle instead
+//       of always opening on English; nothing else reads it yet.
 //   v17 Providers get a display name.
 //
 //       The screens showed OpenDental's Abbr — "GP - CD" — which is
@@ -1725,6 +1728,11 @@ Deno.serve(async (req: Request) => {
         ChartNumber: p.ChartNumber ?? "",
         PriProv: p.PriProv ?? null,
         priProvAbbr: p.priProvAbbr ?? "",
+        // A short code ("eng", "spa", ...), blank, or "Declined to
+        // Specify" — confirmed live, not the spelled-out language name.
+        // The consent picker uses it to default its English/Spanish
+        // toggle; nothing else in this app reads it yet.
+        Language: p.Language ?? "",
       },
       // Read-only. Changing what a code costs is a fee schedule
       // decision and belongs in OpenDental, not at the chair.
